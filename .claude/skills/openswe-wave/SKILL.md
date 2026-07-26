@@ -7,6 +7,21 @@ description: Operate an Open SWE delivery wave with full-weight plan adjudicatio
 
 Keep plan adjudication and spot-audits at full operator weight. Use these files only to remove mechanical polling, status relay, and deterministic recovery work.
 
+## Deployment
+
+This skill deploys as a git checkout, never as copied files. Clone the repo once per
+machine and symlink the skill directory into each surface:
+
+```bash
+ln -sfn <checkout>/.claude/skills/openswe-wave ~/.claude/skills/openswe-wave
+ln -sfn <checkout>/.claude/skills/openswe-wave ~/.codex/skills/openswe-wave
+```
+
+Upgrade with `git pull`; answer "what is this machine running" with
+`git -C <checkout> rev-parse HEAD`; detect drift with `git -C <checkout> status`.
+Do not hand-copy files into the skill directories — copies are exactly how the
+installed docs went stale for a day (dogfood log, 2026-07-26).
+
 ## Required setup
 
 Run from the target repository checkout. Live commands require the named environment variables below and fail with an export instruction when one is absent.

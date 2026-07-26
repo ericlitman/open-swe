@@ -46,6 +46,20 @@ All commands below are `scripts/openswe-run` relative to this skill directory. W
 results are single JSON lines; healthy monitoring is silent. Do not poll, tail, or re-check
 between wakes — that is the token waste this skill exists to remove.
 
+## Deployment
+
+This skill deploys as a git checkout, never as copied files. Clone the repo once per
+machine and symlink both skill directories into each surface:
+
+```bash
+ln -sfn <checkout>/.claude/skills/openswe-run ~/.claude/skills/openswe-run
+ln -sfn <checkout>/.claude/skills/openswe-wave ~/.claude/skills/openswe-wave
+```
+
+(and the same into `~/.codex/skills`). The scripts resolve their wave dependencies
+from the sibling skill in the checkout, so no vendoring or copying step exists.
+Upgrade with `git pull`; provenance is `git rev-parse HEAD`; drift is `git status`.
+
 ## 0. Preflight (once)
 
 ```bash
