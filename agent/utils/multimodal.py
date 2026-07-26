@@ -79,6 +79,8 @@ def _image_auth_headers_for_url(
     if provider is None or _image_provider(current_url) != provider:
         return None
     if provider == "linear":
+        if urlparse(current_url).scheme != "https":
+            return None
         return linear_auth.headers if linear_auth else None
 
     slack_bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
