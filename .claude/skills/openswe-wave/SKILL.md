@@ -10,17 +10,22 @@ Keep plan adjudication and spot-audits at full operator weight. Use these files 
 ## Deployment
 
 This skill deploys as a git checkout, never as copied files. Clone the repo once per
-machine and symlink the skill directory into each surface:
+machine, move any existing copied install aside (`ln -sfn` will not replace a real
+directory — it creates the link inside it and the stale copy stays active), then link:
 
 ```bash
-ln -sfn <checkout>/.claude/skills/openswe-wave ~/.claude/skills/openswe-wave
-ln -sfn <checkout>/.claude/skills/openswe-wave ~/.codex/skills/openswe-wave
+dest=~/.claude/skills/openswe-wave
+[ -d "$dest" ] && [ ! -L "$dest" ] && mv "$dest" "$dest.pre-checkout"
+ln -sfn <checkout>/.claude/skills/openswe-wave "$dest"
 ```
 
-Upgrade with `git pull`; answer "what is this machine running" with
-`git -C <checkout> rev-parse HEAD`; detect drift with `git -C <checkout> status`.
-Do not hand-copy files into the skill directories — copies are exactly how the
-installed docs went stale for a day (dogfood log, 2026-07-26).
+(and the same into `${CODEX_HOME:-$HOME/.codex}/skills`.) Upgrade with
+`git -C <checkout> pull` — plain `git pull` from the target repository checkout the
+setup below has you working in would pull the wrong repo. Answer "what is this
+machine running" with `git -C <checkout> rev-parse HEAD`; detect drift with
+`git -C <checkout> status`. Do not hand-copy files into the skill directories —
+copies are exactly how the installed docs went stale for a day (dogfood log,
+2026-07-26).
 
 ## Required setup
 
