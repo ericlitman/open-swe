@@ -10,13 +10,24 @@ Run state changes go through an `@openswe` Linear comment (the product path — 
 operator-observable in the dashboard). Never create, resume, or mutate LangGraph runs via the
 SDK/API; read-only status queries are what the bundled monitor already does for you.
 
-The single exception is `approve`, which writes the plan record before it comments. A comment
-alone makes the agent implement but never transitions the plan, so the product computes the
-run merge-ineligible: the PR is opened as a **draft** and auto-merge is **never armed**, and
-neither documented recovery covers that state. `approve` therefore performs the same plan-store
-transition the dashboard's approve endpoint performs, then posts the comment — in that order,
-because eligibility is resolved once, at run creation. It fails closed: if the plan record does
-not come back `approved`, no approval comment is posted.
+The exceptions are `approve` and `reject`, which transition the plan record before they
+comment. A comment alone makes the agent act but never transitions the plan, so the product
+computes the run merge-ineligible: the PR is opened as a **draft** and auto-merge is **never
+armed**, and neither documented recovery covers that state. They therefore perform the same
+plan-store transitions the dashboard's approve/reject endpoints perform — `approved` and
+`revising` — and only then post the comment. Order matters: eligibility is resolved at run
+creation and re-checked when the PR is opened, so a later write is too late.
+
+Both fail closed. Everything that can refuse the operation — issue lookup, the placeholder
+guard, the adjudication flag — runs *before* the write, because the write is not rolled back;
+and the write itself refuses a thread with no stored plan, or a `shared`/`cancelled` one, as
+the dashboard does. `reject` returns the record to `revising` so a rejection posted after an
+approval cannot leave a rejected plan armed for auto-merge.
+
+Auto-merge also depends on two team settings the skill does not control: `auto_merge_mode`
+must be `on_plan_approval` (or `always`) **and** `require_plan_approval` must be true. With
+mode set to `on_plan_approval` while `require_plan_approval` is false, `_auto_merge_eligible`
+short-circuits and auto-merge can never arm, no matter what this skill writes.
 
 All commands below are `scripts/openswe-run` relative to this skill directory. Wakes and
 results are single JSON lines; healthy monitoring is silent. Do not poll, tail, or re-check

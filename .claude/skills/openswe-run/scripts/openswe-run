@@ -3,15 +3,16 @@
 
 Token-frugal single-run sibling of openswe-wave. Run state changes go through
 @openswe Linear comments (product path); runs are never created, resumed, or
-mutated through the LangGraph API. The one write is `approve`, which sets the
-plan record to `approved` exactly as the dashboard's approve endpoint does,
-because the comment alone leaves the run merge-ineligible (draft PR, auto-merge
+mutated through the LangGraph API. The exceptions are `approve` and `reject`,
+which transition the plan record exactly as the dashboard's endpoints do,
+because a comment alone leaves the run merge-ineligible (draft PR, auto-merge
 never armed). Every command appends evidence to <stable-root>/handoffs/.
 
-Stdlib-only. The vendored openswe_wave module is imported for its pure
-classifiers; live watching subprocesses the vendored wave-monitor under a
-resolved interpreter (control-plane venv or uv) because its live paths need
-httpx + langgraph_sdk (absent from system python3 — see dogfood log 2026-07-26).
+Stdlib-only. The openswe_wave module is imported for its pure classifiers and
+live watching subprocesses wave-monitor, both taken from this skill's vendored
+copies or, in a checkout, the sibling openswe-wave. They run under a resolved
+interpreter (control-plane venv or uv) because their live paths need httpx +
+langgraph_sdk, absent from system python3 (see dogfood log 2026-07-26).
 """
 
 from __future__ import annotations
@@ -247,8 +248,14 @@ def resolve_monitor_python() -> list[str]:
         # --no-project: this runs from the target repo checkout, and without it uv
         # resolves that repo's pyproject first and fails before installing these.
         return [
-            "uv", "run", "--no-project",
-            "--with", "httpx", "--with", "langgraph-sdk", "python",
+            "uv",
+            "run",
+            "--no-project",
+            "--with",
+            "httpx",
+            "--with",
+            "langgraph-sdk",
+            "python",
         ]
     raise RunError(
         "No interpreter with httpx + langgraph_sdk. Fix one of: "
@@ -257,12 +264,22 @@ def resolve_monitor_python() -> list[str]:
     )
 
 
-PLAN_APPROVAL_SNIPPET = r'''
+# Statuses the product refuses to transition (plan_api._reject_shared_content, and
+# its 409 on editing a settled plan). Mirrored here so this path is no more
+# permissive than the dashboard's.
+PLAN_STATUS_LOCKED = ("shared", "cancelled")
+PLAN_RESULT_SENTINEL = "OPENSWE_PLAN_RESULT "
+
+PLAN_STATUS_SNIPPET = r"""
 import asyncio, json, os
 from langgraph_sdk import get_client
 
 NAMESPACE = ("plan", "content")
-THREAD = os.environ["OPENSWE_APPROVE_THREAD"]
+SENTINEL = "OPENSWE_PLAN_RESULT "
+LOCKED = ("shared", "cancelled")
+THREAD = os.environ["OPENSWE_PLAN_THREAD"]
+STATUS = os.environ["OPENSWE_PLAN_STATUS"]
+PLAN_MODE = os.environ["OPENSWE_PLAN_MODE"] == "1"
 URL = os.environ.get("LANGGRAPH_URL") or "http://127.0.0.1:2029"
 
 
@@ -270,73 +287,133 @@ def _value(item):
     return (item.get("value") if isinstance(item, dict) else item) or {}
 
 
+class Refused(Exception):
+    pass
+
+
 async def main():
     client = get_client(url=URL)
+    # A missing item comes back as HTTP 200 with a null body, not a 404, so an
+    # absent plan is indistinguishable from an empty one here — refuse both
+    # rather than fabricate a record the product never stored.
     existing = _value(await client.store.get_item(NAMESPACE, THREAD))
     previous = existing.get("status")
-    record = {"markdown": existing.get("markdown", ""), "status": "approved"}
+    if not existing or not str(existing.get("markdown") or "").strip():
+        raise Refused(
+            "no plan record with content is stored for this thread; the agent may "
+            "have posted its plan to Linear without landing a save_plan write"
+        )
+    if previous in LOCKED:
+        raise Refused(f"refusing to transition a {previous!r} plan")
+    record = {"markdown": existing["markdown"], "status": STATUS}
     plan_file_path = existing.get("plan_file_path")
     if isinstance(plan_file_path, str) and plan_file_path:
         record["plan_file_path"] = plan_file_path
     await client.store.put_item(NAMESPACE, THREAD, record)
-    await client.threads.update(
-        thread_id=THREAD, metadata={"plan_status": "approved", "plan_mode": False}
-    )
     confirmed = _value(await client.store.get_item(NAMESPACE, THREAD)).get("status")
-    print(json.dumps({"previous": previous, "status": confirmed}))
-
-asyncio.run(main())
-'''
-
-
-def arm_plan_approval(thread_id: str) -> dict:
-    """Record the product-side plan approval before the comment that dispatches.
-
-    The @openswe comment makes the agent implement, but it never transitions the
-    plan record, so `_plan_was_approved` stays False and the run is computed
-    merge-ineligible: the PR is opened as a draft and auto-merge is never armed.
-    This writes the same record `set_plan_status(..., APPROVED)` writes. It must
-    land before the comment, because eligibility is resolved once at run creation.
-    """
-    command = [*resolve_monitor_python(), "-c", PLAN_APPROVAL_SNIPPET]
-    environ = {**os.environ, "OPENSWE_APPROVE_THREAD": thread_id}
+    # Metadata mirrors the record for the dashboard's benefit; the product treats
+    # this as best-effort (plan_store._merge_thread_metadata swallows it), and the
+    # record above is what decides eligibility. Never fail the write over it.
+    metadata_ok = True
     try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, env=environ, timeout=90
+        await client.threads.update(
+            thread_id=THREAD, metadata={"plan_status": STATUS, "plan_mode": PLAN_MODE}
         )
+    except Exception:
+        metadata_ok = False
+    print(SENTINEL + json.dumps(
+        {"previous": previous, "status": confirmed, "metadata_ok": metadata_ok}
+    ))
+
+
+try:
+    asyncio.run(main())
+except Refused as exc:
+    print(SENTINEL + json.dumps({"refused": str(exc)}))
+    raise SystemExit(3)
+"""
+
+
+def set_plan_status(thread_id: str, status: str, *, plan_mode: bool) -> dict:
+    """Transition the product's plan record, as the dashboard's endpoints do.
+
+    An @openswe comment makes the agent act but never transitions this record,
+    and the product reads it to decide `auto_merge_eligible`. Left untransitioned,
+    the run is computed merge-ineligible: the PR opens as a draft and auto-merge
+    is never armed. This writes what `set_plan_status(...)` writes in the product.
+
+    Callers must do this before the comment that dispatches: eligibility is
+    resolved at run creation (server.py `_auto_merge_eligible`) and re-checked
+    when the PR is opened (`open_pull_request`), so a later write is too late.
+    """
+    command = [*resolve_monitor_python(), "-c", PLAN_STATUS_SNIPPET]
+    environ = {
+        **os.environ,
+        "OPENSWE_PLAN_THREAD": thread_id,
+        "OPENSWE_PLAN_STATUS": status,
+        "OPENSWE_PLAN_MODE": "1" if plan_mode else "0",
+    }
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, env=environ, timeout=300)
     except subprocess.TimeoutExpired as exc:
-        raise RunError(f"Plan-approval write timed out against {thread_id}") from exc
+        raise RunError(
+            f"Plan-status write to {status!r} timed out against thread {thread_id}. "
+            "It may still have landed — re-read the plan before retrying."
+        ) from exc
+    payload = {}
+    for line in reversed(result.stdout.splitlines()):
+        if not line.startswith(PLAN_RESULT_SENTINEL):
+            continue
+        candidate = json.loads(line[len(PLAN_RESULT_SENTINEL) :])
+        if isinstance(candidate, dict):
+            payload = candidate
+            break
+    if payload.get("refused"):
+        raise RunError(f"Plan store refused the {status!r} transition: {payload['refused']}")
     if result.returncode != 0:
         raise RunError(
-            "Could not record the plan approval in the plan store, so this run would "
-            "open a draft PR and never arm auto-merge. Refusing to post an approval "
-            f"that cannot take effect. Thread {thread_id}. "
+            f"Could not set the plan record to {status!r} on thread {thread_id}, so the "
+            "run would be computed merge-ineligible. Refusing to continue. "
             f"Error: {result.stderr.strip()[-400:]}"
         )
-    payload = {}
-    for line in reversed(result.stdout.strip().splitlines()):
-        try:
-            payload = json.loads(line)
-            break
-        except json.JSONDecodeError:
-            continue
-    if payload.get("status") != "approved":
+    if payload.get("status") != status:
         raise RunError(
-            f"Plan store did not accept the approval for thread {thread_id} "
-            f"(status is {payload.get('status')!r}). Refusing to post the approval."
+            f"Plan store did not accept the {status!r} transition for thread "
+            f"{thread_id} (status is {payload.get('status')!r})."
         )
     return payload
 
 
+SIBLING_WAVE_SCRIPTS = SKILL_DIR.parent / "openswe-wave" / "scripts"
+
+
+def wave_scripts_dir() -> Path:
+    """Where the wave scripts live: vendored beside us, else the sibling skill.
+
+    Installed copies vendor them (see `install`). An in-repo checkout deliberately
+    does not — committing them would duplicate the tracked openswe-wave and
+    reintroduce the drift the installer exists to prevent — so fall back to the
+    sibling skill, which makes this skill runnable in place from a checkout.
+    """
+    if (SCRIPTS_DIR / "openswe_wave.py").is_file():
+        return SCRIPTS_DIR
+    if (SIBLING_WAVE_SCRIPTS / "openswe_wave.py").is_file():
+        return SIBLING_WAVE_SCRIPTS
+    raise RunError(
+        "openswe_wave.py is neither vendored beside this script nor present at "
+        f"{SIBLING_WAVE_SCRIPTS}. Run this skill's `install`, or check out "
+        "openswe-wave alongside it."
+    )
+
+
 def import_wave_module():
-    """Import the vendored openswe_wave (pure classifiers only; lazy net deps)."""
-    sys.path.insert(0, str(SCRIPTS_DIR))
+    """Import openswe_wave (pure classifiers only; lazy net deps)."""
+    sys.path.insert(0, str(wave_scripts_dir()))
     try:
         import openswe_wave  # noqa: PLC0415
     except ModuleNotFoundError as exc:
         raise RunError(
-            "Vendored openswe_wave.py is missing next to this script. "
-            "Run the installer: <stable-root>/skills/openswe-run/install"
+            f"openswe_wave.py was found under {wave_scripts_dir()} but could not be imported: {exc}"
         ) from exc
     return openswe_wave
 
@@ -424,7 +501,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 def _spawn_monitor(args: argparse.Namespace, issue_id: str) -> tuple[subprocess.Popen, deque]:
     command = [
         *resolve_monitor_python(),
-        str(SCRIPTS_DIR / "wave-monitor"),
+        str(wave_scripts_dir() / "wave-monitor"),
         "watch",
         "--issue-id",
         issue_id,
@@ -446,7 +523,9 @@ def _spawn_monitor(args: argparse.Namespace, issue_id: str) -> tuple[subprocess.
 
 
 def _emit_wake(ticket: str, wake: dict, source: str) -> None:
-    dogfood(ticket, "wake", f"{wake.get('wake_node')} via {source}: {wake.get('summary', '')[:200]}")
+    dogfood(
+        ticket, "wake", f"{wake.get('wake_node')} via {source}: {wake.get('summary', '')[:200]}"
+    )
     print(json.dumps(wake, sort_keys=True, default=str))
 
 
@@ -531,7 +610,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # see them first, the child is wedged (OSWE-136 signature): kill it,
                 # surface the wake ourselves, and leave the evidence in the log.
                 oldest = min(
-                    str(event.get("poll_id") or "") for wake in fresh_wakes for event in wake["evidence"]
+                    str(event.get("poll_id") or "")
+                    for wake in fresh_wakes
+                    for event in wake["evidence"]
                 )
                 dogfood(
                     args.ticket,
@@ -563,8 +644,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def _post_prepared(args: argparse.Namespace, action: str, body: str) -> int:
-    issue = resolve_issue(args.ticket)
+def _post_prepared(
+    args: argparse.Namespace, action: str, body: str, issue: dict | None = None
+) -> int:
+    issue = issue or resolve_issue(args.ticket)
     guard_placeholders(args.ticket, body, getattr(args, "force", False))
     post_comment(issue["id"], body)
     dogfood(args.ticket, "cmd", f"{action} posted on {issue['identifier']}: {body[:160]}")
@@ -582,24 +665,41 @@ def cmd_approve(args: argparse.Namespace) -> int:
     body = read_body(args)
     if "@openswe" not in body.lower():
         raise RunError("Approval must mention @openswe or the webhook will not deliver it")
+    # Everything that can reject this approval runs BEFORE the plan-record write.
+    # The write is not undone by `reject`, so a body refused after it would leave
+    # the plan approved with no dispatching comment — and the next comment on the
+    # issue, of any kind, would then run against an approved plan.
     issue = resolve_issue(args.ticket)
+    guard_placeholders(args.ticket, body, getattr(args, "force", False))
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
-    state = arm_plan_approval(thread_id)
+    state = set_plan_status(thread_id, "approved", plan_mode=False)
     dogfood(
         args.ticket,
         "cmd",
-        f"plan status {state.get('previous')!r} -> 'approved' on thread {thread_id}; "
-        "run is now auto-merge eligible",
+        f"plan record {state.get('previous')!r} -> 'approved' on thread {thread_id}"
+        + ("" if state.get("metadata_ok") else " (thread metadata mirror failed)"),
     )
-    return _post_prepared(args, "approval", body)
+    return _post_prepared(args, "approval", body, issue=issue)
 
 
 def cmd_reject(args: argparse.Namespace) -> int:
-    ensure_env(args.ticket, langgraph=False, github=False)
+    ensure_env(args.ticket, langgraph=True, github=False)
     body = read_body(args)
     if "@openswe" not in body.lower():
         raise RunError("Rejection must mention @openswe or the webhook will not deliver it")
-    return _post_prepared(args, "rejection", body)
+    issue = resolve_issue(args.ticket)
+    guard_placeholders(args.ticket, body, getattr(args, "force", False))
+    thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
+    # Send the record back to revising, as the dashboard's reject endpoint does.
+    # Without this a rejection posted after an approval would leave the plan
+    # approved, and the resulting run would arm auto-merge on a rejected plan.
+    state = set_plan_status(thread_id, "revising", plan_mode=True)
+    dogfood(
+        args.ticket,
+        "cmd",
+        f"plan record {state.get('previous')!r} -> 'revising' on thread {thread_id}",
+    )
+    return _post_prepared(args, "rejection", body, issue=issue)
 
 
 def cmd_comment(args: argparse.Namespace) -> int:

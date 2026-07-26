@@ -13,7 +13,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WAVE_SOURCE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --wave-source) WAVE_SOURCE="$2"; shift 2 ;;
+    --wave-source)
+      [[ $# -ge 2 ]] || { echo "install: --wave-source requires a directory" >&2; exit 2; }
+      WAVE_SOURCE="$2"; shift 2 ;;
     *) echo "install: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -59,18 +61,33 @@ install_to() {
   for file in $MANIFEST; do
     cp "$STAGE/$file" "$target/$file"
   done
+  # cp preserves an existing destination's mode, so re-assert the bits every
+  # documented invocation depends on rather than inheriting a stale one.
+  chmod +x "$target/scripts/openswe-run" "$target/scripts/wave-monitor"
   # Verify byte-identity of every manifest file; fail loudly on any partial copy.
   for file in $MANIFEST; do
     cmp -s "$STAGE/$file" "$target/$file" || fail "verification failed: $target/$file differs after copy"
   done
+  for file in scripts/openswe-run scripts/wave-monitor; do
+    [[ -x "$target/$file" ]] || fail "verification failed: $target/$file is not executable"
+  done
   # Nothing extra may shadow the manifest (stale files from older installs).
-  local stray
+  # Scoped to the two directories the manifest owns, and skipping dot-entries:
+  # a target that is also a checkout must keep its .git, and the sweep must not
+  # delete this installer if someone copied the source tree into place.
+  local stray relative
   while IFS= read -r stray; do
-    case " $MANIFEST " in
-      *" ${stray#"$target"/} "*) ;;
-      *) echo "install: removing stale file ${stray}" >&2; rm -f "$stray" ;;
+    relative="${stray#"$target"/}"
+    case "$relative" in
+      .*|*/.*) continue ;;
     esac
-  done < <(find "$target" -type f ! -path "*/__pycache__/*")
+    local keep=0
+    local file
+    for file in $MANIFEST; do
+      [[ "$relative" == "$file" ]] && { keep=1; break; }
+    done
+    (( keep )) || { echo "install: removing stale file ${stray}" >&2; rm -f "$stray"; }
+  done < <(find "$target/scripts" "$target/references" -type f ! -path "*/__pycache__/*" 2>/dev/null)
   rm -rf "$target/scripts/__pycache__"
 }
 
