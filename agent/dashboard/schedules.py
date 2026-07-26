@@ -13,12 +13,13 @@ from langgraph_sdk.schema import Config
 from pydantic import BaseModel, Field, field_validator
 
 from ..dispatch import create_durable_run
+from ..utils.github_app import get_github_app_installation_token
 from ..utils.slack import post_slack_top_level_message_with_ts, store_slack_run_mapping
 from ..utils.thread_ids import generate_thread_id_from_slack_thread
 from ..utils.thread_ops import langgraph_client
 from .options import SUPPORTED_MODEL_IDS, gate_fable_model, model_supports_effort
-from .profiles import get_profile, get_valid_access_token
-from .repo_access import repo_config_for_user, require_repo_access_for_user
+from .profiles import get_profile
+from .review_styles import normalize_repo_full_name
 from .team_settings import get_team_fable_enabled
 from .thread_api import _agent_version_metadata, _now_ms, _resolve_run_email
 from .user_mappings import slack_id_for_login
@@ -245,10 +246,18 @@ async def list_agent_schedules(login: str, *, email: str | None = None) -> list[
     return [_schedule_summary(record) for record in records]
 
 
-async def _ensure_dashboard_github_token(login: str) -> None:
-    token = await get_valid_access_token(login)
+async def _repo_config_for_schedule(full_name: str | None) -> dict[str, str] | None:
+    if not isinstance(full_name, str) or not full_name.strip():
+        return None
+    try:
+        normalized = normalize_repo_full_name(full_name)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    token = await get_github_app_installation_token(target_repo=normalized)
     if not token:
-        raise HTTPException(401, "github token unavailable, re-login required")
+        raise HTTPException(403, "repository is not covered by the GitHub App installation")
+    owner, name = normalized.split("/", 1)
+    return {"owner": owner, "name": name}
 
 
 def _build_cron_config(record: dict[str, Any]) -> Config:
@@ -290,10 +299,9 @@ async def _delete_cron(cron_id: str | None) -> None:
 async def create_agent_schedule(
     login: str, body: ScheduleCreateBody, *, email: str | None = None
 ) -> dict[str, Any]:
-    await _ensure_dashboard_github_token(login)
     profile = await get_profile(login) or {}
     chosen_model, chosen_effort = _normalize_model_choice(body.model_id, body.effort)
-    repo = await repo_config_for_user(login, body.repo)
+    repo = await _repo_config_for_schedule(body.repo)
     schedule_id = str(uuid.uuid4())
     now = _now_iso()
     record: dict[str, Any] = {
@@ -345,7 +353,7 @@ async def update_agent_schedule(
     if body.name is not None:
         patch["name"] = body.name.strip() or _derive_name(patch.get("prompt", existing["prompt"]))
     if body.repo is not None:
-        patch["repo"] = await repo_config_for_user(login, body.repo)
+        patch["repo"] = await _repo_config_for_schedule(body.repo)
     if body.model_id is not None or body.effort is not None:
         model, effort = _normalize_model_choice(body.model_id, body.effort)
         if model and effort:
@@ -483,7 +491,7 @@ async def launch_scheduled_agent_run(schedule_id: str) -> dict[str, Any]:
                 "error": "schedule owner unavailable",
             }
         try:
-            await require_repo_access_for_user(login, full_name)
+            await _repo_config_for_schedule(full_name)
         except HTTPException as exc:
             await _put_value(
                 {

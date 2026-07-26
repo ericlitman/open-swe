@@ -319,11 +319,9 @@ async def _refresh_github_proxy(
 
     token, expires_at, permissions = await _resolve_proxy_token(github_proxy_token, repo)
     if not token:
-        logger.warning(
-            "Skipping GitHub proxy refresh for sandbox %s: installation token unavailable",
-            sandbox_backend.id,
-        )
-        return
+        msg = "Cannot configure proxy: GitHub App installation token is unavailable"
+        logger.error(msg)
+        raise ValueError(msg)
 
     current_backend = unwrap_sandbox_backend(sandbox_backend)
     await _start_langsmith_sandbox_if_needed(current_backend)
