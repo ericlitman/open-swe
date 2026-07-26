@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from copy import deepcopy
@@ -614,3 +615,46 @@ def test_skill_contains_all_deliverables_and_closeout_wording() -> None:
         in templates
     )
     assert all(f"`{node}`" in skill for node in wave.WAKE_NODES)
+
+
+def _installer_var(name: str) -> set[str]:
+    match = re.search(rf'^{name}="([^"]+)"', (SKILL / "install").read_text(), re.M)
+    assert match is not None, f"{name} not found in install"
+    return set(match.group(1).split())
+
+
+def test_installer_manifest_covers_every_tracked_file() -> None:
+    """A file tracked here but absent from the manifest never reaches a machine."""
+    tracked = {
+        str(path.relative_to(SKILL))
+        for path in SKILL.rglob("*")
+        if path.is_file()
+        and path.name not in {"install", "INSTALLED"}
+        and "__pycache__" not in path.parts
+    }
+
+    assert _installer_var("MANIFEST") == tracked
+
+
+def test_installer_marks_exactly_the_committed_executables() -> None:
+    """The exec bit is what every documented invocation depends on."""
+    executables = _installer_var("EXECUTABLES")
+    committed = {
+        str(path.relative_to(SKILL))
+        for path in (SKILL / "scripts").iterdir()
+        if path.is_file() and path.stat().st_mode & 0o111
+    }
+
+    assert executables <= _installer_var("MANIFEST")
+    assert executables == committed
+
+
+def test_installer_is_executable_and_rejects_unknown_arguments() -> None:
+    installer = SKILL / "install"
+    result = subprocess.run(
+        [str(installer), "--bogus"], text=True, capture_output=True, check=False
+    )
+
+    assert installer.stat().st_mode & 0o111
+    assert result.returncode == 2
+    assert "unknown argument" in result.stderr
