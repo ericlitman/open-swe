@@ -61,7 +61,9 @@ def test_wave_assets_resolve_from_the_sibling_skill_in_a_checkout() -> None:
 
     resolved = run.wave_scripts_dir()
 
-    assert resolved == WAVE_SKILL / "scripts"
+    # wave_scripts_dir() derives from Path(__file__).resolve(); compare resolved
+    # paths so a checkout reached through a symlink (macOS /tmp) still matches.
+    assert resolved.resolve() == (WAVE_SKILL / "scripts").resolve()
     assert (resolved / "openswe_wave.py").is_file()
     assert (resolved / "wave-monitor").is_file()
 

@@ -24,10 +24,23 @@ and the write itself refuses a thread with no stored plan, or a `shared`/`cancel
 the dashboard does. `reject` returns the record to `revising` so a rejection posted after an
 approval cannot leave a rejected plan armed for auto-merge.
 
-Auto-merge also depends on two team settings the skill does not control: `auto_merge_mode`
-must be `on_plan_approval` (or `always`) **and** `require_plan_approval` must be true. With
-mode set to `on_plan_approval` while `require_plan_approval` is false, `_auto_merge_eligible`
-short-circuits and auto-merge can never arm, no matter what this skill writes.
+Auto-merge depends on team settings the skill does not control, and today **only
+`auto_merge_mode=always` works through this comment path**. The plan-gated mode is a trap in
+both positions:
+
+- `on_plan_approval` with `require_plan_approval` **false** — `_auto_merge_eligible`
+  short-circuits on the second conjunct, so auto-merge can never arm, whatever this skill
+  writes to the plan record.
+- `on_plan_approval` with `require_plan_approval` **true** — the Linear webhook builds its
+  configurable with neither `plan_mode` nor `plan_gate_bypass`, so the server forces every
+  comment-dispatched run back into plan mode. The approval comment makes the agent re-plan
+  instead of implement. Only the dashboard's approve endpoint escapes this, because it
+  dispatches with `plan_gate_bypass=True`.
+
+So the plan record written by `approve`/`reject` is correct and keeps the dashboard truthful,
+but it is not what arms auto-merge today — `always` is. The write becomes load-bearing once
+the webhook path can carry a plan-gate bypass; until then, treat the plan gate as enforced by
+this skill (dispatch instruction plus the `--adjudicated` guard), not by the product.
 
 All commands below are `scripts/openswe-run` relative to this skill directory. Wakes and
 results are single JSON lines; healthy monitoring is silent. Do not poll, tail, or re-check
