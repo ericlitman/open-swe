@@ -13,7 +13,7 @@ from langgraph_sdk.schema import Config
 from pydantic import BaseModel, Field, field_validator
 
 from ..dispatch import create_durable_run
-from ..utils.github_app import get_github_app_installation_token
+from ..utils.github_app import get_github_app_execution_token
 from ..utils.slack import post_slack_top_level_message_with_ts, store_slack_run_mapping
 from ..utils.thread_ids import generate_thread_id_from_slack_thread
 from ..utils.thread_ops import langgraph_client
@@ -251,7 +251,7 @@ async def _repo_config_for_schedule(login: str, full_name: str | None) -> dict[s
     if repo is None:
         return None
     normalized = f"{repo['owner']}/{repo['name']}"
-    token = await get_github_app_installation_token(target_repo=normalized)
+    token = await get_github_app_execution_token(target_repo=normalized)
     if not token:
         raise HTTPException(403, "repository is not covered by the GitHub App installation")
     return repo
@@ -432,6 +432,8 @@ def _agent_run_metadata(
     if repo and repo.get("owner") and repo.get("name"):
         metadata["repo_owner"] = repo["owner"]
         metadata["repo_name"] = repo["name"]
+    else:
+        metadata["repo_explicitly_none"] = True
     if slack_thread:
         metadata["source_context"] = {"slack_thread": slack_thread}
     return metadata
@@ -451,6 +453,8 @@ async def _agent_run_config(
     repo = record.get("repo") if isinstance(record.get("repo"), dict) else None
     if repo and repo.get("owner") and repo.get("name"):
         configurable["repo"] = repo
+    else:
+        configurable["repo_explicitly_none"] = True
     if slack_thread:
         configurable["slack_thread"] = slack_thread
     model, effort = _normalize_model_choice(record.get("model"), record.get("effort"))

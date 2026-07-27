@@ -121,15 +121,13 @@ def test_construct_system_prompt_explains_pause_to_ask_for_dependency_review() -
     assert "You cannot pause to ask for approval mid-task" not in prompt
 
 
-def test_construct_system_prompt_identifies_own_repo() -> None:
+def test_construct_system_prompt_does_not_expand_self_references_into_repo_access() -> None:
     from agent.prompt import OPEN_SWE_SHARED_BASE
 
     prompt = construct_system_prompt(working_dir="/workspace")
 
-    # The per-thread prompt points self-referential tasks at the repo; the
-    # "Open SWE" identity lives in the harness-profile base prompt that
-    # deepagents prepends at runtime (OPEN_SWE_SHARED_BASE).
-    assert "langchain-ai/open-swe" in prompt
+    assert "never expand that authorization" in prompt
+    assert "langchain-ai/open-swe" not in prompt
     assert "Open SWE" in OPEN_SWE_SHARED_BASE
 
 
@@ -258,7 +256,7 @@ def test_construct_system_prompt_does_not_require_pr_for_questions() -> None:
 
     assert "Do not create commits, branches, or pull requests for questions" in prompt
     assert "For information-only requests" in prompt
-    assert "check them out before answering" in prompt
+    assert "use public research without cloning" in prompt
     assert "answer fully inline" in prompt
     assert "open or update a draft PR when the user asks for one" in prompt
     assert "Always Create PRs Policy Override" not in prompt
@@ -287,7 +285,10 @@ def test_profile_create_prs_defaults_to_normal_pr_policy() -> None:
 
 
 def test_construct_system_prompt_forbids_force_push() -> None:
-    prompt = construct_system_prompt(working_dir="/workspace")
+    prompt = construct_system_prompt(
+        working_dir="/workspace",
+        default_repo={"owner": "acme", "name": "repo"},
+    )
 
     assert "Never force-push." in prompt
     assert "Never run `git push --force`" in prompt
@@ -314,6 +315,7 @@ def test_construct_system_prompt_includes_coauthor_trailer_when_identity_present
     prompt = construct_system_prompt(
         working_dir="/workspace",
         triggering_user_identity=identity,
+        default_repo={"owner": "acme", "name": "repo"},
     )
 
     assert "Collaborative Attribution" in prompt
@@ -336,6 +338,7 @@ def test_construct_system_prompt_includes_github_login_in_pr_footer() -> None:
     prompt = construct_system_prompt(
         working_dir="/workspace",
         triggering_user_identity=identity,
+        default_repo={"owner": "acme", "name": "repo"},
     )
 
     # A name with a space is shlex-quoted; the safe email is left bare.
@@ -357,6 +360,7 @@ def test_construct_system_prompt_footer_links_thread_when_provided() -> None:
     prompt = construct_system_prompt(
         working_dir="/workspace",
         triggering_user_identity=identity,
+        default_repo={"owner": "acme", "name": "repo"},
         thread_url="https://openswe.vercel.app/agents/abc-123",
     )
 
@@ -378,6 +382,7 @@ def test_construct_system_prompt_shell_escapes_user_name() -> None:
     prompt = construct_system_prompt(
         working_dir="/workspace",
         triggering_user_identity=identity,
+        default_repo={"owner": "acme", "name": "repo"},
     )
 
     assert f"git config user.name {shlex.quote(hostile)}" in prompt

@@ -20,7 +20,10 @@ import httpx
 from fastapi import HTTPException, Response
 
 from ..review.findings import REVIEWER_THREAD_KIND
-from ..utils.github_app import get_github_app_installation_token
+from ..utils.github_app import (
+    get_github_app_execution_token,
+    get_github_app_execution_token_with_expiry,
+)
 from ..utils.github_checks import github_headers
 from ..utils.json_types import ThreadLike, as_json_object, thread_metadata
 from ..utils.thread_ops import langgraph_client
@@ -35,7 +38,7 @@ _GITHUB_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
 
 async def _require_app_token(owner: str, repo: str) -> str:
-    token = await get_github_app_installation_token(target_repo=f"{owner}/{repo}")
+    token = await get_github_app_execution_token(target_repo=f"{owner}/{repo}")
     if not token:
         raise HTTPException(503, "GitHub App token unavailable")
     return token
@@ -719,7 +722,6 @@ async def dry_run_trace_resolution(owner: str, repo: str, pr_number: int) -> dic
     from dataclasses import asdict
 
     from ..review.trace_context import resolve_pr_trace
-    from ..utils.github_app import get_github_app_installation_token_with_expiry
     from ..utils.slack import GitHubPrRef
 
     pr_ref = GitHubPrRef(
@@ -728,7 +730,7 @@ async def dry_run_trace_resolution(owner: str, repo: str, pr_number: int) -> dic
         number=pr_number,
         url=f"https://github.com/{owner}/{repo}/pull/{pr_number}",
     )
-    token, _ = await get_github_app_installation_token_with_expiry(target_repo=f"{owner}/{repo}")
+    token, _ = await get_github_app_execution_token_with_expiry(target_repo=f"{owner}/{repo}")
     if not token:
         raise HTTPException(502, "No GitHub App token available")
     pr_metadata = await fetch_github_pr_metadata(pr_ref, token=token)

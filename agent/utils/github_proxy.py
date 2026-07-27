@@ -18,7 +18,7 @@ from typing import Any
 from .github_app import (
     PermissionKey,
     PermissionMap,
-    get_github_app_installation_token_with_expiry,
+    get_github_app_execution_token_with_expiry,
     normalize_permissions,
 )
 from .sandbox_state import SANDBOX_BACKENDS, unwrap_sandbox_backend
@@ -141,14 +141,13 @@ async def refresh_proxy_token(
     effective_repositories = tuple(repositories) if repositories else recorded_repositories
     permission_key = normalize_permissions(permissions) or recorded_permissions
     effective_target_repo = target_repo or recorded_target_repo
-    token_kwargs: dict[str, Any] = {}
-    if effective_repositories:
-        token_kwargs["repositories"] = list(effective_repositories)
+    if not effective_target_repo:
+        logger.warning("Proxy token refresh for thread %s has no repository scope", thread_id)
+        return False
+    token_kwargs: dict[str, Any] = {"target_repo": effective_target_repo}
     if permission_key:
         token_kwargs["permissions"] = dict(permission_key)
-    if effective_target_repo:
-        token_kwargs["target_repo"] = effective_target_repo
-    token, expires_at = await get_github_app_installation_token_with_expiry(**token_kwargs)
+    token, expires_at = await get_github_app_execution_token_with_expiry(**token_kwargs)
     if not token:
         logger.warning("Proxy token refresh for thread %s failed: no installation token", thread_id)
         return False

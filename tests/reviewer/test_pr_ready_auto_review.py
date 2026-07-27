@@ -40,7 +40,7 @@ def _pr_payload(
 def _patch_dispatch_deps(monkeypatch: pytest.MonkeyPatch, fake_client: MagicMock) -> AsyncMock:
     monkeypatch.setattr(
         webhook_common,
-        "get_github_app_installation_token_with_expiry",
+        "get_github_app_execution_token_with_expiry",
         AsyncMock(return_value=("token", None)),
     )
     monkeypatch.setattr(
@@ -89,7 +89,7 @@ async def test_pr_ready_public_repo_uses_scoped_reviewer_token(
     fake_client = MagicMock()
     fake_client.runs.create = AsyncMock()
     get_token = AsyncMock(return_value=("scoped-token", "expires"))
-    monkeypatch.setattr(webhook_common, "get_github_app_installation_token_with_expiry", get_token)
+    monkeypatch.setattr(webhook_common, "get_github_app_execution_token_with_expiry", get_token)
     monkeypatch.setattr(
         webhook_common, "_ensure_thread_exists_for_metadata", AsyncMock(return_value=True)
     )
@@ -104,20 +104,20 @@ async def test_pr_ready_public_repo_uses_scoped_reviewer_token(
         _pr_payload(action="opened", draft=False, private=False)
     )
 
-    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_ids=[123])
+    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_id=123)
     assert fake_client.runs.create.await_args is not None
     _, kwargs = fake_client.runs.create.await_args
     assert kwargs["config"]["configurable"]["repo_private"] is False
 
 
 @pytest.mark.asyncio
-async def test_pr_ready_private_repo_uses_full_reviewer_token(
+async def test_pr_ready_private_repo_uses_scoped_reviewer_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_client = MagicMock()
     fake_client.runs.create = AsyncMock()
-    get_token = AsyncMock(return_value=("full-token", "expires"))
-    monkeypatch.setattr(webhook_common, "get_github_app_installation_token_with_expiry", get_token)
+    get_token = AsyncMock(return_value=("scoped-token", "expires"))
+    monkeypatch.setattr(webhook_common, "get_github_app_execution_token_with_expiry", get_token)
     monkeypatch.setattr(
         webhook_common, "_ensure_thread_exists_for_metadata", AsyncMock(return_value=True)
     )
@@ -131,7 +131,7 @@ async def test_pr_ready_private_repo_uses_full_reviewer_token(
         _pr_payload(action="opened", draft=False, private=True)
     )
 
-    get_token.assert_awaited_once_with(target_repo="lc/repo")
+    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_id=123)
     assert fake_client.runs.create.await_args is not None
     _, kwargs = fake_client.runs.create.await_args
     assert kwargs["config"]["configurable"]["repo_private"] is True
@@ -161,7 +161,7 @@ async def test_pr_ready_for_review_skips_when_head_already_reviewed(
     fake_client.runs.create = AsyncMock()
     set_metadata = AsyncMock()
     get_token = AsyncMock(return_value=("token", None))
-    monkeypatch.setattr(webhook_common, "get_github_app_installation_token_with_expiry", get_token)
+    monkeypatch.setattr(webhook_common, "get_github_app_execution_token_with_expiry", get_token)
     monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", set_metadata)
     monkeypatch.setattr(
         webhook_common,
