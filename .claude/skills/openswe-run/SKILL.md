@@ -46,6 +46,27 @@ All commands below are `scripts/openswe-run` relative to this skill directory. W
 results are single JSON lines; healthy monitoring is silent. Do not poll, tail, or re-check
 between wakes — that is the token waste this skill exists to remove.
 
+## Deployment
+
+This skill deploys as a git checkout, never as copied files. Clone the repo once per
+machine, migrate any existing copied install out of the way, then symlink both skill
+directories into each surface. `ln -sfn` does **not** replace an existing real
+directory — it creates the link *inside* it and the stale copy stays active — so the
+move-aside step is mandatory on machines that ever had a copied install:
+
+```bash
+for name in openswe-run openswe-wave; do
+  dest=~/.claude/skills/$name
+  [ -d "$dest" ] && [ ! -L "$dest" ] && mv "$dest" "$dest.pre-checkout"
+  ln -sfn <checkout>/.claude/skills/$name "$dest"
+done
+```
+
+(and the same into `${CODEX_HOME:-$HOME/.codex}/skills`). The scripts resolve their
+wave dependencies from the sibling skill in the checkout, so no vendoring or copying
+step exists. Upgrade with `git -C <checkout> pull`; provenance is
+`git -C <checkout> rev-parse HEAD`; drift is `git -C <checkout> status`.
+
 ## 0. Preflight (once)
 
 ```bash
@@ -77,7 +98,7 @@ scripts/openswe-run watch --ticket OSWE-123 --repo owner/repo
 
 Wake nodes: `plan_posted`, `review_findings_posted`, `terminal_merged`, `terminal_closed`,
 `terminal_run_error`, `unhandled_condition`, plus wrapper-level `watch_timeout` (rc 3).
-After a PR exists, pass `--pr-number N` on subsequent watches so PR recovery checks engage.
+`--pr-number N` is optional; when omitted, the monitor discovers the PR from LangGraph thread metadata so PR recovery checks engage as soon as it exists.
 Known monitor sharp edges are inherited, not re-fixed here: OSWE-135 (torn reviewThreads
 read → spurious `unhandled_condition`; benign, re-watch) and OSWE-136 (hung network read;
 the wrapper's heartbeat detects it, kills the monitor, surfaces the missed wake itself, and
