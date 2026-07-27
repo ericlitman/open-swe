@@ -113,6 +113,30 @@ def test_resolve_github_token_fails_closed_without_trusted_repository(
         asyncio.run(auth.resolve_github_token({"configurable": {"source": "slack"}}, "thread-1"))
 
 
+def test_repo_less_schedule_token_mint_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(auth, "get_team_default_repo", lambda: _coro(None))
+
+    async def fail_mint(**_kwargs: object) -> tuple[None, None]:
+        raise AssertionError("repo-less schedules must not mint an installation-wide token")
+
+    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fail_mint)
+
+    with pytest.raises(RuntimeError, match="missing trusted repository context"):
+        asyncio.run(
+            auth.resolve_github_token(
+                {
+                    "configurable": {
+                        "source": "schedule",
+                        "schedule_id": "sched_repo_less",
+                    }
+                },
+                "thread-schedule",
+            )
+        )
+
+
 def test_resolve_github_token_fails_closed_when_installation_token_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
