@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import importlib
 import io
+import json
 import logging
 import logging.config
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -59,6 +61,26 @@ def test_fastapi_import_path_installs_filters() -> None:
         assert any(
             getattr(item, logging_redaction._FILTER_MARKER, False)
             for item in logging.getLogger(name).filters
+        )
+
+
+def test_graphs_package_import_installs_filters() -> None:
+    importlib.reload(importlib.import_module("agent.graphs"))
+
+    for name in ("httpx", "langgraph_api.webhook", "langgraph_api.server", "asgi"):
+        assert any(
+            getattr(item, logging_redaction._FILTER_MARKER, False)
+            for item in logging.getLogger(name).filters
+        )
+
+
+def test_every_dispatchable_graph_is_covered_by_graphs_package() -> None:
+    config = json.loads((Path(__file__).parents[2] / "langgraph.json").read_text())
+    for name, target in config["graphs"].items():
+        module = target.split(":", 1)[0]
+        assert module.startswith("agent.graphs."), (
+            f"graph {name!r} entrypoint {module} is outside agent.graphs; "
+            "token redaction would not install in its worker process"
         )
 
 
