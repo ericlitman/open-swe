@@ -100,14 +100,13 @@ def ensure_handoffs() -> Path:
     return handoffs
 
 
-def log_path(ticket: str) -> Path:
-    day = datetime.now(UTC).strftime("%Y%m%d")
-    return ensure_handoffs() / f"{ticket.upper()}-{day}-run.md"
-
-
-def dogfood(ticket: str, tag: str, text: str) -> None:
-    """Append one evidence line to the run's dogfood log."""
-    path = log_path(ticket)
+def log_path(ticket: str, *, new_run: bool = False) -> Path:
+    handoffs = ensure_handoffs()
+    candidates = sorted(handoffs.glob(f"{ticket.upper()}-*-run.md"))
+    if candidates and not new_run:
+        return candidates[-1]
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    path = handoffs / f"{ticket.upper()}-{stamp}-run.md"
     if not path.exists():
         header = (
             f"# openswe-run dogfood log — {ticket.upper()}\n\n"
@@ -117,6 +116,12 @@ def dogfood(ticket: str, tag: str, text: str) -> None:
             f"[ISSUE] dogfood findings, [error] failures.\n\n"
         )
         path.write_text(header)
+    return path
+
+
+def dogfood(ticket: str, tag: str, text: str) -> None:
+    """Append one evidence line to the run's dogfood log."""
+    path = log_path(ticket)
     clean = " ".join(text.split())
     with path.open("a") as fh:
         fh.write(f"- {now_iso()} [{tag}] {clean}\n")
@@ -700,6 +705,8 @@ def cmd_env(args: argparse.Namespace) -> int:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
+    if not args.dry_run:
+        log_path(args.ticket, new_run=True)
     ensure_env(args.ticket, langgraph=not args.dry_run, github=False)
     issue = resolve_issue(args.ticket)
     if args.body_file:
@@ -1036,11 +1043,6 @@ def cmd_log(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     path = log_path(args.ticket)
-    if not path.exists():
-        candidates = sorted(ensure_handoffs().glob(f"{args.ticket.upper()}-*-run.md"))
-        if not candidates:
-            raise RunError(f"No dogfood log found for {args.ticket} under {ensure_handoffs()}")
-        path = candidates[-1]
     entries = [line for line in path.read_text().splitlines() if line.startswith("- ")]
     issues = [line for line in entries if "[ISSUE]" in line]
     wakes = [line for line in entries if "[wake]" in line]
