@@ -305,6 +305,145 @@ def test_github_snapshot_paginates_complete_actor_timeline(
     assert len(pr["timelineItems"]["nodes"]) == 2
 
 
+def test_github_snapshot_retries_torn_review_threads_from_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = fixture("pr-51-torn-review-threads.json")
+    attempts = recorded["inferred_transient_state"]["attempts"]
+    attempt = -1
+    review_page = 0
+    calls: list[str] = []
+    deadlines: list[float | None] = []
+
+    def fake_graphql(query: str, _variables: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        nonlocal attempt, review_page
+        if "WaveReviewThreads" in query:
+            query_name = "reviewThreads"
+            page = attempts[attempt]["review_thread_pages"][review_page]
+            review_page += 1
+            connection = {
+                "reviewThreads": {
+                    "nodes": page["nodes"],
+                    "pageInfo": {
+                        "hasNextPage": page["has_next"],
+                        "endCursor": "next" if page["has_next"] else None,
+                    },
+                }
+            }
+            head = page["head"]
+        elif "WaveLabels" in query:
+            query_name = "labels"
+            connection = {"labels": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+            head = attempts[attempt]["snapshot_head"]
+        else:
+            query_name = "snapshot"
+            attempt += 1
+            review_page = 0
+            connection = {"timelineItems": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+            head = attempts[attempt]["snapshot_head"]
+        calls.append(query_name)
+        deadlines.append(kwargs.get("deadline"))
+        return {
+            "repository": {
+                "defaultBranchRef": {"name": "main"},
+                "pullRequest": {"headRefOid": head, **connection},
+            }
+        }
+
+    monkeypatch.setattr(wave, "gh_graphql", fake_graphql)
+
+    pr = wave.github_pr_snapshot("owner/repo", 51, deadline=123.0)
+
+    assert calls == [
+        "snapshot",
+        "labels",
+        "reviewThreads",
+        "reviewThreads",
+        "snapshot",
+        "labels",
+        "reviewThreads",
+    ]
+    assert deadlines == [123.0] * len(calls)
+    assert pr["headRefOid"] == recorded["observed_fields"]["next_commit_head"]
+    assert pr["reviewThreads"]["nodes"] == [{"id": "new-head-thread", "isResolved": False}]
+    assert recorded["inferred_fields"]
+
+
+def test_github_snapshot_does_not_retry_labels_head_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_graphql(query: str, _variables: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        if "WaveLabels" in query:
+            calls.append("labels")
+            connection = {"labels": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+            head = "new-head"
+        else:
+            calls.append("snapshot")
+            connection = {"timelineItems": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+            head = "old-head"
+        return {
+            "repository": {
+                "defaultBranchRef": {"name": "main"},
+                "pullRequest": {"headRefOid": head, **connection},
+            }
+        }
+
+    monkeypatch.setattr(wave, "gh_graphql", fake_graphql)
+
+    with pytest.raises(wave.WaveOpsError, match="head changed while labels was paginated"):
+        wave.github_pr_snapshot("owner/repo", 51)
+
+    assert calls == ["snapshot", "labels"]
+
+
+def test_watch_preserves_unhandled_evidence_after_review_thread_retry_exhaustion(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    baseline = _watch_snapshot("OPEN", observed_at="baseline")
+    snapshot_calls = 0
+    graphql_deadlines: list[float | None] = []
+
+    def fake_graphql(query: str, _variables: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        graphql_deadlines.append(kwargs.get("deadline"))
+        head = "new-head" if "WaveReviewThreads" in query else "old-head"
+        if "WaveReviewThreads" in query:
+            connection = {"reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+        elif "WaveLabels" in query:
+            connection = {"labels": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+        else:
+            connection = {"timelineItems": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+        return {
+            "repository": {
+                "defaultBranchRef": {"name": "main"},
+                "pullRequest": {"headRefOid": head, **connection},
+            }
+        }
+
+    def live_snapshot(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            return baseline
+        return wave.github_pr_snapshot("owner/repo", 51, deadline=kwargs.get("deadline"))
+
+    monkeypatch.setattr(wave, "gh_graphql", fake_graphql)
+    monkeypatch.setattr(wave, "live_snapshot", live_snapshot)
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+
+    assert wave.cmd_watch(_watch_args(pr_number=51)) == 0
+
+    assert len(graphql_deadlines) == 9
+    assert len(set(graphql_deadlines)) == 1
+    assert graphql_deadlines[0] is not None
+    assert capsys.readouterr().out == (
+        '{"evidence": {"issue_id": "issue", "thread_id": "thread"}, '
+        '"summary": "wave monitor poll failed: Pull request head changed while '
+        'reviewThreads was paginated", "wake_node": "unhandled_condition"}\n'
+    )
+
+
 def test_linear_snapshot_paginates_all_comments(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
