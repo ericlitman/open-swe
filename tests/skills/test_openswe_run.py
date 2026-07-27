@@ -404,6 +404,25 @@ def test_dispatch_template_leaves_no_placeholder_its_own_guard_would_reject() ->
     run.guard_placeholders("ABC-1", body, False)
 
 
+def test_dispatch_template_matches_reference_docs() -> None:
+    def dispatch_body(path: Path) -> str:
+        section = path.read_text().split("## Dispatch\n", 1)[1]
+        fenced = section.split("```markdown\n", 1)[1]
+        return fenced.split("\n```", 1)[0] + "\n"
+
+    expected = run.DISPATCH_TEMPLATE.format(
+        repo="<owner/repo>",
+        ticket="<TICKET>",
+        ref="<ref>",
+        scope="<scope>",
+        boundaries="<non-goals>",
+        verify="<focused tests>, `make lint`, and `make typecheck`",
+    )
+
+    assert dispatch_body(SKILL / "references/run-templates.md") == expected
+    assert dispatch_body(WAVE_SKILL / "references/comment-templates.md") == expected
+
+
 def _comment(
     comment_id: str,
     body: str,

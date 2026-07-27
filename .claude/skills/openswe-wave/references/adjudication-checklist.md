@@ -16,6 +16,7 @@
 - Unverified claims are honest external dependencies, not narrated successful checks.
 - Every acceptance criterion maps to a deliverable and a focused verification step.
 - New state, config, dependencies, or subsystems name the simpler rejected alternative.
+- Challenge unnecessary complexity, machinery layered on machinery, out-of-contract edge-case defenses, and validation of impossible states; prefer the root-cause fix that makes those layers moot.
 - Failure behavior is fail-closed where mutation, merge, credentials, or incomplete evidence is involved.
 - Product and operator boundaries remain explicit.
 - The PR title/body, release note, test plan, closing line, and Linear reference follow repository conventions.
@@ -29,3 +30,4 @@
 - Confirm required checks and review gates cannot be bypassed.
 - Confirm fixtures distinguish observed facts from inferred transient fields.
 - Run the focused tests independently and inspect representative CLI output.
+- Treat bloat as a finding even when scope matches and checks are green: would the upstream maintainer accept the diff as a minimal patch?
