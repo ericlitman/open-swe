@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -105,8 +106,9 @@ def auth(monkeypatch) -> None:  # noqa: ANN001
         return "alice@example.com"
 
     async def fake_repo_config_for_schedule(
-        full_name: str | None,
+        login: str, full_name: str | None
     ) -> dict[str, str] | None:
+        assert login == "alice"
         if not full_name:
             return None
         owner, name = full_name.split("/", 1)
@@ -142,6 +144,42 @@ def test_slack_channel_validation_normalizes_ids() -> None:
         ScheduleCreateBody(prompt="hello", schedule="0 9 * * *", slack_channel_id="#general")
 
 
+async def test_repo_config_for_schedule_requires_user_and_app_access(monkeypatch) -> None:  # noqa: ANN001
+    checked: list[tuple[str, str]] = []
+
+    async def user_repo(login: str, full_name: str | None) -> dict[str, str] | None:
+        assert full_name == "victim/private"
+        checked.append((login, full_name))
+        return {"owner": "victim", "name": "private"}
+
+    async def app_token(*, target_repo: str) -> str:
+        assert target_repo == "victim/private"
+        return "ghs_app"
+
+    monkeypatch.setattr(schedules, "repo_config_for_user", user_repo)
+    monkeypatch.setattr(schedules, "get_github_app_installation_token", app_token)
+
+    repo = await schedules._repo_config_for_schedule("alice", "victim/private")
+
+    assert repo == {"owner": "victim", "name": "private"}
+    assert checked == [("alice", "victim/private")]
+
+
+async def test_repo_config_for_schedule_stops_when_user_access_is_denied(monkeypatch) -> None:  # noqa: ANN001
+    async def deny_user(login: str, full_name: str | None) -> dict[str, str] | None:
+        assert (login, full_name) == ("alice", "victim/private")
+        raise HTTPException(403, "no access to this private repository")
+
+    app_token = AsyncMock(return_value="ghs_app")
+    monkeypatch.setattr(schedules, "repo_config_for_user", deny_user)
+    monkeypatch.setattr(schedules, "get_github_app_installation_token", app_token)
+
+    with pytest.raises(HTTPException, match="no access to this private repository"):
+        await schedules._repo_config_for_schedule("alice", "victim/private")
+
+    app_token.assert_not_awaited()
+
+
 async def test_create_agent_schedule_registers_scheduler_cron(fake_client, auth) -> None:  # noqa: ANN001, ARG001
     body = ScheduleCreateBody(
         name="Daily report",
@@ -175,7 +213,8 @@ async def test_create_agent_schedule_does_not_require_dashboard_token(fake_clien
 
 
 async def test_create_agent_schedule_requires_repo_access(fake_client, auth, monkeypatch) -> None:  # noqa: ANN001, ARG001
-    async def deny_repo(full_name: str | None) -> dict[str, str] | None:
+    async def deny_repo(login: str, full_name: str | None) -> dict[str, str] | None:
+        assert login == "alice"
         raise HTTPException(403, "no access to this private repository")
 
     monkeypatch.setattr(schedules, "_repo_config_for_schedule", deny_repo)
@@ -255,7 +294,8 @@ async def test_update_agent_schedule_rechecks_repo_access(fake_client, auth, mon
     }
     await fake_client.store.put_item(schedules.SCHEDULES_NAMESPACE, "sched_1", record)
 
-    async def repo_config(full_name: str | None) -> dict[str, str] | None:
+    async def repo_config(login: str, full_name: str | None) -> dict[str, str] | None:
+        assert login == "alice"
         assert full_name == "langchain-ai/open-swe"
         return {"owner": "langchain-ai", "name": "open-swe"}
 
@@ -349,7 +389,8 @@ async def test_launch_scheduled_agent_run_skips_when_app_scope_missing(
     }
     await fake_client.store.put_item(schedules.SCHEDULES_NAMESPACE, "sched_1", record)
 
-    async def deny_access(full_name: str | None) -> dict[str, str] | None:
+    async def deny_access(login: str, full_name: str | None) -> dict[str, str] | None:
+        assert login == "alice"
         raise HTTPException(403, "repository is not covered by the GitHub App installation")
 
     monkeypatch.setattr(schedules, "_repo_config_for_schedule", deny_access)
