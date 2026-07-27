@@ -130,7 +130,7 @@ records an `[ISSUE]` entry).
 On `plan_posted`:
 
 1. `scripts/openswe-run plan --ticket OSWE-123` — read the posted plan.
-2. **Now** (not earlier) read `references/adjudication-checklist.md` and apply every item
+2. **Now** (not earlier) read `../openswe-wave/references/adjudication-checklist.md` and apply every item
    against the ticket and the plan.
 3. Write the approval body from the Approval template in `references/run-templates.md`,
    recording your challenge rulings and clarifications, then:
