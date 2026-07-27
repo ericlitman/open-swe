@@ -79,10 +79,15 @@ scripts/openswe-run env
 auto-set on studio2 and `GH_TOKEN` is auto-derived from `gh auth token` when possible; both
 auto-derivations are recorded in the dogfood log.
 
-Until OSWE-152 closes, every Linear client-credentials mint must use the complete scope string
-`read,write,app:assignable,app:mentionable`. The latest client-credentials mint controls the
-effective scope, so a later `read,write` mint strips mentionability workspace-wide; recover with
-another full-scope client-credentials mint. Remove this sharp edge when OSWE-152 closes.
+The pre-mint sharp edge may be retired only after both the control plane runs a release
+containing the OSWE-152 fix (merge `024efcf`) and a guarded-prefix mention probe succeeds after
+a provider mint, normally on a disposable issue. Until both conditions pass, or if a
+stripped-grant regression recurs, perform a full-scope client-credentials mint with
+`read,write,app:assignable,app:mentionable` immediately before every mention-bearing `start`,
+`approve`, `reject`, `comment`, or `nudge` post. The gate passed on 2026-07-27: release
+`024efcf709a34add332371dbeb5b2e395409a5ae` was deployed, and the accepted OSWE-181 23:23Z probe
+posted its guarded mention without a pre-mint after a provider mint and confirmed LangGraph
+handoff in run `019fa5e3-a7f3-7ff2-8e81-499daaf04464`; routine pre-mints are therefore retired.
 
 ## 1. Dispatch
 
