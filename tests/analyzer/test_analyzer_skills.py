@@ -11,8 +11,10 @@ from agent.analyzer import PrepareAnalyzerRunMiddleware
 from agent.dashboard.review_style_jobs import (
     build_continual_run_configurable,
     build_continual_run_input,
+    start_bootstrap_analysis,
 )
 from agent.middleware import PrepareRunState
+from agent.review.style_collector import ReviewStyleSamples
 from agent.utils.analyzer_skills import (
     ANALYZER_MODES,
     SKILLS_DIR,
@@ -67,7 +69,7 @@ def test_continual_run_payload_carries_mode_and_skill_files() -> None:
 
 
 @pytest.mark.asyncio
-async def test_analyzer_oauth_token_is_used_for_sandbox_provisioning() -> None:
+async def test_analyzer_oauth_token_is_not_used_for_sandbox_provisioning() -> None:
     config: RunnableConfig = {
         "configurable": {
             "review_style_full_name": "public/repo",
@@ -84,14 +86,42 @@ async def test_analyzer_oauth_token_is_used_for_sandbox_provisioning() -> None:
             "agent.analyzer.ensure_sandbox_for_thread", new=AsyncMock(return_value=sandbox)
         ) as ensure,
         patch("agent.analyzer.aresolve_sandbox_work_dir", new=AsyncMock(return_value="/workspace")),
-        patch("agent.analyzer._configure_sandbox_github_proxy", new=AsyncMock()),
-        patch("agent.analyzer.get_github_app_installation_token", new=AsyncMock()) as app_token,
     ):
         await middleware._prepare(state, MagicMock())
 
     ensure.assert_awaited_once_with(
         "thread-1",
-        github_proxy_token="oauth-token",
         repo={"owner": "public", "name": "repo"},
     )
-    app_token.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_oauth_token_stays_in_control_plane() -> None:
+    samples = ReviewStyleSamples(
+        full_name="public/repo",
+        owner="public",
+        name="repo",
+    )
+    collect = AsyncMock(return_value=samples)
+    create_run = AsyncMock(return_value={"run_id": "run-1"})
+
+    with (
+        patch("agent.dashboard.review_style_jobs.collect_review_samples", collect),
+        patch("agent.dashboard.review_style_jobs.mark_analysis_running", new=AsyncMock()),
+        patch("agent.dashboard.review_style_jobs.create_durable_run", create_run),
+        patch(
+            "agent.dashboard.review_style_jobs.update_review_style",
+            new=AsyncMock(return_value={"status": "running"}),
+        ),
+        patch("agent.dashboard.review_style_jobs._client", return_value=MagicMock()),
+    ):
+        await start_bootstrap_analysis(
+            "public/repo",
+            github_token="oauth-token",
+            created_by="octocat",
+        )
+
+    collect.assert_awaited_once_with("oauth-token", "public", "repo")
+    assert create_run.await_args is not None
+    configurable = create_run.await_args.kwargs["config"]["configurable"]
+    assert "review_style_github_token" not in configurable

@@ -13,7 +13,7 @@ import httpx
 from langgraph_sdk import get_client
 
 from ..review.findings import REVIEWER_THREAD_KIND
-from ..utils.github_app import get_github_app_installation_token
+from ..utils.github_app import get_github_app_execution_token
 from ..utils.json_types import ThreadLike, as_json_object, thread_metadata
 
 USAGE_THREAD_NAMESPACE: list[str] = ["agent_usage", "threads"]
@@ -329,7 +329,11 @@ async def _refresh_pr_records(records: list[dict[str, Any]]) -> list[dict[str, A
                 owner = record.get("owner")
                 repo = record.get("repo")
                 target_repo = f"{owner}/{repo}" if owner and repo else None
-                token = await get_github_app_installation_token(target_repo=target_repo)
+                token = (
+                    await get_github_app_execution_token(target_repo=target_repo)
+                    if target_repo
+                    else None
+                )
                 if not token:
                     return index, record
                 return index, await _refresh_pr_record(client, token, record)

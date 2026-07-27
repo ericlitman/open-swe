@@ -222,7 +222,7 @@ class TestCreateSandboxWithProxy:
         """Installation token should be used for proxy auth on langsmith sandboxes."""
         with (
             patch(
-                "agent.server.get_github_app_installation_token_with_expiry",
+                "agent.server.get_github_app_execution_token_with_expiry",
                 new_callable=AsyncMock,
                 return_value=("ghs_install", None),
             ) as mock_get_token,
@@ -234,18 +234,18 @@ class TestCreateSandboxWithProxy:
 
             from agent.server import _create_sandbox_with_proxy
 
-            await _create_sandbox_with_proxy()
+            await _create_sandbox_with_proxy(repo={"owner": "acme", "name": "widgets"})
 
             mock_create.assert_called_once_with(snapshot_id=None)
             mock_proxy.assert_called_once_with("sandbox-123", "ghs_install")
-            mock_get_token.assert_awaited_once_with()
+            mock_get_token.assert_awaited_once_with(target_repo="acme/widgets")
 
     @pytest.mark.asyncio
     async def test_raises_when_installation_token_mint_fails(self) -> None:
         """A full installation token mint failure prevents proxy configuration."""
         with (
             patch(
-                "agent.server.get_github_app_installation_token_with_expiry",
+                "agent.server.get_github_app_execution_token_with_expiry",
                 new_callable=AsyncMock,
                 return_value=(None, None),
             ) as mock_get_token,
@@ -258,9 +258,12 @@ class TestCreateSandboxWithProxy:
             from agent.server import _create_sandbox_with_proxy
 
             with pytest.raises(ValueError, match="installation token is unavailable"):
-                await _create_sandbox_with_proxy(thread_id="thread-123")
+                await _create_sandbox_with_proxy(
+                    thread_id="thread-123",
+                    repo={"owner": "acme", "name": "widgets"},
+                )
 
-            mock_get_token.assert_awaited_once_with()
+            mock_get_token.assert_awaited_once_with(target_repo="acme/widgets")
             mock_create.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -281,25 +284,42 @@ class TestCreateSandboxWithProxy:
             mock_proxy.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_raises_when_no_installation_token_for_langsmith(self) -> None:
-        """Should raise ValueError when installation token is unavailable for langsmith."""
+    async def test_repo_less_langsmith_sandbox_has_no_proxy_credentials(self) -> None:
+        from agent.utils.github_proxy import (
+            proxy_token_needs_refresh,
+            record_proxy_token_expiry,
+        )
+
+        record_proxy_token_expiry(
+            "thread-123",
+            "2000-01-01T00:00:00Z",
+            repositories=["widgets"],
+            target_repo="acme/widgets",
+        )
         with (
             patch("agent.server.create_sandbox", new_callable=AsyncMock) as mock_create,
             patch(
-                "agent.server.get_github_app_installation_token_with_expiry",
+                "agent.server.get_github_app_execution_token_with_expiry",
                 new_callable=AsyncMock,
                 return_value=(None, None),
-            ),
+            ) as mock_get_token,
+            patch("agent.server._configure_github_proxy", new_callable=AsyncMock) as mock_proxy,
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
         ):
             mock_create.return_value = MagicMock(id="sandbox-789")
 
             from agent.server import _create_sandbox_with_proxy
 
-            with pytest.raises(ValueError, match="installation token is unavailable"):
-                await _create_sandbox_with_proxy()
+            sandbox = await _create_sandbox_with_proxy(
+                "ghs_stale",
+                thread_id="thread-123",
+            )
 
-            mock_create.assert_not_awaited()
+            assert sandbox is mock_create.return_value
+            mock_create.assert_awaited_once_with(snapshot_id=None)
+            mock_get_token.assert_not_awaited()
+            mock_proxy.assert_not_awaited()
+            assert proxy_token_needs_refresh("thread-123") is False
 
 
 class _DummyAgent:
@@ -360,7 +380,7 @@ class TestRefreshProxyOnSandboxReuse:
                 return_value="sandbox-cached",
             ),
             patch(
-                "agent.server.get_github_app_installation_token_with_expiry",
+                "agent.server.get_github_app_execution_token_with_expiry",
                 new_callable=AsyncMock,
                 return_value=("ghs_fresh", None),
             ),
@@ -424,7 +444,7 @@ class TestRefreshProxyOnSandboxReuse:
                 return_value=mock_sandbox,
             ) as mock_create,
             patch(
-                "agent.server.get_github_app_installation_token_with_expiry",
+                "agent.server.get_github_app_execution_token_with_expiry",
                 new_callable=AsyncMock,
                 return_value=("ghs_fresh", None),
             ),
@@ -464,7 +484,7 @@ class TestRefreshProxyOnSandboxReuse:
 
         with (
             patch(
-                "agent.server.get_github_app_installation_token_with_expiry",
+                "agent.server.get_github_app_execution_token_with_expiry",
                 new_callable=AsyncMock,
                 return_value=("ghs_fresh", None),
             ),
@@ -486,7 +506,11 @@ class TestRefreshProxyOnSandboxReuse:
         ):
             from agent.server import _refresh_github_proxy_or_recreate
 
-            sandbox = await _refresh_github_proxy_or_recreate(mock_sandbox, "thread-123")
+            sandbox = await _refresh_github_proxy_or_recreate(
+                mock_sandbox,
+                "thread-123",
+                repo={"owner": "acme", "name": "widgets"},
+            )
 
             assert sandbox is replacement_sandbox
             mock_proxy.assert_called_once_with("sandbox-stale", "ghs_fresh")
@@ -494,7 +518,7 @@ class TestRefreshProxyOnSandboxReuse:
                 "thread-123",
                 github_proxy_token=None,
                 github_proxy_repositories=None,
-                repo=None,
+                repo={"owner": "acme", "name": "widgets"},
             )
 
     @pytest.mark.asyncio
@@ -513,7 +537,11 @@ class TestRefreshProxyOnSandboxReuse:
             from agent.server import _refresh_github_proxy_or_recreate
 
             with pytest.raises(ValueError, match="installation token is unavailable"):
-                await _refresh_github_proxy_or_recreate(mock_sandbox, "thread-123")
+                await _refresh_github_proxy_or_recreate(
+                    mock_sandbox,
+                    "thread-123",
+                    repo={"owner": "acme", "name": "widgets"},
+                )
 
             mock_recreate.assert_not_awaited()
 
@@ -526,7 +554,7 @@ class TestRefreshProxyOnSandboxReuse:
 
         with (
             patch(
-                "agent.server.get_github_app_installation_token_with_expiry",
+                "agent.server.get_github_app_execution_token_with_expiry",
                 new_callable=AsyncMock,
                 return_value=("ghs_fresh", None),
             ),
@@ -539,7 +567,7 @@ class TestRefreshProxyOnSandboxReuse:
             sandbox_backend = object.__new__(LangSmithSandbox)
             sandbox_backend._sandbox = inner_sandbox
 
-            await _refresh_github_proxy(sandbox_backend)
+            await _refresh_github_proxy(sandbox_backend, repo={"owner": "acme", "name": "widgets"})
 
             client_cm._inner.get_sandbox_status.assert_awaited_once_with("sandbox-stopped")
             client_cm._inner.start_sandbox.assert_awaited_once_with("sandbox-stopped")
@@ -554,7 +582,7 @@ class TestRefreshProxyOnSandboxReuse:
 
         with (
             patch(
-                "agent.server.get_github_app_installation_token_with_expiry",
+                "agent.server.get_github_app_execution_token_with_expiry",
                 new_callable=AsyncMock,
                 return_value=("ghs_fresh", None),
             ),
@@ -567,7 +595,7 @@ class TestRefreshProxyOnSandboxReuse:
             sandbox_backend = object.__new__(LangSmithSandbox)
             sandbox_backend._sandbox = inner_sandbox
 
-            await _refresh_github_proxy(sandbox_backend)
+            await _refresh_github_proxy(sandbox_backend, repo={"owner": "acme", "name": "widgets"})
 
             client_cm._inner.get_sandbox_status.assert_awaited_once_with("sandbox-ready")
             client_cm._inner.start_sandbox.assert_not_called()

@@ -67,7 +67,12 @@ class TestMaybeRefreshProxyToken:
     @pytest.mark.asyncio
     async def test_skips_when_not_langsmith(self) -> None:
         now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
-        record_proxy_token_expiry("thread-1", now + timedelta(minutes=1))
+        record_proxy_token_expiry(
+            "thread-1",
+            now + timedelta(minutes=1),
+            repositories=["repo"],
+            target_repo="acme/repo",
+        )
         with patch.dict("os.environ", {"SANDBOX_TYPE": "local"}):
             assert await maybe_refresh_proxy_token("thread-1", now=now) is False
 
@@ -91,7 +96,12 @@ class TestMaybeRefreshProxyToken:
     @pytest.mark.asyncio
     async def test_refreshes_and_records_new_expiry(self) -> None:
         now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
-        record_proxy_token_expiry("thread-1", now + timedelta(minutes=1))
+        record_proxy_token_expiry(
+            "thread-1",
+            now + timedelta(minutes=1),
+            repositories=["repo"],
+            target_repo="acme/repo",
+        )
         backend = MagicMock(id="sb-1")
         new_expiry = "2025-01-01T13:00:00Z"
 
@@ -99,7 +109,7 @@ class TestMaybeRefreshProxyToken:
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
             patch.dict(github_proxy.SANDBOX_BACKENDS, {"thread-1": backend}, clear=True),
             patch(
-                "agent.utils.github_proxy.get_github_app_installation_token_with_expiry",
+                "agent.utils.github_proxy.get_github_app_execution_token_with_expiry",
                 new=AsyncMock(return_value=("ghs_new", new_expiry)),
             ),
             patch(
@@ -116,7 +126,7 @@ class TestMaybeRefreshProxyToken:
         ]
         assert expires_at == datetime(2025, 1, 1, 13, 0, 0, tzinfo=UTC)
         assert permissions == ()
-        assert target_repo is None
+        assert target_repo == "acme/repo"
 
     @pytest.mark.asyncio
     async def test_preserves_repo_scope_on_refresh(self) -> None:
@@ -134,7 +144,7 @@ class TestMaybeRefreshProxyToken:
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
             patch.dict(github_proxy.SANDBOX_BACKENDS, {"thread-1": backend}, clear=True),
             patch(
-                "agent.utils.github_proxy.get_github_app_installation_token_with_expiry",
+                "agent.utils.github_proxy.get_github_app_execution_token_with_expiry",
                 new=token_mock,
             ),
             patch(
@@ -145,9 +155,7 @@ class TestMaybeRefreshProxyToken:
             result = await maybe_refresh_proxy_token("thread-1", now=now)
 
         assert result is True
-        token_mock.assert_awaited_once_with(
-            repositories=["open-swe"], target_repo="langchain-ai/open-swe"
-        )
+        token_mock.assert_awaited_once_with(target_repo="langchain-ai/open-swe")
         _expires, _recorded, scope, permissions, target_repo = github_proxy._PROXY_TOKEN_EXPIRY[
             "thread-1"
         ]
@@ -158,14 +166,19 @@ class TestMaybeRefreshProxyToken:
     @pytest.mark.asyncio
     async def test_no_refresh_when_token_unavailable(self) -> None:
         now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
-        record_proxy_token_expiry("thread-1", now + timedelta(minutes=1))
+        record_proxy_token_expiry(
+            "thread-1",
+            now + timedelta(minutes=1),
+            repositories=["repo"],
+            target_repo="acme/repo",
+        )
         backend = MagicMock(id="sb-1")
 
         with (
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
             patch.dict(github_proxy.SANDBOX_BACKENDS, {"thread-1": backend}, clear=True),
             patch(
-                "agent.utils.github_proxy.get_github_app_installation_token_with_expiry",
+                "agent.utils.github_proxy.get_github_app_execution_token_with_expiry",
                 new=AsyncMock(return_value=(None, None)),
             ),
             patch("agent.integrations.langsmith._configure_github_proxy") as mock_configure,

@@ -44,6 +44,7 @@ async def _capture_create_deep_agent_kwargs(
     persisted_merge_hold: bool | None = False,
     auto_merge_mode: server.AutoMergeMode = server.AUTO_MERGE_NEVER,
     configurable: dict[str, object] | None = None,
+    repo_less: bool = False,
 ) -> dict[str, object]:
     captured: dict[str, object] = {}
     make_model = MagicMock(side_effect=[MagicMock(name=f"model_{index}") for index in range(4)])
@@ -82,7 +83,7 @@ async def _capture_create_deep_agent_kwargs(
         patch(
             "agent.server._resolve_prompt_default_repo",
             new_callable=AsyncMock,
-            return_value={"owner": "acme", "name": "widget"},
+            return_value=None if repo_less else {"owner": "acme", "name": "widget"},
         ),
         patch(
             "agent.server.prepare_main_agent_repo_skills",
@@ -210,6 +211,20 @@ async def test_agent_includes_report_platform_issue_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repo_less_agent_hides_github_repository_tools() -> None:
+    captured = await _capture_create_deep_agent_kwargs(
+        configurable={"repo_explicitly_none": True},
+        repo_less=True,
+    )
+    middleware = captured["middleware"]
+    assert isinstance(middleware, list)
+    scope_filter = next(
+        item for item in middleware if isinstance(item, server.ExcludeToolsMiddleware)
+    )
+    assert scope_filter._excluded == frozenset({"open_pull_request", "request_pr_review"})
+
+
+@pytest.mark.asyncio
 async def test_task_retry_wraps_inside_tool_error_middleware() -> None:
     captured = await _capture_create_deep_agent_kwargs()
     middleware = captured["middleware"]
@@ -322,6 +337,7 @@ async def test_policy_unset_preserves_legacy_tool_and_middleware_wiring() -> Non
     assert isinstance(baseline_configurable, dict)
     assert bound_config["configurable"] == {
         **baseline_configurable,
+        "repo": {"owner": "acme", "name": "widget"},
         "auto_merge_mode": server.AUTO_MERGE_NEVER,
         "require_plan_approval": False,
         "auto_merge_eligible": False,

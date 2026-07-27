@@ -110,7 +110,7 @@ After creating the app:
 
 > **Note**: The installation page may prompt you to authenticate with LangSmith. If you haven't set up LangSmith yet (step 4), that's fine — you can still grab the Installation ID from the URL and complete the OAuth setup later.
 
-The app may be installed on multiple organizations or personal accounts. When Open SWE knows the target repository, it asks GitHub which installation covers that `owner/repo`; `GITHUB_APP_INSTALLATION_ID` remains the fallback for operations without repository context. Local-provider credential shims can set `GITHUB_APP_TARGET_REPO=owner/repo` for each invocation. Repository selection precedence is: explicit library argument, `GITHUB_APP_TARGET_REPO`, then the pinned installation ID.
+The app may be installed on multiple organizations or personal accounts. Open SWE resolves the installation covering the run's trusted `owner/repo`, then mints an execution token restricted to that one repository. `GITHUB_APP_INSTALLATION_ID` is reserved for server-only control-plane operations that genuinely have no repository context; it is never used as an execution-token fallback.
 
 ## 4. Set up LangSmith
 
@@ -404,8 +404,7 @@ GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
 ...
 -----END RSA PRIVATE KEY-----
 "
-GITHUB_APP_INSTALLATION_ID=""          # Fallback from step 3c when no target repo is known
-# GITHUB_APP_TARGET_REPO="owner/repo"     # Optional per-invocation context for local shims
+GITHUB_APP_INSTALLATION_ID=""          # Server-only fallback for installation-level checks
 
 # === GitHub Webhook (required) ===
 GITHUB_WEBHOOK_SECRET=""               # The secret you generated in step 3a
@@ -644,8 +643,9 @@ Alternatively, you can run the dashboard as a direct cross-origin client: set `V
 
 ### GitHub authentication errors
 
-- Verify `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` are set correctly; repo-less operations also require `GITHUB_APP_INSTALLATION_ID`
-- For local credential shims, verify `GITHUB_APP_TARGET_REPO` is the canonical `owner/repo`; a repo-specific lookup fails closed instead of using the pinned installation
+- Verify `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` are set correctly and the App covers the run's repository
+- Repository-less agent runs are deliberately tokenless; they cannot perform GitHub repository operations
+- `SANDBOX_TYPE=local` is development-only and refuses to start alongside GitHub App credentials unless `ALLOW_UNSAFE_LOCAL_SANDBOX=true` is deliberately set. Production deployments must use an isolated provider such as LangSmith.
 - Ensure the GitHub App is installed on the target repositories
 - Check that the private key includes the full `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----` lines
 

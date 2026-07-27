@@ -12,6 +12,7 @@ import sys
 import types
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -467,7 +468,7 @@ def test_child_preserves_handoff_success_rules(
             return run_lists.pop(0)
 
     client = types.SimpleNamespace(threads=Threads(), runs=Runs())
-    sdk = types.ModuleType("langgraph_sdk")
+    sdk: Any = types.ModuleType("langgraph_sdk")
     sdk.get_client = lambda *, url: client
     monkeypatch.setitem(sys.modules, "langgraph_sdk", sdk)
     monkeypatch.setenv("OPENSWE_HANDOFF_THREAD", "thread-1")
@@ -512,7 +513,7 @@ def test_child_poll_timeout_is_aggregate_and_cancels_snapshot(
             return []
 
     client = types.SimpleNamespace(threads=Threads(), runs=Runs())
-    sdk = types.ModuleType("langgraph_sdk")
+    sdk: Any = types.ModuleType("langgraph_sdk")
     sdk.get_client = lambda *, url: client
     monkeypatch.setitem(sys.modules, "langgraph_sdk", sdk)
     monkeypatch.setenv("OPENSWE_HANDOFF_THREAD", "thread-1")

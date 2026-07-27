@@ -2,6 +2,7 @@ from typing import Any
 
 from langgraph.config import get_config
 
+from agent.utils.auth import repository_matches_configurable
 from agent.utils.slack import GitHubPrRef, parse_github_pr_url
 
 
@@ -36,6 +37,11 @@ async def request_pr_review(pr_url: str) -> dict[str, Any]:
         }
 
     configurable = get_config().get("configurable", {})
+    if not repository_matches_configurable(configurable, pr_ref.owner, pr_ref.repo):
+        return {
+            "success": False,
+            "error": "Pull request repository is not authorized for this run",
+        }
     source = configurable.get("source") or "agent"
     slack_thread = configurable.get("slack_thread") or {}
     return await trigger_pr_review_from_ref(
