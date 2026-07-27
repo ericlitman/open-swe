@@ -1,0 +1,78 @@
+{
+  "source": "OSWE-137 recorded operator-armed PR and review transitions, 2026-07-24",
+  "session_user_id": "operator",
+  "unarmed_pr_open": {
+    "previous": {
+      "pr": {},
+      "pr_number": null,
+      "unresolved_review_thread_ids": [],
+      "review_ids": [],
+      "error_run_ids": []
+    },
+    "current": {
+      "pr": {
+        "state": "OPEN",
+        "isDraft": true,
+        "title": "Implement BEAR-5",
+        "autoMergeRequest": null,
+        "mergeStateStatus": "CLEAN"
+      },
+      "pr_number": 1,
+      "unresolved_review_thread_ids": [],
+      "review_ids": [],
+      "error_run_ids": []
+    }
+  },
+  "zero_finding_review": {
+    "previous": {
+      "pr": {
+        "state": "OPEN",
+        "autoMergeRequest": null,
+        "mergeStateStatus": "CLEAN"
+      },
+      "pr_number": 1,
+      "unresolved_review_thread_ids": [],
+      "review_ids": [],
+      "error_run_ids": []
+    },
+    "current": {
+      "pr": {
+        "state": "OPEN",
+        "autoMergeRequest": null,
+        "mergeStateStatus": "CLEAN"
+      },
+      "pr_number": 1,
+      "unresolved_review_thread_ids": [],
+      "review_ids": [
+        "review-1"
+      ],
+      "error_run_ids": []
+    }
+  },
+  "auto_merge_armed": {
+    "previous": {
+      "pr": {},
+      "pr_number": null,
+      "unresolved_review_thread_ids": [],
+      "review_ids": [],
+      "error_run_ids": []
+    },
+    "current": {
+      "pr": {
+        "state": "OPEN",
+        "isDraft": false,
+        "title": "Auto merge path",
+        "autoMergeRequest": {
+          "enabledAt": "2026-07-24T05:00:00Z"
+        },
+        "mergeStateStatus": "CLEAN"
+      },
+      "pr_number": 2,
+      "unresolved_review_thread_ids": [],
+      "review_ids": [
+        "review-2"
+      ],
+      "error_run_ids": []
+    }
+  }
+}

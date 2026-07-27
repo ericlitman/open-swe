@@ -63,6 +63,7 @@ def _watch_args(**overrides: Any) -> SimpleNamespace:
         "interval": 0.05,
         "iterations": 1,
         "run_stall_seconds": 1800,
+        "review_absent_seconds": 900,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -235,6 +236,106 @@ def test_transition_detection_uses_new_thread_and_error_ids() -> None:
     assert [event["kind"] for event in events] == ["review_findings", "run_error"]
 
 
+def test_recorded_unarmed_pr_open_and_zero_finding_review_each_wake_once() -> None:
+    recorded = fixture("oswe-137-operator-wakes.json")
+
+    opened = recorded["unarmed_pr_open"]
+    opened_events = [
+        {"kind": "run_success", "source": "langgraph"},
+        *wave.snapshot_transition_events(opened["previous"], opened["current"]),
+    ]
+    opened_result = wave.replay_events(wave.assign_poll_id(opened_events, "opened"), "operator")
+
+    assert [wake["wake_node"] for wake in opened_result["wakes"]] == ["pr_opened"]
+    assert "opened draft: Implement BEAR-5" in opened_result["wakes"][0]["summary"]
+
+    reviewed = recorded["zero_finding_review"]
+    review_events = wave.snapshot_transition_events(reviewed["previous"], reviewed["current"])
+    review_result = wave.replay_events(wave.assign_poll_id(review_events, "review"), "operator")
+
+    assert [wake["wake_node"] for wake in review_result["wakes"]] == ["review_complete"]
+    assert "0 findings" in review_result["wakes"][0]["summary"]
+
+
+def test_recorded_auto_merge_armed_pr_preserves_quiet_zero_finding_behavior() -> None:
+    recorded = fixture("oswe-137-operator-wakes.json")["auto_merge_armed"]
+
+    events = wave.snapshot_transition_events(recorded["previous"], recorded["current"])
+
+    assert events == []
+    assert wave.replay_events(events, "operator")["wake_count"] == 0
+
+
+def test_review_complete_counts_new_findings_and_armed_reviews_keep_findings_wake() -> None:
+    previous = {
+        "pr": {"state": "OPEN", "autoMergeRequest": None},
+        "pr_number": 7,
+        "unresolved_review_thread_ids": [],
+        "review_ids": [],
+        "error_run_ids": [],
+    }
+    current = deepcopy(previous)
+    current["unresolved_review_thread_ids"] = ["finding-1", "finding-2"]
+    current["review_ids"] = ["review-1"]
+
+    events = wave.snapshot_transition_events(previous, current)
+
+    assert [event["kind"] for event in events] == ["review_complete"]
+    assert events[0]["summary"] == "Open SWE review complete: 2 findings"
+
+    current["pr"] = {"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}
+    armed_events = wave.snapshot_transition_events(previous, current)
+
+    assert [event["kind"] for event in armed_events] == ["review_findings"]
+
+
+def test_recorded_plan_link_progress_stays_quiet_until_plan_marker() -> None:
+    recorded = fixture("oswe-137-plan-comments.json")
+
+    events = wave.comments_to_events(
+        recorded["comments"], recorded["session_user_id"], set(recorded["known_ids"])
+    )
+    result = wave.replay_events(events, recorded["session_user_id"])
+
+    assert [event["kind"] for event in events] == ["progress", "progress", "plan_posted"]
+    assert [wake["wake_node"] for wake in result["wakes"]] == ["plan_posted"]
+
+
+def test_review_absent_uses_window_and_draft_recovery_hint() -> None:
+    snapshot = {
+        "pr": {"number": 9, "state": "OPEN", "isDraft": True, "createdAt": "2026-07-24T11:51:00Z"},
+        "pr_number": 9,
+        "review_ids": [],
+        "observed_at": "2026-07-24T12:06:00Z",
+    }
+
+    assert wave.review_absent_event(snapshot, 901) is None
+    event = wave.review_absent_event(snapshot, 900)
+
+    assert event is not None
+    assert event["kind"] == "review_absent"
+    assert "15 minutes" in event["summary"]
+    assert "mark it ready for review" in event["summary"]
+
+
+def test_merge_conflict_detects_existing_and_newly_entered_states() -> None:
+    conflicted = {
+        "pr": {"number": 8, "state": "OPEN", "mergeStateStatus": "DIRTY"},
+        "pr_number": 8,
+        "unresolved_review_thread_ids": [],
+        "review_ids": [],
+        "error_run_ids": [],
+    }
+
+    assert wave.merge_conflict_event(conflicted)["kind"] == "merge_conflict"
+
+    clean = deepcopy(conflicted)
+    clean["pr"]["mergeStateStatus"] = "CLEAN"
+    events = wave.snapshot_transition_events(clean, conflicted)
+
+    assert [event["kind"] for event in events] == ["merge_conflict"]
+
+
 def test_liveness_wakes_only_when_silence_bound_is_crossed() -> None:
     previous = {
         "langgraph": {"thread": {"status": "busy"}},
@@ -262,10 +363,14 @@ def test_github_snapshot_paginates_complete_actor_timeline(
     def fake_graphql(query: str, variables: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
         calls.append(variables)
         cursor = variables.get("cursor")
-        if "WaveLabels" in query:
+        if "WavePrState" in query:
+            connection = {"autoMergeRequest": {"enabledAt": "now"}, "mergeStateStatus": "CLEAN"}
+        elif "WaveLabels" in query:
             connection = {"labels": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
         elif "WaveReviewThreads" in query:
             connection = {"reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+        elif "WaveReviews" in query:
+            connection = {"reviews": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
         else:
             connection = {
                 "timelineItems": {
@@ -300,9 +405,12 @@ def test_github_snapshot_paginates_complete_actor_timeline(
         {"owner": "owner", "repo": "repo", "number": 7, "cursor": "next"},
         {"owner": "owner", "repo": "repo", "number": 7},
         {"owner": "owner", "repo": "repo", "number": 7},
+        {"owner": "owner", "repo": "repo", "number": 7},
+        {"owner": "owner", "repo": "repo", "number": 7},
     ]
     assert pr["timeline_complete"] is True
     assert len(pr["timelineItems"]["nodes"]) == 2
+    assert pr["autoMergeRequest"] == {"enabledAt": "now"}
 
 
 def test_github_snapshot_retries_torn_review_threads_from_start(
@@ -317,7 +425,15 @@ def test_github_snapshot_retries_torn_review_threads_from_start(
 
     def fake_graphql(query: str, _variables: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         nonlocal attempt, review_page
-        if "WaveReviewThreads" in query:
+        if "WavePrState" in query:
+            query_name = "state"
+            connection = {}
+            head = attempts[attempt]["snapshot_head"]
+        elif "WaveReviews" in query:
+            query_name = "reviews"
+            connection = {"reviews": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+            head = attempts[attempt]["snapshot_head"]
+        elif "WaveReviewThreads" in query:
             query_name = "reviewThreads"
             page = attempts[attempt]["review_thread_pages"][review_page]
             review_page += 1
@@ -362,6 +478,8 @@ def test_github_snapshot_retries_torn_review_threads_from_start(
         "snapshot",
         "labels",
         "reviewThreads",
+        "reviews",
+        "state",
     ]
     assert deadlines == [123.0] * len(calls)
     assert pr["headRefOid"] == recorded["observed_fields"]["next_commit_head"]
@@ -605,6 +723,7 @@ def test_watch_rejects_non_positive_interval_before_snapshot(
         ("timeline", None, "GitHub timelineItems pagination exceeded 2 pages"),
         ("connection", "labels", "GitHub labels pagination exceeded 2 pages"),
         ("connection", "reviewThreads", "GitHub reviewThreads pagination exceeded 2 pages"),
+        ("connection", "reviews", "GitHub reviews pagination exceeded 2 pages"),
     ],
 )
 def test_pagination_guards_raise_named_errors(
@@ -852,6 +971,55 @@ def test_monitor_can_start_before_pr_creation(monkeypatch: pytest.MonkeyPatch) -
     assert snapshot["pr_number"] is None
 
 
+def test_live_snapshot_tracks_only_submitted_open_swe_reviews(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        wave,
+        "linear_snapshot",
+        lambda _issue, **_kwargs: {
+            "viewer": {"id": "session"},
+            "issue": {"comments": {"nodes": []}},
+        },
+    )
+    monkeypatch.setattr(
+        wave,
+        "langgraph_snapshot",
+        lambda _thread, **_kwargs: {"thread": {"metadata": {"pr_number": 7}}, "runs": []},
+    )
+    monkeypatch.setattr(
+        wave,
+        "github_pr_snapshot",
+        lambda *_args, **_kwargs: {
+            "state": "OPEN",
+            "reviewThreads": {"nodes": []},
+            "reviews": {
+                "nodes": [
+                    {
+                        "id": "complete",
+                        "submittedAt": "2026-07-24T12:00:00Z",
+                        "author": {"login": wave.AGENT_BOT_LOGIN},
+                    },
+                    {
+                        "id": "pending",
+                        "submittedAt": None,
+                        "author": {"login": wave.AGENT_BOT_LOGIN},
+                    },
+                    {
+                        "id": "human",
+                        "submittedAt": "2026-07-24T12:00:00Z",
+                        "author": {"login": "human"},
+                    },
+                ]
+            },
+        },
+    )
+
+    snapshot = wave.live_snapshot("issue", "thread", "owner/repo", None)
+
+    assert snapshot["review_ids"] == ["complete"]
+
+
 def test_terminal_state_ignores_absent_pr_without_latching() -> None:
     emitted_states: set[str] = set()
 
@@ -859,6 +1027,61 @@ def test_terminal_state_ignores_absent_pr_without_latching() -> None:
 
     assert event is None
     assert emitted_states == set()
+
+
+def test_watch_surfaces_existing_conflict_at_baseline_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _watch_snapshot("OPEN", observed_at="2026-07-24T12:00:00Z")
+    baseline["pr"].update({"number": 53, "mergeStateStatus": "DIRTY"})
+    current = deepcopy(baseline)
+    current["observed_at"] = "2026-07-24T12:01:00Z"
+    snapshots = iter([baseline, current])
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: next(snapshots))
+    monkeypatch.setattr(wave, "monitor_recovery", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(wave, "emit", lambda payload, **_kwargs: emitted.append(payload))
+
+    assert wave.cmd_watch(_watch_args(pr_number=53)) == 0
+    assert [item["wake_node"] for item in emitted] == ["merge_conflict"]
+
+
+def test_watch_surfaces_existing_review_absence_but_not_historical_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _watch_snapshot("OPEN", observed_at="2026-07-24T12:06:00Z")
+    baseline["pr"].update(
+        {
+            "number": 53,
+            "isDraft": True,
+            "createdAt": "2026-07-24T11:51:00Z",
+            "mergeStateStatus": "CLEAN",
+        }
+    )
+    baseline["review_ids"] = []
+    current = deepcopy(baseline)
+    current["observed_at"] = "2026-07-24T12:07:00Z"
+    snapshots = iter([baseline, current])
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: next(snapshots))
+    monkeypatch.setattr(wave, "monitor_recovery", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(wave, "emit", lambda payload, **_kwargs: emitted.append(payload))
+
+    assert wave.cmd_watch(_watch_args(pr_number=53)) == 0
+    assert [item["wake_node"] for item in emitted] == ["review_absent"]
+
+    reviewed_baseline = deepcopy(baseline)
+    reviewed_baseline["review_ids"] = ["historical-review"]
+    reviewed_current = deepcopy(reviewed_baseline)
+    reviewed_current["observed_at"] = "2026-07-24T12:08:00Z"
+    reviewed_snapshots = iter([reviewed_baseline, reviewed_current])
+    emitted.clear()
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: next(reviewed_snapshots))
+
+    assert wave.cmd_watch(_watch_args(pr_number=53)) == 0
+    assert emitted == []
 
 
 def test_watch_emits_terminal_merged_once_for_explicit_already_merged_pr(

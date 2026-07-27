@@ -1,0 +1,31 @@
+{
+  "source": "OSWE-137 recorded plan-link progress false positives, 2026-07-27",
+  "session_user_id": "operator",
+  "known_ids": [],
+  "comments": [
+    {
+      "id": "progress-1",
+      "body": "Reviewing the plan dashboard: https://studio.example/agents/abc/plan",
+      "createdAt": "2026-07-27T10:00:00Z",
+      "user": {
+        "id": "agent"
+      }
+    },
+    {
+      "id": "progress-2",
+      "body": "Progress update: review remains available at https://studio.example/agents/abc/plan",
+      "createdAt": "2026-07-27T10:01:00Z",
+      "user": {
+        "id": "agent"
+      }
+    },
+    {
+      "id": "plan-1",
+      "body": "## Plan: Implement the monitor wakes\n\n### Goal\nClose silent stalls.",
+      "createdAt": "2026-07-27T10:02:00Z",
+      "user": {
+        "id": "agent"
+      }
+    }
+  ]
+}
