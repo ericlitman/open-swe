@@ -1,0 +1,52 @@
+{
+  "source": "OSWE-112 PR #51 review and commit timeline, 2026-07-24",
+  "observed_fields": {
+    "review_head": "6d6266b4162138a47cdf071b2785133c328b53b2",
+    "review_submitted_at": "2026-07-24T00:35:52Z",
+    "next_commit_head": "9db02448dace921b6a57a15daee9eb4ee84ee645",
+    "next_commit_at": "2026-07-24T00:38:58Z"
+  },
+  "inferred_fields": [
+    "inferred_transient_state.attempts reconstructs the transient GraphQL page sequence from the observed head transition",
+    "inferred_transient_state.attempts[*].review_thread_pages uses synthetic thread IDs and page boundaries because the live paginated responses were not recorded"
+  ],
+  "inferred_transient_state": {
+    "attempts": [
+      {
+        "snapshot_head": "6d6266b4162138a47cdf071b2785133c328b53b2",
+        "review_thread_pages": [
+          {
+            "head": "6d6266b4162138a47cdf071b2785133c328b53b2",
+            "nodes": [
+              {
+                "id": "discarded-old-head-thread",
+                "isResolved": false
+              }
+            ],
+            "has_next": true
+          },
+          {
+            "head": "9db02448dace921b6a57a15daee9eb4ee84ee645",
+            "nodes": [],
+            "has_next": false
+          }
+        ]
+      },
+      {
+        "snapshot_head": "9db02448dace921b6a57a15daee9eb4ee84ee645",
+        "review_thread_pages": [
+          {
+            "head": "9db02448dace921b6a57a15daee9eb4ee84ee645",
+            "nodes": [
+              {
+                "id": "new-head-thread",
+                "isResolved": false
+              }
+            ],
+            "has_next": false
+          }
+        ]
+      }
+    ]
+  }
+}
