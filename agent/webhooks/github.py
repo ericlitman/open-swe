@@ -99,8 +99,8 @@ async def trigger_pr_review_from_ref(
 ) -> dict[str, Any]:
     repo_config = {"owner": pr_ref.owner, "name": pr_ref.repo}
 
-    app_token, app_token_expires_at = await common.get_github_app_execution_token_with_expiry(
-        target_repo=f"{pr_ref.owner}/{pr_ref.repo}"
+    app_token, app_token_expires_at = await common.get_github_app_installation_token_with_expiry(
+        target_repo=f"{pr_ref.owner}/{pr_ref.repo}", repositories=[pr_ref.repo]
     )
     if not app_token:
         common.logger.warning("No GitHub App token available for PR reviewer request")
@@ -111,15 +111,6 @@ async def trigger_pr_review_from_ref(
         return {"success": False, "error": "Could not fetch pull request metadata"}
 
     repo_private = common._repo_private_from_pr_metadata(pr_metadata)
-    repo_id = common._repo_id_from_pr_metadata(pr_metadata)
-    app_token, app_token_expires_at = await common._reviewer_token_for_repo(
-        repo_config,
-        repo_private=repo_private,
-        repo_id=repo_id,
-    )
-    if not app_token:
-        common.logger.warning("No GitHub App token available for PR reviewer request")
-        return {"success": False, "error": "No GitHub App token available"}
 
     base_sha = pr_metadata.get("base", {}).get("sha", "")
     head = pr_metadata.get("head", {})

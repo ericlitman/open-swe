@@ -54,7 +54,6 @@ from ..utils.comments import get_recent_comments  # noqa: F401
 from ..utils.dashboard_links import dashboard_thread_url  # noqa: F401
 from ..utils.github_app import (
     clear_app_token_cache,
-    get_github_app_execution_token_with_expiry,
     get_github_app_installation_token,  # noqa: F401
     get_github_app_installation_token_with_expiry,
 )
@@ -1040,12 +1039,15 @@ async def _reviewer_token_for_repo(
 ) -> tuple[str | None, str | None]:
     owner = repo_config.get("owner")
     repo_name = repo_config.get("name")
-    target_repo = f"{owner}/{repo_name}" if owner and repo_name else None
-    if not target_repo:
+    if not owner or not repo_name:
         return None, None
-    return await get_github_app_execution_token_with_expiry(
-        target_repo=target_repo,
-        repository_id=repo_id,
+    target_repo = f"{owner}/{repo_name}"
+    if repo_id is not None:
+        return await get_github_app_installation_token_with_expiry(
+            target_repo=target_repo, repository_ids=[repo_id]
+        )
+    return await get_github_app_installation_token_with_expiry(
+        target_repo=target_repo, repositories=[repo_name]
     )
 
 
@@ -1327,10 +1329,12 @@ async def _get_or_resolve_thread_github_token(
     thread_id: str, target_repo: str | None = None
 ) -> str | None:
     """Resolve and cache the GitHub App installation token for a thread."""
-    if not target_repo:
-        logger.warning("Missing trusted repository for thread %s", thread_id)
-        return None
-    token, expires_at = await get_github_app_execution_token_with_expiry(target_repo=target_repo)
+    owner, separator, repository = (target_repo or "").partition("/")
+    if not separator or not owner or not repository:
+        raise RuntimeError(f"GitHub auth failed for thread {thread_id}: missing trusted repository")
+    token, expires_at = await get_github_app_installation_token_with_expiry(
+        target_repo=target_repo, repositories=[repository]
+    )
     if not token:
         logger.warning("GitHub App installation token unavailable for thread %s", thread_id)
         return None

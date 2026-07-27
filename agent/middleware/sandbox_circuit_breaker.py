@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
-from ..utils.github_app import get_github_app_execution_token
+from ..utils.github_app import get_github_app_installation_token
 from ..utils.github_comments import post_github_comment
 from ..utils.github_token import get_github_token
 from ..utils.linear import comment_on_linear_issue
@@ -190,8 +190,8 @@ async def _post_unrecoverable_notification(config: Mapping[str, Any]) -> None:
         owner = repo.get("owner")
         name = repo.get("name")
         target_repo = f"{owner}/{name}" if owner and name else None
-        token = get_github_token(config) or (
-            await get_github_app_execution_token(target_repo=target_repo) if target_repo else None
+        token = get_github_token(config) or await get_github_app_installation_token(
+            target_repo=target_repo
         )
         if not token:
             logger.info("No GitHub token available for sandbox circuit breaker notification")

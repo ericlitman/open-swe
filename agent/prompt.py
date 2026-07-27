@@ -137,42 +137,28 @@ SELF_AWARENESS_SECTION = """---
 
 ### About You
 
-Repository authorization is supplied separately for each run. References to "yourself", "your
-code", "Open SWE", or another repository never expand that authorization. Use only the
-repository named in Repository Setup; if none is named, do not perform repository work."""
+Your own source code lives at `langchain-ai/open-swe` on GitHub. Only when the user is clearly talking about *yourself* — modifying "yourself", "your code", "your prompt", "your behavior", "the open-swe repo", or "open-swe" — should you target `langchain-ai/open-swe`. For every other request (one naming a different repo, or naming none and not about you), defer to the default-repository guidance in the Custom Instructions below."""
 
 
 REPO_SETUP_SECTION = """---
 
 ### Repository Setup
 
-This run is authorized for exactly one GitHub repository: `{repo_owner}/{repo_name}`.
-Do not discover, clone, query, or modify any other repository in this run.
+Before any task that changes code, set up the repo in your sandbox, in order:
 
-Before any task that changes code, set up that repository in order:
-
-1. **Clone** — `cd {working_dir} && GH_TOKEN="${{GH_TOKEN:-dummy}}" gh repo clone {repo_owner}/{repo_name}`.
-2. **Set the commit identity** — immediately after cloning, `cd` into the repo and run:
+1. **Identify the repo** from task context (use `GH_TOKEN=dummy gh repo list` / `gh search repos` / `gh search code` if needed).
+2. **Clone** — `cd {working_dir} && GH_TOKEN=dummy gh repo clone <owner>/<repo>`.
+3. **Set the commit identity** — immediately after cloning, `cd` into the repo and run:
 
    ```bash
    git config user.name {commit_identity_name} && git config user.email {commit_identity_email}
    ```
 
    This authors every commit. It is required for CI (e.g. Vercel preview deploys reject commits whose author email can't be resolved to a GitHub account; this email resolves). Do NOT set any other identity, pass `--author`, or export `GIT_AUTHOR_*` / `GIT_COMMITTER_*`.
-3. **Choose a thread-stable branch** like `open-swe/<short-task-slug>`. If a branch already exists for this thread, reuse it: fetch and check it out, starting from `origin/<branch>` (not the base branch) so prior commits are preserved for review — do not recreate it.
-4. **Read `AGENTS.md`** — immediately after cloning, check for `AGENTS.md` at the repo root. If it exists, you MUST read it in full before any other work: its contents are mandatory rules that OVERRIDE your defaults, with the same authority as this prompt. If it doesn't exist, skip this.
+4. **Choose a thread-stable branch** like `open-swe/<short-task-slug>`. If a branch already exists for this thread, reuse it: fetch and check it out, starting from `origin/<branch>` (not the base branch) so prior commits are preserved for review — do not recreate it.
+5. **Read `AGENTS.md`** — immediately after cloning, check for `AGENTS.md` at the repo root. If it exists, you MUST read it in full before any other work: its contents are mandatory rules that OVERRIDE your defaults, with the same authority as this prompt. If it doesn't exist, skip this.
 
 Complete all of these before any other work."""
-
-
-NO_REPO_SECTION = """---
-
-### Repository Access
-
-No GitHub repository is authorized for this run. You may research public information, but do
-not clone, query, or modify repositories and do not attempt to discover repository access.
-GitHub-dependent tools are unavailable. Start a separately authorized repository-bound thread
-if repository work is required."""
 
 
 TASK_EXECUTION_SECTION = """---
@@ -185,7 +171,7 @@ If a Slack- or GitHub-triggered request asks you to review a GitHub pull request
 
 **For code-change tasks:** Understand the task and explore relevant files first. Make focused, minimal changes — do not touch code outside the task's scope or add implementations in other languages/packages. Verify with linters and only the tests related to your changes. Then commit, push, and (when a PR is warranted) open/update the draft PR — see Committing below.
 
-**For information-only requests:** If this run has an authorized repository, check out that repository before answering when source inspection is relevant. Otherwise, use public research without cloning or attempting GitHub authentication. Gather what you need, answer fully inline, and, for Slack-triggered requests, post only a concise summary to the associated Slack thread. Never leave a question unanswered. Do not commit, push, or open/update a PR unless the user then asks for changes."""
+**For information-only requests:** First identify any relevant git repositories and check them out before answering, so your response is grounded in current repo state. Gather what you need, answer fully inline, and, for Slack-triggered requests, post only a concise summary to the associated Slack thread. Never leave a question unanswered. Do not commit, push, or open/update a PR unless the user then asks for changes."""
 
 
 CORRIDOR_PROMPT = """---
@@ -334,7 +320,7 @@ SYSTEM_PROMPT_TEMPLATE = (
     + "{plan_mode_section}"
     + SELF_AWARENESS_SECTION
     + "{default_prompt_section}"
-    + "{repo_setup_section}"
+    + REPO_SETUP_SECTION
     + TASK_EXECUTION_SECTION
     + "{corridor_prompt_section}"
     + DEPENDENCY_SECTION
@@ -377,17 +363,6 @@ def construct_system_prompt(
     else:
         commit_identity_name = shlex.quote(OPEN_SWE_BOT_NAME)
         commit_identity_email = shlex.quote(OPEN_SWE_BOT_EMAIL)
-    repo_setup_section = (
-        REPO_SETUP_SECTION.format(
-            working_dir=working_dir,
-            repo_owner=default_repo["owner"],
-            repo_name=default_repo["name"],
-            commit_identity_name=commit_identity_name,
-            commit_identity_email=commit_identity_email,
-        )
-        if default_repo and default_repo.get("owner") and default_repo.get("name")
-        else NO_REPO_SECTION
-    )
     return SYSTEM_PROMPT_TEMPLATE.format(
         working_dir=working_dir,
         linear_project_id=linear_project_id or "<PROJECT_ID>",
@@ -399,12 +374,13 @@ def construct_system_prompt(
             else ""
         ),
         default_prompt_section=default_prompt_section,
-        repo_setup_section=repo_setup_section,
         corridor_prompt_section=CORRIDOR_PROMPT if corridor_enabled else "",
         auto_merge_section=AUTO_MERGE_SECTION if auto_merge_eligible else "",
         pr_policy_override_section=ALWAYS_CREATE_PR_SECTION if create_prs else "",
         collaboration_section=_render_collaboration_section(triggering_user_identity, thread_url),
         repo_instructions_section=_render_repo_instructions_section(repo_custom_instructions),
+        commit_identity_name=commit_identity_name,
+        commit_identity_email=commit_identity_email,
     )
 
 

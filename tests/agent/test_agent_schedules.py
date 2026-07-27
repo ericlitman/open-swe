@@ -157,7 +157,7 @@ async def test_repo_config_for_schedule_requires_user_and_app_access(monkeypatch
         return "ghs_app"
 
     monkeypatch.setattr(schedules, "repo_config_for_user", user_repo)
-    monkeypatch.setattr(schedules, "get_github_app_execution_token", app_token)
+    monkeypatch.setattr(schedules, "get_github_app_installation_token", app_token)
 
     repo = await schedules._repo_config_for_schedule("alice", "victim/private")
 
@@ -172,7 +172,7 @@ async def test_repo_config_for_schedule_stops_when_user_access_is_denied(monkeyp
 
     app_token = AsyncMock(return_value="ghs_app")
     monkeypatch.setattr(schedules, "repo_config_for_user", deny_user)
-    monkeypatch.setattr(schedules, "get_github_app_execution_token", app_token)
+    monkeypatch.setattr(schedules, "get_github_app_installation_token", app_token)
 
     with pytest.raises(HTTPException, match="no access to this private repository"):
         await schedules._repo_config_for_schedule("alice", "victim/private")
@@ -501,23 +501,6 @@ async def test_launch_scheduled_agent_run_connects_slack_thread(
         (("slack_run_map", "C0123456789"), "thread:1784302353.900029")
     ]
     assert mapping["run_id"] == "run_123"
-
-
-async def test_repo_less_schedule_run_is_explicitly_tokenless() -> None:
-    config = await schedules._agent_run_config(
-        {
-            "id": "sched_1",
-            "repo": None,
-            "created_by": "alice",
-            "user_email": "alice@example.com",
-            "model": "Default",
-            "effort": None,
-        },
-        "thread-1",
-    )
-
-    assert config["configurable"]["repo_explicitly_none"] is True
-    assert "repo" not in config["configurable"]
 
 
 async def test_launch_scheduled_agent_run_stops_when_slack_post_fails(

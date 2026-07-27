@@ -37,7 +37,7 @@ async def request_pr_review(pr_url: str) -> dict[str, Any]:
         }
 
     configurable = get_config().get("configurable", {})
-    if not repository_matches_configurable(configurable, pr_ref.owner, pr_ref.repo):
+    if not await repository_matches_configurable(configurable, pr_ref.owner, pr_ref.repo):
         return {
             "success": False,
             "error": "Pull request repository is not authorized for this run",

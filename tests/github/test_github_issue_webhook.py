@@ -7,7 +7,6 @@ import importlib
 import json
 import logging
 from typing import cast
-from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -408,7 +407,7 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
 
     monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
     monkeypatch.setattr(
-        webhook_common, "get_github_app_execution_token_with_expiry", fake_get_token_with_expiry
+        webhook_common, "get_github_app_installation_token_with_expiry", fake_get_token_with_expiry
     )
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", fake_cache_token)
     monkeypatch.setattr(webhook_common, "fetch_pr_review_threads", fake_fetch_threads)
@@ -497,7 +496,7 @@ def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(mon
 
     monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
     monkeypatch.setattr(
-        webhook_common, "get_github_app_execution_token_with_expiry", fake_get_token_with_expiry
+        webhook_common, "get_github_app_installation_token_with_expiry", fake_get_token_with_expiry
     )
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", fake_cache_token)
     monkeypatch.setattr(webhook_common, "fetch_pr_review_threads", fake_fetch_threads)
@@ -1058,7 +1057,7 @@ def test_slack_webhook_ignores_unmentioned_non_plan_reply(monkeypatch) -> None:
 def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_get_github_app_execution_token_with_expiry(
+    async def fake_get_github_app_installation_token_with_expiry(
         **_kwargs: object,
     ) -> tuple[str | None, str | None]:
         return "app-token", None
@@ -1090,8 +1089,8 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
 
     monkeypatch.setattr(
         webhook_common,
-        "get_github_app_execution_token_with_expiry",
-        fake_get_github_app_execution_token_with_expiry,
+        "get_github_app_installation_token_with_expiry",
+        fake_get_github_app_installation_token_with_expiry,
     )
 
     async def fake_post_review_started_comment(**kwargs: object) -> int:
@@ -1164,6 +1163,7 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(
     semantic_re_review: bool,
 ) -> None:
     captured: dict[str, object] = {}
+    token_calls: list[dict[str, object]] = []
     auto_review_checked = False
 
     async def fake_auto_review_enabled(_repo_config: dict[str, str]) -> bool:
@@ -1174,9 +1174,10 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(
     async def fake_get_github_app_installation_token(**_kwargs: object) -> str | None:
         return "app-token"
 
-    async def fake_get_github_app_execution_token_with_expiry(
-        **_kwargs: object,
+    async def fake_get_github_app_installation_token_with_expiry(
+        **kwargs: object,
     ) -> tuple[str | None, str | None]:
+        token_calls.append(kwargs)
         return "app-token", None
 
     async def fake_fetch_github_pr_metadata(
@@ -1229,8 +1230,8 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(
     monkeypatch.setattr(webhook_common, "_is_repo_auto_review_enabled", fake_auto_review_enabled)
     monkeypatch.setattr(
         webhook_common,
-        "get_github_app_execution_token_with_expiry",
-        fake_get_github_app_execution_token_with_expiry,
+        "get_github_app_installation_token_with_expiry",
+        fake_get_github_app_installation_token_with_expiry,
     )
 
     async def fake_post_review_started_comment(**kwargs: object) -> int:
@@ -1269,6 +1270,7 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(
     prompt = cast(list[dict[str, str]], input_data["messages"])[0]["content"]
     config = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["configurable"])
     assert result["success"] is True
+    assert token_calls == [{"target_repo": "langchain-ai/open-swe", "repositories": ["open-swe"]}]
     assert auto_review_checked is False
     assert captured["graph"] == expected_graph
     assert captured["thread_create_kwargs"] == {
@@ -1352,15 +1354,21 @@ async def test_request_pr_review_tool_uses_shared_trigger(monkeypatch) -> None:
 
 
 async def test_request_pr_review_tool_rejects_other_repository(monkeypatch) -> None:
-    trigger = AsyncMock()
-    monkeypatch.setattr(request_pr_review_module, "trigger_pr_review_from_ref", trigger)
+    called = False
+
+    async def fake_trigger(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"success": True}
+
+    monkeypatch.setattr(request_pr_review_module, "trigger_pr_review_from_ref", fake_trigger)
     monkeypatch.setattr(
         request_pr_review_module,
         "get_config",
         lambda: {
             "configurable": {
-                "source": "dashboard",
-                "repo": {"owner": "acme", "name": "authorized"},
+                "source": "github",
+                "repo": {"owner": "acme", "name": "trusted"},
             }
         },
     )
@@ -1371,7 +1379,7 @@ async def test_request_pr_review_tool_rejects_other_repository(monkeypatch) -> N
         "success": False,
         "error": "Pull request repository is not authorized for this run",
     }
-    trigger.assert_not_awaited()
+    assert called is False
 
 
 def test_process_github_pr_comment_without_email_uses_app_token(

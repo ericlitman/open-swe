@@ -13,21 +13,22 @@ def _clear_token_cache() -> None:
 
 
 @pytest.mark.parametrize("source", ["linear", "slack", "github", "dashboard", "schedule"])
-def test_resolve_github_token_uses_installation_token_for_every_source(
+def test_resolve_github_token_uses_scoped_installation_token_for_every_source(
     monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
-    calls: list[str | None] = []
+    calls: list[tuple[str | None, list[str] | None]] = []
 
-    async def fake_app_token(*, target_repo: str | None = None) -> tuple[str, str]:
-        calls.append(target_repo)
+    async def fake_app_token(
+        *, target_repo: str | None = None, repositories: list[str] | None = None
+    ) -> tuple[str, str]:
+        calls.append((target_repo, repositories))
         return "installation-token", "2099-01-01T00:00:00Z"
 
-    monkeypatch.setattr(auth, "get_github_app_execution_token_with_expiry", fake_app_token)
+    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fake_app_token)
     config = {
         "configurable": {
             "source": source,
             "github_login": "octocat",
-            "user_email": "octocat@example.com",
             "repo": {"owner": "acme", "name": "widgets"},
         }
     }
@@ -35,13 +36,36 @@ def test_resolve_github_token_uses_installation_token_for_every_source(
     token, expires_at = asyncio.run(auth.resolve_github_token(config, "thread-1"))
 
     assert (token, expires_at) == ("installation-token", "2099-01-01T00:00:00Z")
-    assert calls == ["acme/widgets"]
+    assert calls == [("acme/widgets", ["widgets"])]
     assert (
         github_token.get_github_token(
             {"configurable": {"thread_id": "thread-1", "github_login": "someone-else"}}
         )
         == "installation-token"
     )
+
+
+def test_resolve_github_token_uses_team_default_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        auth,
+        "get_team_default_repo",
+        lambda: _coro({"owner": "default-owner", "name": "default-repo"}),
+    )
+
+    async def fake_app_token(**kwargs: object) -> tuple[str, None]:
+        assert kwargs == {
+            "target_repo": "default-owner/default-repo",
+            "repositories": ["default-repo"],
+        }
+        return "installation-token", None
+
+    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fake_app_token)
+
+    token, _ = asyncio.run(
+        auth.resolve_github_token({"configurable": {"source": "slack"}}, "thread-1")
+    )
+
+    assert token == "installation-token"
 
 
 def test_resolve_github_token_ignores_cached_user_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,11 +75,11 @@ def test_resolve_github_token_ignores_cached_user_token(monkeypatch: pytest.Monk
         principal=github_token.github_token_principal(login="octocat"),
     )
 
-    async def fake_app_token(*, target_repo: str | None = None) -> tuple[str, None]:
-        assert target_repo == "acme/widgets"
+    async def fake_app_token(**kwargs: object) -> tuple[str, None]:
+        assert kwargs == {"target_repo": "acme/widgets", "repositories": ["widgets"]}
         return "installation-token", None
 
-    monkeypatch.setattr(auth, "get_github_app_execution_token_with_expiry", fake_app_token)
+    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fake_app_token)
     config = {
         "configurable": {
             "source": "slack",
@@ -75,26 +99,16 @@ def test_resolve_github_token_ignores_cached_user_token(monkeypatch: pytest.Monk
     )
 
 
-def test_resolve_github_token_explicit_no_repo_is_tokenless(
+def test_resolve_github_token_fails_closed_without_trusted_repository(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_app_token(*, target_repo: str) -> tuple[str, None]:
-        raise AssertionError(f"unexpected token mint for {target_repo}")
+    monkeypatch.setattr(auth, "get_team_default_repo", lambda: _coro(None))
 
-    monkeypatch.setattr(auth, "get_github_app_execution_token_with_expiry", fake_app_token)
+    async def fail_mint(**_kwargs: object) -> tuple[None, None]:
+        raise AssertionError("missing repository context must not mint a token")
 
-    token, expires_at = asyncio.run(
-        auth.resolve_github_token(
-            {"configurable": {"source": "dashboard", "repo_explicitly_none": True}},
-            "thread-1",
-        )
-    )
+    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fail_mint)
 
-    assert token is None
-    assert expires_at is None
-
-
-def test_resolve_github_token_missing_repo_context_fails_closed() -> None:
     with pytest.raises(RuntimeError, match="missing trusted repository context"):
         asyncio.run(auth.resolve_github_token({"configurable": {"source": "slack"}}, "thread-1"))
 
@@ -102,10 +116,11 @@ def test_resolve_github_token_missing_repo_context_fails_closed() -> None:
 def test_resolve_github_token_fails_closed_when_installation_token_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_app_token(*, target_repo: str | None = None) -> tuple[None, None]:
+    async def fake_app_token(**kwargs: object) -> tuple[None, None]:
+        assert kwargs == {"target_repo": "acme/widgets", "repositories": ["widgets"]}
         return None, None
 
-    monkeypatch.setattr(auth, "get_github_app_execution_token_with_expiry", fake_app_token)
+    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fake_app_token)
 
     with pytest.raises(RuntimeError, match="GitHub App installation token unavailable"):
         asyncio.run(
@@ -113,7 +128,6 @@ def test_resolve_github_token_fails_closed_when_installation_token_unavailable(
                 {
                     "configurable": {
                         "source": "dashboard",
-                        "github_login": "octocat",
                         "repo": {"owner": "acme", "name": "widgets"},
                     }
                 },
@@ -130,3 +144,7 @@ def test_resolve_github_token_requires_configurable_state() -> None:
 def test_resolve_github_token_requires_source() -> None:
     with pytest.raises(RuntimeError, match="missing source"):
         asyncio.run(auth.resolve_github_token({"configurable": {}}, "thread-1"))
+
+
+async def _coro(value: object) -> object:
+    return value

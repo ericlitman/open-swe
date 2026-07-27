@@ -87,24 +87,6 @@ def test_construct_system_prompt_without_repo_instructions() -> None:
     assert "Repository-specific Custom Instructions" not in prompt
 
 
-def test_construct_system_prompt_binds_repository_setup() -> None:
-    prompt = construct_system_prompt(
-        working_dir="/work",
-        default_repo={"owner": "acme", "name": "widgets"},
-    )
-
-    assert "authorized for exactly one GitHub repository: `acme/widgets`" in prompt
-    assert "gh repo clone acme/widgets" in prompt
-    assert "gh repo list" not in prompt
-
-
-def test_construct_system_prompt_makes_repo_less_run_explicit() -> None:
-    prompt = construct_system_prompt(working_dir="/work")
-
-    assert "No GitHub repository is authorized for this run" in prompt
-    assert "gh repo clone" not in prompt
-
-
 def test_resolve_repo_custom_instructions_returns_none_without_repo() -> None:
     result = asyncio.run(server._resolve_repo_custom_instructions(None))
     assert result is None

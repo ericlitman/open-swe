@@ -65,7 +65,7 @@ from .tools import (
 )
 from .utils import ttl_cache
 from .utils.deferred_model import make_deferred_error_model
-from .utils.github_app import get_github_app_execution_token
+from .utils.github_app import get_github_app_installation_token
 from .utils.model import DEFAULT_LLM_REASONING, make_model, provider_model_kwargs
 from .utils.tracing import AGENT_TRACING_PROJECT, traced_graph_factory
 
@@ -156,10 +156,9 @@ class PrepareChatRunMiddleware(BasePrepareRunMiddleware):
         repo_owner = str(configurable.get("chat_repo_owner") or "")
         repo_name = str(configurable.get("chat_repo_name") or "")
         pr_number = configurable.get("chat_pr_number")
-        token = (
-            await get_github_app_execution_token(target_repo=f"{repo_owner}/{repo_name}")
-            if repo_owner and repo_name
-            else None
+        token = await get_github_app_installation_token(
+            target_repo=f"{repo_owner}/{repo_name}" if repo_owner and repo_name else None,
+            repositories=[repo_name] if repo_name else None,
         )
         if isinstance(token, str) and token:
             configurable["chat_github_token"] = token

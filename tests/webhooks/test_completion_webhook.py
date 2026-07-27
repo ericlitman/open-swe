@@ -71,7 +71,7 @@ async def test_reviewer_error_settles_tracked_check(monkeypatch: pytest.MonkeyPa
     client = _FakeClient(metadata)
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
     monkeypatch.setattr(
-        completion, "get_github_app_execution_token", AsyncMock(return_value="token")
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
     )
     settle = AsyncMock()
     monkeypatch.setattr(completion, "settle_review_check_run", settle)
@@ -109,7 +109,7 @@ async def test_reviewer_error_settles_failure_when_blocking(
     client = _FakeClient(metadata)
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
     monkeypatch.setattr(
-        completion, "get_github_app_execution_token", AsyncMock(return_value="token")
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
     )
     settle = AsyncMock()
     monkeypatch.setattr(completion, "settle_review_check_run", settle)
@@ -142,7 +142,7 @@ async def test_reviewer_error_preserves_pending_check_result(
     client = _FakeClient(metadata)
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
     monkeypatch.setattr(
-        completion, "get_github_app_execution_token", AsyncMock(return_value="token")
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
     )
     settle = AsyncMock()
     monkeypatch.setattr(completion, "settle_review_check_run", settle)
@@ -173,7 +173,7 @@ async def test_ordinary_agent_error_does_not_settle_review_check(
     monkeypatch.setattr(completion, "post_slack_thread_reply", AsyncMock(return_value=True))
     token = AsyncMock(return_value="token")
     settle = AsyncMock()
-    monkeypatch.setattr(completion, "get_github_app_execution_token", token)
+    monkeypatch.setattr(completion, "get_github_app_installation_token", token)
     monkeypatch.setattr(completion, "settle_review_check_run", settle)
 
     await completion.handle_run_completion(
@@ -207,7 +207,9 @@ async def test_reviewer_cleanup_skips_missing_metadata_or_token(
 ) -> None:
     client = _FakeClient(metadata | {"source": "schedule"})
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    monkeypatch.setattr(completion, "get_github_app_execution_token", AsyncMock(return_value=token))
+    monkeypatch.setattr(
+        completion, "get_github_app_installation_token", AsyncMock(return_value=token)
+    )
     settle = AsyncMock()
     monkeypatch.setattr(completion, "settle_review_check_run", settle)
 
@@ -230,7 +232,7 @@ async def test_reviewer_cleanup_failure_does_not_block_failure_reply(
     client = _FakeClient(metadata)
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
     monkeypatch.setattr(
-        completion, "get_github_app_execution_token", AsyncMock(return_value="token")
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
     )
     monkeypatch.setattr(
         completion, "settle_review_check_run", AsyncMock(side_effect=RuntimeError("boom"))

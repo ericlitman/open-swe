@@ -114,11 +114,7 @@ async def test_github_proxy_refresh_fails_when_installation_token_unavailable(
         ValueError,
         match="Cannot configure proxy: GitHub App installation token is unavailable",
     ):
-        await server._refresh_github_proxy(
-            backend,
-            thread_id="thread-1",
-            repo={"owner": "acme", "name": "widgets"},
-        )
+        await server._refresh_github_proxy(backend, thread_id="thread-1")
 
 
 def test_repeated_sandbox_errors_trigger_circuit_breaker_once() -> None:

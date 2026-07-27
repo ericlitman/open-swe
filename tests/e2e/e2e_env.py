@@ -41,7 +41,6 @@ _DEFAULTS = {
     # Sandbox: real local provider, rooted in a throwaway temp dir.
     "SANDBOX_TYPE": "local",
     "LOCAL_SANDBOX_ROOT_DIR": str(_WORK_DIR),
-    "LOCAL_SANDBOX_ENV_ALLOWLIST": "E2E_REMOTE,GIT_CONFIG_GLOBAL,GIT_CONFIG_SYSTEM",
     # Keep git's --global writes (bot identity) out of the user's ~/.gitconfig.
     "GIT_CONFIG_GLOBAL": str(TMP / "gitconfig-global"),
     "GIT_CONFIG_SYSTEM": "/dev/null",

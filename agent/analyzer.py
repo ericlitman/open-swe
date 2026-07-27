@@ -4,15 +4,16 @@ Learns a per-repo review-style prompt for the reviewer agent. It mines
 historical human PR review feedback and this reviewer's own past finding
 outcomes (resolved / dismissed / 👍👎) to teach what this team flags and skips.
 
-Uses the same repository-scoped sandbox + ``gh`` pattern as the reviewer agent.
-Dashboard OAuth is used only by the control plane to verify access and collect
-samples; it is never injected into the analyzer sandbox.
+Uses the same sandbox + ``gh`` pattern as the reviewer agent. The dashboard
+user's OAuth token is injected into the LangSmith GitHub proxy so ``gh`` works
+on public repos even when the GitHub App is not installed on them.
 """
 # ruff: noqa: E402
 
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from typing import Any, cast
 
@@ -25,12 +26,14 @@ warnings.filterwarnings("ignore", message=".*Pydantic V1.*", category=UserWarnin
 
 from deepagents import create_deep_agent
 from deepagents.backends.composite import CompositeBackend
+from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents.backends.state import StateBackend
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 
 from .dashboard.team_settings import get_effective_gateway_enabled
+from .integrations.langsmith import _configure_github_proxy
 from .middleware import (
     BasePrepareRunMiddleware,
     PrepareRunState,
@@ -52,8 +55,10 @@ from .tools.save_review_style import save_review_style_prompt
 from .utils import ttl_cache
 from .utils.analyzer_skills import SKILLS_ROUTE, skill_path_for_mode
 from .utils.deferred_model import make_deferred_error_model
+from .utils.github_app import get_github_app_installation_token
 from .utils.model import DEFAULT_LLM_REASONING, make_model, provider_model_kwargs
 from .utils.sandbox_paths import aresolve_sandbox_work_dir
+from .utils.sandbox_state import unwrap_sandbox_backend
 from .utils.tracing import REVIEW_TRACING_PROJECT, traced_graph_factory
 
 logger = logging.getLogger(__name__)
@@ -83,6 +88,16 @@ evidence and what to save.
 
 {reviewer_themes}
 """
+
+
+async def _configure_sandbox_github_proxy(
+    sandbox_backend: SandboxBackendProtocol,
+    github_token: str,
+) -> None:
+    if os.getenv("SANDBOX_TYPE", "langsmith") != "langsmith":
+        return
+    backend = unwrap_sandbox_backend(sandbox_backend)
+    await _configure_github_proxy(backend.id, github_token)
 
 
 async def _cached_gateway_enabled() -> bool:
@@ -121,15 +136,27 @@ class PrepareAnalyzerRunMiddleware(BasePrepareRunMiddleware):
 
     async def _prepare(self, state: PrepareRunState, runtime: Runtime) -> dict[str, Any]:  # noqa: ARG002
         configurable = self._config.get("configurable") or {}
-        full_name = str(configurable.get("review_style_full_name") or "owner/repo")
+        full_name = str(configurable.get("review_style_full_name") or "")
         owner, _, name = full_name.partition("/")
-        repo = {"owner": owner, "name": name} if owner and name else None
-        if repo is None:
+        if not owner or not name:
             raise RuntimeError("Review-style analyzer requires a trusted repository")
-        sandbox_backend = await ensure_sandbox_for_thread(self._thread_id, repo=repo)
+        repo = {"owner": owner, "name": name}
+        configured_token = configurable.get("review_style_github_token")
+        github_token = (
+            configured_token if isinstance(configured_token, str) and configured_token else None
+        )
+        sandbox_backend = await ensure_sandbox_for_thread(
+            self._thread_id, github_proxy_token=github_token, repo=repo
+        )
         work_dir = await aresolve_sandbox_work_dir(sandbox_backend)
         samples_text = str(configurable.get("review_style_samples_text") or "")
         mode = str(configurable.get("analyzer_mode") or "bootstrap")
+        if not (isinstance(github_token, str) and github_token):
+            github_token = await get_github_app_installation_token(
+                target_repo=full_name, repositories=[name]
+            )
+        if isinstance(github_token, str) and github_token:
+            await _configure_sandbox_github_proxy(sandbox_backend, github_token)
         system_prompt = STYLE_ANALYZER_PROMPT.format(
             repo_owner=owner or "<owner>",
             repo_name=name or "<repo>",
@@ -156,9 +183,17 @@ async def get_analyzer(config: RunnableConfig) -> Pregel:
     full_name = str(configurable.get("review_style_full_name") or "")
     owner, _, name = full_name.partition("/")
     analyzer_repo = {"owner": owner, "name": name} if owner and name else None
+    configured_token = configurable.get("review_style_github_token")
+    analyzer_github_token = (
+        configured_token if isinstance(configured_token, str) and configured_token else None
+    )
 
     async def reconnect_backend(_thread_id: str = thread_id):
-        return await ensure_sandbox_for_thread(_thread_id, repo=analyzer_repo)
+        return await ensure_sandbox_for_thread(
+            _thread_id,
+            github_proxy_token=analyzer_github_token,
+            repo=analyzer_repo,
+        )
 
     def backend_factory(_runtime: object, _thread_id: str = thread_id):
         default_backend = get_cached_sandbox_backend(_thread_id, reconnect=reconnect_backend)
