@@ -23,11 +23,7 @@ from ..dashboard.agent_overrides import (
 from ..dashboard.enabled_repos import is_review_repo_enabled
 from ..dashboard.oauth import build_settings_url
 from ..dashboard.options import default_vision_model_pair, model_supports_images  # noqa: F401
-from ..dashboard.profiles import (  # noqa: F401
-    get_profile,
-    get_valid_access_token,
-    has_access_token_record,
-)
+from ..dashboard.profiles import get_profile  # noqa: F401
 from ..dashboard.team_settings import (
     REVIEWER_ROUTING_VALUES,
     get_team_default_repo,
@@ -54,13 +50,10 @@ from ..review.findings import (
 )
 from ..review.publish import fetch_pr_review_threads, post_review_started_comment  # noqa: F401
 from ..review.reconcile import reconcile_findings_with_review_threads  # noqa: F401
-from ..utils.auth import (
-    is_bot_token_only_mode,
-    resolve_github_token_from_email,
-)
 from ..utils.comments import get_recent_comments  # noqa: F401
 from ..utils.dashboard_links import dashboard_thread_url  # noqa: F401
 from ..utils.github_app import (
+    clear_app_token_cache,
     get_github_app_installation_token,  # noqa: F401
     get_github_app_installation_token_with_expiry,
 )
@@ -81,13 +74,11 @@ from ..utils.github_comments import (
 from ..utils.github_org_membership import INTERNAL_BOT_LOGINS, is_user_active_org_member
 from ..utils.github_token import (
     cache_github_token_for_thread,
-    get_github_token_from_thread,
-    github_token_principal,
     invalidate_cached_github_token,
 )
 from ..utils.http import DEFAULT_HTTP_TIMEOUT
 from ..utils.json_types import ThreadLike, as_thread_dict
-from ..utils.linear import post_linear_trace_comment  # noqa: F401
+from ..utils.linear import _graphql_request, post_linear_trace_comment  # noqa: F401
 from ..utils.linear_team_repo_map import LINEAR_TEAM_TO_REPO
 from ..utils.multimodal import (
     dedupe_urls,  # noqa: F401
@@ -220,9 +211,6 @@ __all__ = [
     "get_slack_user_names",
     "get_team_default_repo",
     "get_thread_id_from_branch",
-    "get_valid_access_token",
-    "has_access_token_record",
-    "is_bot_token_only_mode",
     "json",
     "list_reviewer_findings",
     "logger",
@@ -321,7 +309,6 @@ ALLOWED_GITHUB_REPOS: frozenset[str] = frozenset(
     if repo.strip()
 )
 
-LINEAR_API_KEY = os.environ.get("LINEAR_API_KEY", "")
 
 _GITHUB_BOT_MESSAGE_PREFIXES = (
     "🔐 **GitHub Authentication Required**",
@@ -362,20 +349,7 @@ def get_repo_config_from_team_mapping(
 
 
 async def react_to_linear_comment(comment_id: str, emoji: str = "👀") -> bool:
-    """Add an emoji reaction to a Linear comment.
-
-    Args:
-        comment_id: The Linear comment ID
-        emoji: The emoji to react with (default: eyes 👀)
-
-    Returns:
-        True if successful, False otherwise
-    """
-    if not LINEAR_API_KEY:
-        return False
-
-    url = "https://api.linear.app/graphql"
-
+    """Add an emoji reaction to a Linear comment."""
     mutation = """
     mutation ReactionCreate($commentId: String!, $emoji: String!) {
         reactionCreate(input: { commentId: $commentId, emoji: $emoji }) {
@@ -383,41 +357,15 @@ async def react_to_linear_comment(comment_id: str, emoji: str = "👀") -> bool:
         }
     }
     """
-
-    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
-        try:
-            response = await client.post(
-                url,
-                headers={
-                    "Authorization": LINEAR_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "query": mutation,
-                    "variables": {"commentId": comment_id, "emoji": emoji},
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-            return bool(result.get("data", {}).get("reactionCreate", {}).get("success"))
-        except Exception:  # noqa: BLE001
-            return False
+    result = await _graphql_request(
+        mutation,
+        {"commentId": comment_id, "emoji": emoji},
+    )
+    return bool(result.get("reactionCreate", {}).get("success"))
 
 
 async def fetch_linear_issue_details(issue_id: str) -> dict[str, Any] | None:
-    """Fetch full issue details from Linear API including description and comments.
-
-    Args:
-        issue_id: The Linear issue ID
-
-    Returns:
-        Full issue data dict, or None if fetch failed
-    """
-    if not LINEAR_API_KEY:
-        return None
-
-    url = "https://api.linear.app/graphql"
-
+    """Fetch full issue details from Linear API including description and comments."""
     query = """
     query GetIssue($issueId: String!) {
         issue(id: $issueId) {
@@ -450,26 +398,11 @@ async def fetch_linear_issue_details(issue_id: str) -> dict[str, Any] | None:
         }
     }
     """
-
-    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
-        try:
-            response = await client.post(
-                url,
-                headers={
-                    "Authorization": LINEAR_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "query": query,
-                    "variables": {"issueId": issue_id},
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-
-            return result.get("data", {}).get("issue")
-        except httpx.HTTPError:
-            return None
+    result = await _graphql_request(query, {"issueId": issue_id})
+    if "error" in result:
+        return None
+    issue = result.get("issue")
+    return issue if isinstance(issue, dict) else None
 
 
 def generate_thread_id_from_issue(issue_id: str) -> str:
@@ -1104,13 +1037,19 @@ async def _reviewer_token_for_repo(
     repo_private: bool | None,
     repo_id: int | None = None,
 ) -> tuple[str | None, str | None]:
+    owner = repo_config.get("owner")
+    repo_name = repo_config.get("name")
+    target_repo = f"{owner}/{repo_name}" if owner and repo_name else None
     if repo_private is False:
         if repo_id is not None:
-            return await get_github_app_installation_token_with_expiry(repository_ids=[repo_id])
-        repo_name = repo_config.get("name")
+            return await get_github_app_installation_token_with_expiry(
+                target_repo=target_repo, repository_ids=[repo_id]
+            )
         if repo_name:
-            return await get_github_app_installation_token_with_expiry(repositories=[repo_name])
-    return await get_github_app_installation_token_with_expiry()
+            return await get_github_app_installation_token_with_expiry(
+                target_repo=target_repo, repositories=[repo_name]
+            )
+    return await get_github_app_installation_token_with_expiry(target_repo=target_repo)
 
 
 async def _store_current_reviewer_run_id(thread_id: str, run: Any) -> None:
@@ -1374,50 +1313,35 @@ async def update_agent_thread_pr_state(payload: dict[str, Any]) -> None:
             logger.debug("Failed to update pr_state for thread %s", thread_id, exc_info=True)
 
 
-async def _refresh_thread_github_token_after_401(thread_id: str, email: str) -> str | None:
-    """Invalidate the cached token after a 401 and try to resolve a fresh one."""
+async def _refresh_thread_github_token_after_401(
+    thread_id: str, target_repo: str | None = None
+) -> str | None:
+    """Invalidate cached App credentials after a 401 and mint a fresh token."""
     logger.warning(
-        "GitHub returned 401 for thread %s; invalidating cached token and re-resolving",
+        "GitHub returned 401 for thread %s; invalidating App token and re-resolving",
         thread_id,
     )
     await invalidate_cached_github_token(thread_id)
-    return await _get_or_resolve_thread_github_token(thread_id, email)
+    clear_app_token_cache()
+    return await _get_or_resolve_thread_github_token(thread_id, target_repo)
 
 
-async def _get_or_resolve_thread_github_token(thread_id: str, email: str) -> str | None:
-    """Resolve and cache a GitHub token for a thread when available.
-
-    In bot-token-only mode, returns a fresh GitHub App installation token
-    instead of resolving per-user OAuth tokens.
-    """
-    if is_bot_token_only_mode():
-        bot_token, expires_at = await get_github_app_installation_token_with_expiry()
-        if bot_token:
-            cache_github_token_for_thread(
-                thread_id, bot_token, expires_at=expires_at, is_bot_token=True
-            )
-            return bot_token
-        logger.warning("Bot-token-only mode but GitHub App token unavailable")
+async def _get_or_resolve_thread_github_token(
+    thread_id: str, target_repo: str | None = None
+) -> str | None:
+    """Resolve and cache the GitHub App installation token for a thread."""
+    token, expires_at = await get_github_app_installation_token_with_expiry(target_repo=target_repo)
+    if not token:
+        logger.warning("GitHub App installation token unavailable for thread %s", thread_id)
         return None
-
-    principal = github_token_principal(email=email)
-    github_token, _expires_at = await get_github_token_from_thread(thread_id, principal=principal)
-    if github_token:
-        return github_token
-
-    auth_result = await resolve_github_token_from_email(email)
-    github_token = auth_result.get("token")
-    if not github_token:
-        return None
-
-    expires_at = auth_result.get("expires_at")
+    await invalidate_cached_github_token(thread_id)
     cache_github_token_for_thread(
         thread_id,
-        github_token,
-        expires_at=expires_at if isinstance(expires_at, str) else None,
-        principal=principal,
+        token,
+        expires_at=expires_at,
+        is_bot_token=True,
     )
-    return github_token
+    return token
 
 
 def _finding_comment_ids(finding: Finding) -> set[int]:

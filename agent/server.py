@@ -242,11 +242,20 @@ async def _start_langsmith_sandbox_if_needed(sandbox_backend: SandboxBackendProt
 
 async def _resolve_proxy_token(
     github_proxy_token: str | None,
+    repo: dict[str, str] | None = None,
 ) -> tuple[str | None, str | None, None]:
     """Resolve the proxy token and its expiry."""
     if github_proxy_token:
         return github_proxy_token, None, None
-    token, expires_at = await get_github_app_installation_token_with_expiry()
+    owner = repo.get("owner") if repo else None
+    name = repo.get("name") if repo else None
+    target_repo = f"{owner}/{name}" if owner and name else None
+    if target_repo:
+        token, expires_at = await get_github_app_installation_token_with_expiry(
+            target_repo=target_repo
+        )
+    else:
+        token, expires_at = await get_github_app_installation_token_with_expiry()
     return token, expires_at, None
 
 
@@ -265,6 +274,10 @@ async def _resolve_snapshot_id_for_repo(repo: dict[str, str] | None) -> str | No
         return None
 
 
+class GitHubProxyTokenUnavailable(ValueError):
+    """Raised when proxy credentials cannot be resolved."""
+
+
 async def _create_sandbox_with_proxy(
     github_proxy_token: str | None = None,
     *,
@@ -274,15 +287,20 @@ async def _create_sandbox_with_proxy(
 ) -> SandboxBackendProtocol:
     """Create a new sandbox with GitHub proxy auth configured."""
     snapshot_id = await _resolve_snapshot_id_for_repo(repo)
-    sandbox_backend = await create_sandbox(snapshot_id=snapshot_id)
-
     sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
+    token: str | None = None
+    expires_at: str | None = None
+    permissions = None
     if sandbox_type == "langsmith":
-        token, expires_at, permissions = await _resolve_proxy_token(github_proxy_token)
+        token, expires_at, permissions = await _resolve_proxy_token(github_proxy_token, repo)
         if not token:
             msg = "Cannot configure proxy: GitHub App installation token is unavailable"
             logger.error(msg)
-            raise ValueError(msg)
+            raise GitHubProxyTokenUnavailable(msg)
+
+    sandbox_backend = await create_sandbox(snapshot_id=snapshot_id)
+    if sandbox_type == "langsmith":
+        assert token is not None
         await _start_langsmith_sandbox_if_needed(sandbox_backend)
         await _configure_github_proxy(sandbox_backend.id, token)
         record_proxy_token_expiry(
@@ -290,6 +308,7 @@ async def _create_sandbox_with_proxy(
             expires_at,
             repositories=github_proxy_repositories,
             permissions=permissions,
+            target_repo=f"{repo['owner']}/{repo['name']}" if repo else None,
         )
 
     return sandbox_backend
@@ -301,18 +320,17 @@ async def _refresh_github_proxy(
     *,
     thread_id: str | None = None,
     github_proxy_repositories: Sequence[str] | None = None,
+    repo: dict[str, str] | None = None,
 ) -> None:
     """Refresh GitHub proxy credentials for reused LangSmith sandboxes."""
     if os.getenv("SANDBOX_TYPE", "langsmith") != "langsmith":
         return
 
-    token, expires_at, permissions = await _resolve_proxy_token(github_proxy_token)
+    token, expires_at, permissions = await _resolve_proxy_token(github_proxy_token, repo)
     if not token:
-        logger.warning(
-            "Skipping GitHub proxy refresh for sandbox %s: installation token unavailable",
-            sandbox_backend.id,
-        )
-        return
+        msg = "Cannot configure proxy: GitHub App installation token is unavailable"
+        logger.error(msg)
+        raise GitHubProxyTokenUnavailable(msg)
 
     current_backend = unwrap_sandbox_backend(sandbox_backend)
     await _start_langsmith_sandbox_if_needed(current_backend)
@@ -322,6 +340,7 @@ async def _refresh_github_proxy(
         expires_at,
         repositories=github_proxy_repositories,
         permissions=permissions,
+        target_repo=f"{repo['owner']}/{repo['name']}" if repo else None,
     )
 
 
@@ -339,7 +358,10 @@ async def _refresh_github_proxy_or_recreate(
             github_proxy_token,
             thread_id=thread_id,
             github_proxy_repositories=github_proxy_repositories,
+            repo=repo,
         )
+    except GitHubProxyTokenUnavailable:
+        raise
     except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to refresh GitHub proxy for sandbox %s on thread %s, recreating sandbox",

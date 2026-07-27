@@ -1,8 +1,12 @@
-# Wave comment templates
+# openswe-run comment templates
 
-Replace every angle-bracket placeholder and delete unused optional lines.
+Replace every angle-bracket placeholder and delete unused optional lines. `openswe-run`
+refuses bodies with unfilled placeholders unless `--force` is passed. Dispatch and Approval
+are verbatim-compatible with the openswe-wave templates — do not drift them independently.
 
 ## Dispatch
+
+(Default body of `openswe-run start`; shown for `--body-file` customization.)
 
 ```markdown
 @openswe repo <owner/repo> — Execute <TICKET> only.
@@ -16,6 +20,9 @@ PR body: include the Linear reference and `Closes <TICKET>` as a standalone line
 ```
 
 ## Approval
+
+Record real adjudication rulings — the checklist must have been applied first
+(`approve` refuses without `--adjudicated`).
 
 ```markdown
 @openswe Plan approved. Proceed with <TICKET> implementation only.
@@ -45,48 +52,18 @@ Scope is unchanged: <scope>. Post the revised plan in this thread and hold for a
 
 ## Nudge
 
+(Default body of `openswe-run nudge`. One nudge per stall, ever — then escalate.)
+
 ```markdown
 @openswe Status check on <TICKET>: no visible progress for <minutes> minutes. Post a brief status update in this thread (current step, and the blocker if you are blocked).
 ```
 
-## Spot-audit
+## Review-findings reply
 
 ```markdown
-Operator spot-audit of <PR> at `<head>`:
+@openswe Review findings on <PR> acknowledged for <TICKET>.
 
-- Scope/file surface: <result>
-- Approved plan rulings: <result>
-- Acceptance invariants: <result>
-- Failure and recovery paths: <result>
-- Tests and unchanged boundaries: <result>
+- <finding>: <fix now / justified as-is, with evidence>
 
-Disposition: <pass / follow-up required, with exact evidence>.
-```
-
-## Closeout
-
-```markdown
-Completed <TICKET>.
-
-- PR and protected merge: <url> / `<merge-sha>`
-- Review and CI: <result>
-- Acceptance replay/live evidence: <result>
-- Recovery actions, if any: <result>
-- Deployment, if in scope: <result>
-- Tracker: verify the Linear issue auto-transitioned on merge; flip manually only as fallback
-- Follow-ups: <tickets or none>
-```
-
-## OSWE-100 tally
-
-```markdown
-Plan-gate tally — <TICKET> (<wave>)
-
-Challenges: <count and disposition>
-Questions: <count and disposition>
-Unverified: <count and resolution status>
-
-Manual adjudication catch: <what changed, or none>.
-Review-layer catch: <what changed, or none; keep separate from plan challenges>.
-Running ratified-challenge total: <count across plans>, with <false-count> false challenges.
+Address the accepted findings, push to the same branch, and let Review and CI re-run.
 ```
