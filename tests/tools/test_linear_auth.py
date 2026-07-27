@@ -40,6 +40,26 @@ def _configure_app(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_CLIENT_SECRET", "client-secret")
 
 
+async def test_mint_scope_carries_agent_scopes_because_grant_follows_latest_mint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_app(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == linear.LINEAR_OAUTH_URL
+        assert parse_qs(request.content.decode()) == {
+            "grant_type": ["client_credentials"],
+            "client_id": ["client-id"],
+            "client_secret": ["client-secret"],
+            "scope": ["read,write,app:assignable,app:mentionable"],
+        }
+        return httpx.Response(200, json={"access_token": "app-token", "expires_in": 3600})
+
+    _mock_http(monkeypatch, handler)
+
+    assert (await linear.get_linear_auth()).headers == {"Authorization": "Bearer app-token"}
+
+
 async def test_app_mode_mints_bearer_token_and_reuses_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -49,13 +69,6 @@ async def test_app_mode_mints_bearer_token_and_reuses_cache(
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if str(request.url) == linear.LINEAR_OAUTH_URL:
-            form = parse_qs(request.content.decode())
-            assert form == {
-                "grant_type": ["client_credentials"],
-                "client_id": ["client-id"],
-                "client_secret": ["client-secret"],
-                "scope": ["read,write"],
-            }
             return httpx.Response(200, json={"access_token": "app-token", "expires_in": 3600})
         assert request.headers["Authorization"] == "Bearer app-token"
         return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
