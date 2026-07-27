@@ -113,7 +113,7 @@ from .utils.agent_definitions import _SubagentSystemPromptMiddleware
 from .utils.agents_md import fetch_agents_md, fetch_scoped_agents_md
 from .utils.api_standards_skill import fetch_api_standards_skill
 from .utils.deferred_model import make_deferred_error_model
-from .utils.github_app import get_github_app_installation_token_with_expiry
+from .utils.github_app import get_github_app_execution_token_with_expiry
 from .utils.github_token import cache_github_token_for_thread
 from .utils.model import DEFAULT_LLM_REASONING, make_model, provider_model_kwargs
 from .utils.repo_prep import materialize_trusted_skills, prepare_review_repo
@@ -865,14 +865,11 @@ async def _ensure_reviewer_sandbox_for_thread(
     if configurable.get("source"):
         repo_name_for_token = str(repo_config.get("name") or "")
         repo_owner_for_token = str(repo_config.get("owner") or "")
-        target_repo = (
-            f"{repo_owner_for_token}/{repo_name_for_token}"
-            if repo_owner_for_token and repo_name_for_token
-            else None
-        )
-        github_token, expires_at = await get_github_app_installation_token_with_expiry(
-            target_repo=target_repo,
-            repositories=[repo_name_for_token] if repo_name_for_token else None,
+        if not repo_owner_for_token or not repo_name_for_token:
+            raise RuntimeError(f"Missing trusted repository for reviewer thread {thread_id}")
+        target_repo = f"{repo_owner_for_token}/{repo_name_for_token}"
+        github_token, expires_at = await get_github_app_execution_token_with_expiry(
+            target_repo=target_repo
         )
         if not github_token:
             raise RuntimeError(

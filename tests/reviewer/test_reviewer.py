@@ -222,7 +222,7 @@ async def test_reviewer_resolves_app_installation_token_at_run_start() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("app-token", None),
         ) as mock_app_token,
@@ -249,7 +249,7 @@ async def test_reviewer_resolves_app_installation_token_at_run_start() -> None:
     assert "github_token_encrypted" not in metadata
     # Token is resolved in this process at run start (scoped to the repo), not read
     # from a cache the webhook handler populated in a different process.
-    mock_app_token.assert_awaited_once_with(target_repo="acme/repo", repositories=["repo"])
+    mock_app_token.assert_awaited_once_with(target_repo="acme/repo")
     mock_cache_token.assert_called_once_with(
         "reviewer-thread-id", "app-token", expires_at=None, is_bot_token=True
     )
@@ -276,7 +276,7 @@ async def test_reviewer_reuses_app_token_for_sandbox_proxy() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("app-token", "exp"),
         ),
@@ -327,7 +327,7 @@ async def test_reviewer_raises_when_app_installation_token_unavailable() -> None
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=(None, None),
         ),
@@ -473,7 +473,7 @@ async def test_reviewer_injects_repo_style_during_eval() -> None:
     fetch_threads = AsyncMock(return_value=[])
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -540,7 +540,7 @@ async def test_reviewer_inlines_org_guidelines_into_system_prompt() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -621,7 +621,7 @@ async def test_reviewer_inlines_agents_md_into_system_prompt() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -679,7 +679,7 @@ async def test_reviewer_inlines_claude_md_when_agents_md_absent() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -1133,7 +1133,7 @@ async def test_reviewer_injects_pr_review_threads_into_first_review_context() ->
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -1210,7 +1210,7 @@ async def test_reviewer_injects_pr_review_threads_into_re_review_context() -> No
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -1279,7 +1279,7 @@ async def test_reviewer_omits_threads_block_when_fetch_returns_empty() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -1344,7 +1344,7 @@ async def test_reviewer_continues_when_thread_fetch_raises() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -1419,7 +1419,7 @@ async def test_reviewer_populates_diff_line_set_from_github_api() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -1491,7 +1491,7 @@ async def test_reviewer_leaves_validation_disabled_when_diff_fetch_fails() -> No
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),
@@ -1557,7 +1557,7 @@ async def test_reviewer_injects_pr_title_and_body_into_context() -> None:
 
     with (
         patch(
-            "agent.reviewer.get_github_app_installation_token_with_expiry",
+            "agent.reviewer.get_github_app_execution_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("gh-token", None),
         ),

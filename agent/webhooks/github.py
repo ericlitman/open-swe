@@ -99,9 +99,7 @@ async def trigger_pr_review_from_ref(
 ) -> dict[str, Any]:
     repo_config = {"owner": pr_ref.owner, "name": pr_ref.repo}
 
-    # Full token to read PR metadata (privacy/id aren't in the trigger ref);
-    # re-scoped below once we know whether the repo is public.
-    app_token, app_token_expires_at = await common.get_github_app_installation_token_with_expiry(
+    app_token, app_token_expires_at = await common.get_github_app_execution_token_with_expiry(
         target_repo=f"{pr_ref.owner}/{pr_ref.repo}"
     )
     if not app_token:

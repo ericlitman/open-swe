@@ -8,13 +8,13 @@ from typing import Any
 
 from langgraph.graph.state import RunnableConfig
 
-from .github_app import get_github_app_installation_token_with_expiry
+from .github_app import get_github_app_execution_token_with_expiry
 from .github_token import cache_github_token_for_thread, invalidate_cached_github_token
 
 logger = logging.getLogger(__name__)
 
 
-def _target_repo(configurable: Mapping[str, Any]) -> str | None:
+def target_repo_from_configurable(configurable: Mapping[str, Any]) -> str | None:
     repo = configurable.get("repo")
     if not isinstance(repo, Mapping):
         return None
@@ -25,10 +25,15 @@ def _target_repo(configurable: Mapping[str, Any]) -> str | None:
     return None
 
 
+def repository_matches_configurable(configurable: Mapping[str, Any], owner: str, repo: str) -> bool:
+    target_repo = target_repo_from_configurable(configurable)
+    return target_repo is not None and target_repo.casefold() == f"{owner}/{repo}".casefold()
+
+
 async def _resolve_bot_installation_token(
-    thread_id: str, target_repo: str | None = None
+    thread_id: str, target_repo: str
 ) -> tuple[str, str | None]:
-    token, expires_at = await get_github_app_installation_token_with_expiry(target_repo=target_repo)
+    token, expires_at = await get_github_app_execution_token_with_expiry(target_repo=target_repo)
     if not token:
         raise RuntimeError(
             "GitHub App installation token unavailable. Set GITHUB_APP_ID, "
@@ -47,7 +52,7 @@ async def _resolve_bot_installation_token(
 
 async def resolve_github_token(
     config: Mapping[str, Any] | RunnableConfig, thread_id: str
-) -> tuple[str, str | None]:
+) -> tuple[str | None, str | None]:
     """Resolve and cache the repository-scoped GitHub App installation token."""
     configurable = config.get("configurable")
     if not isinstance(configurable, Mapping):
@@ -55,4 +60,13 @@ async def resolve_github_token(
     if not configurable.get("source"):
         logger.error("Missing source for thread %s; cannot resolve GitHub auth", thread_id)
         raise RuntimeError(f"GitHub auth failed for thread {thread_id}: missing source")
-    return await _resolve_bot_installation_token(thread_id, _target_repo(configurable))
+    target_repo = target_repo_from_configurable(configurable)
+    if target_repo is None:
+        if configurable.get("repo_explicitly_none") is True:
+            await invalidate_cached_github_token(thread_id)
+            logger.info("Running thread %s without GitHub credentials", thread_id)
+            return None, None
+        raise RuntimeError(
+            f"GitHub auth failed for thread {thread_id}: missing trusted repository context"
+        )
+    return await _resolve_bot_installation_token(thread_id, target_repo)
