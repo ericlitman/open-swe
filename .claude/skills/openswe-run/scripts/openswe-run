@@ -716,9 +716,13 @@ def cmd_start(args: argparse.Namespace) -> int:
             repo=args.repo,
             ticket=issue["identifier"],
             ref=args.ref,
-            scope=args.scope or f"execute {issue['identifier']} exactly as ticketed",
-            boundaries=args.boundaries or f"no changes beyond {issue['identifier']}'s stated scope",
-            verify=args.verify or "focused tests, `make lint`, and `make typecheck`",
+            scope=(args.scope or f"execute {issue['identifier']} exactly as ticketed").removesuffix("."),
+            boundaries=(
+                args.boundaries or f"no changes beyond {issue['identifier']}'s stated scope"
+            ).removesuffix("."),
+            verify=(args.verify or "focused tests, `make lint`, and `make typecheck`").removesuffix(
+                "."
+            ),
         )
     guard_body_hygiene(body)
     guard_placeholders(args.ticket, body, args.force)
@@ -941,7 +945,8 @@ def cmd_approve(args: argparse.Namespace) -> int:
     ensure_env(args.ticket, langgraph=True, github=False)
     if not args.adjudicated:
         raise RunError(
-            "Refusing to approve without adjudication. Read references/adjudication-checklist.md, "
+            "Refusing to approve without adjudication. Read "
+            "../openswe-wave/references/adjudication-checklist.md, "
             "record your rulings in the approval body, then re-run with --adjudicated."
         )
     body = read_body(args)

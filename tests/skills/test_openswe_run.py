@@ -40,20 +40,13 @@ def test_entry_point_is_executable_and_self_describes() -> None:
     assert "usage:" in result.stdout.lower()
 
 
-def test_every_reference_named_in_skill_md_resolves() -> None:
-    """A doc that points at a missing reference is a broken skill, not a typo.
-
-    Tracked references live here; the adjudication checklist resolves from the
-    sibling openswe-wave, the same fallback the scripts use.
-    """
+def test_every_reference_path_named_in_skill_md_resolves_exactly() -> None:
+    """A doc that points at a missing reference is a broken skill, not a typo."""
     skill_md = (SKILL / "SKILL.md").read_text()
+    references = sorted(set(re.findall(r"`((?:\.\./)?[A-Za-z0-9_./-]+\.md)`", skill_md)))
 
-    for name in sorted(set(re.findall(r"references/([A-Za-z0-9._-]+\.md)", skill_md))):
-        local = SKILL / "references" / name
-        sibling = WAVE_SKILL / "references" / name
-        assert local.is_file() or sibling.is_file(), (
-            f"SKILL.md names references/{name}, which exists neither here nor in openswe-wave"
-        )
+    for reference in references:
+        assert (SKILL / reference).is_file(), f"SKILL.md names missing path {reference}"
 
 
 def test_wave_assets_resolve_from_the_sibling_skill_in_a_checkout() -> None:
@@ -691,9 +684,11 @@ def test_child_timeout_result_is_reported_directly() -> None:
     assert '"plan_status_nontransactional"' in message
 
 
-def test_start_dry_run_does_not_capture_or_poll_handoff(
+@pytest.mark.parametrize("terminal_period", ["", "."])
+def test_start_dry_run_normalizes_punctuation_without_posting(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    terminal_period: str,
 ) -> None:
     calls: list[dict] = []
     monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: calls.append(kwargs))
@@ -725,16 +720,19 @@ def test_start_dry_run_does_not_capture_or_poll_handoff(
         ticket="ABC-1",
         repo="owner/name",
         ref="main",
-        scope=None,
-        boundaries=None,
-        verify=None,
+        scope=f"do the thing{terminal_period}",
+        boundaries=f"nothing else{terminal_period}",
+        verify=f"focused tests{terminal_period}",
         body_file=None,
         dry_run=True,
         force=False,
     )
 
     assert run.cmd_start(args) == 0
-    capsys.readouterr()
+    payload = json.loads(capsys.readouterr().out)
+    assert "Required scope: do the thing.\n" in payload["body"]
+    assert "Boundaries: nothing else.\n" in payload["body"]
+    assert "Verification: focused tests.\n" in payload["body"]
     assert calls == [{"langgraph": False, "github": False}]
 
 
