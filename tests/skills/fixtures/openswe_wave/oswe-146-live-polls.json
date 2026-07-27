@@ -1,0 +1,86 @@
+{
+  "source": "OSWE-168 field report for OSWE-146 / PR #63 on 2026-07-27",
+  "repo": "ericlitman/open-swe",
+  "pr_number": 63,
+  "session_user_id": "session",
+  "polls": [
+    {
+      "snapshot": {
+        "linear": {
+          "viewer": {
+            "id": "session"
+          },
+          "issue": {
+            "comments": {
+              "nodes": []
+            }
+          }
+        },
+        "langgraph": {
+          "thread": {
+            "metadata": {
+              "pr_number": 63
+            }
+          },
+          "runs": []
+        },
+        "pr": {
+          "number": 63,
+          "state": "OPEN",
+          "reviewThreads": {
+            "nodes": []
+          }
+        },
+        "pr_number": 63,
+        "unresolved_review_thread_ids": [],
+        "latest_run_status": null,
+        "latest_run_at": null,
+        "error_run_ids": [],
+        "observed_at": "2026-07-27T12:27:24+00:00"
+      }
+    },
+    {
+      "error": "GitHub GraphQL returned errors: fixture poll failure"
+    },
+    {
+      "snapshot": {
+        "linear": {
+          "viewer": {
+            "id": "session"
+          },
+          "issue": {
+            "comments": {
+              "nodes": []
+            }
+          }
+        },
+        "langgraph": {
+          "thread": {
+            "metadata": {
+              "pr_number": 63
+            }
+          },
+          "runs": []
+        },
+        "pr": {
+          "number": 63,
+          "state": "MERGED",
+          "reviewThreads": {
+            "nodes": []
+          }
+        },
+        "pr_number": 63,
+        "unresolved_review_thread_ids": [],
+        "latest_run_status": null,
+        "latest_run_at": null,
+        "error_run_ids": [],
+        "observed_at": "2026-07-27T12:33:24+00:00"
+      }
+    }
+  ],
+  "inferred_fields": [
+    "snapshot payloads reconstructed from the recorded watch start and merge window",
+    "session_user_id normalized for deterministic self-suppression",
+    "error poll injected to verify wrapper-visible per-poll failure delivery"
+  ]
+}

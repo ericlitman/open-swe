@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import select
 import subprocess
 import sys
 import time
@@ -831,6 +833,58 @@ def test_watch_emits_live_open_to_merged_transition_once(
 
     assert result == 0
     assert [item["wake_node"] for item in emitted] == ["terminal_merged"]
+
+
+def test_recorded_live_watch_flushes_poll_error_and_terminal_merge_to_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = fixture("oswe-146-live-polls.json")
+    polls = iter(recorded["polls"])
+    observed_numbers: list[int | None] = []
+
+    def live_snapshot(
+        _issue_id: str,
+        _thread_id: str,
+        _repo: str,
+        pr_number: int | None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        observed_numbers.append(pr_number)
+        poll = next(polls)
+        if error := poll.get("error"):
+            raise wave.WaveOpsError(error)
+        return deepcopy(poll["snapshot"])
+
+    monkeypatch.setattr(wave, "live_snapshot", live_snapshot)
+    monkeypatch.setattr(wave, "monitor_recovery", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+    read_fd, write_fd = os.pipe()
+    try:
+        with os.fdopen(write_fd, "w") as writer, monkeypatch.context() as patch:
+            patch.setattr(sys, "stdout", writer)
+
+            result = wave.cmd_watch(
+                _watch_args(
+                    repo=recorded["repo"],
+                    pr_number=recorded["pr_number"],
+                    session_user_id=recorded["session_user_id"],
+                    iterations=2,
+                )
+            )
+
+            ready, _, _ = select.select([read_fd], [], [], 0)
+            assert ready == [read_fd]
+            emitted = [json.loads(line) for line in os.read(read_fd, 65536).splitlines()]
+    finally:
+        os.close(read_fd)
+
+    assert result == 0
+    assert observed_numbers == [63, 63, 63]
+    assert [item["wake_node"] for item in emitted] == [
+        "unhandled_condition",
+        "terminal_merged",
+    ]
+    assert emitted[0]["summary"].startswith("wave monitor poll failed:")
 
 
 def test_failed_poll_does_not_latch_later_terminal_state(
