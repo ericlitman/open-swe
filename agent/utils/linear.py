@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 LINEAR_API_URL = "https://api.linear.app/graphql"
 LINEAR_OAUTH_URL = "https://api.linear.app/oauth/token"
+# The latest client-credentials mint sets the app grant, so every minter must use this scope.
+LINEAR_APP_TOKEN_SCOPE = "read,write,app:assignable,app:mentionable"
 _TOKEN_EXPIRY_SKEW_SECONDS = 60.0
 _TOKEN_CACHE: tuple[str, float] | None = None
 _WARNED_CONFIGURATIONS: set[str] = set()
@@ -95,7 +97,7 @@ async def _mint_linear_app_token(client_id: str, client_secret: str) -> tuple[st
                     "grant_type": "client_credentials",
                     "client_id": client_id,
                     "client_secret": client_secret,
-                    "scope": "read,write",
+                    "scope": LINEAR_APP_TOKEN_SCOPE,
                 },
             )
             response.raise_for_status()

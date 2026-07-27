@@ -243,7 +243,20 @@ Open SWE listens for Linear comments that mention `@openswe`.
 3. Under **Data change events**, enable **Comments → Create** only
 4. Click **Create webhook**
 
-**Get your API key:**
+**Configure authentication:**
+
+For app-actor authentication, enable client-credentials tokens on the Linear OAuth app and
+save its credentials as `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET`. Every
+client-credentials minter must request the exact scope set
+`read,write,app:assignable,app:mentionable`: [Linear applies the latest mint's scopes to
+the app grant](https://linear.app/developers/oauth-2-0-authentication#client-credentials-tokens)
+and revokes existing app-actor tokens when a different scope set is requested. Do not try to
+update these scopes through an `actor=app` authorization-code flow while a client-credentials
+authorization exists; Linear rejects that exchange with `Cannot update scopes on client
+credentials token`. Use another client-credentials mint with the same complete scope set
+instead.
+
+The deprecated personal API key fallback remains available:
 
 1. Go to **Settings → API → Personal API keys → New API key**
 2. Name it `open-swe`, select **All access**, and copy the key
@@ -459,7 +472,9 @@ CONFIGURED_ADMINS=""                   # e.g. "alice,bob@my-org.com"
 LANGGRAPH_URL="http://localhost:2024"
 
 # === Linear (if using Linear trigger) ===
-LINEAR_API_KEY=""                      # From step 5
+LINEAR_CLIENT_ID=""                    # OAuth app client ID from step 5
+LINEAR_CLIENT_SECRET=""                # OAuth app client secret from step 5
+LINEAR_API_KEY=""                      # Deprecated personal API key fallback
 LINEAR_WEBHOOK_SECRET=""               # From step 5
 
 # === Slack (if using Slack trigger) ===
