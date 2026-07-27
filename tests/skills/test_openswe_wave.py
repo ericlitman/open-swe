@@ -1301,13 +1301,15 @@ def test_status_ticket_validation_rejects_malformed_and_duplicate_rows(
 
 def test_status_ticket_validation_derives_thread_and_parser_binds(tmp_path: Path) -> None:
     tickets = tmp_path / "tickets.json"
-    tickets.write_text(json.dumps([{"identifier": "oswe-1", "issue_id": STATUS_ISSUE_IDS[0]}]))
+    noncanonical_issue_id = "0000000000004000800000000000000A"
+    canonical_issue_id = "00000000-0000-4000-8000-00000000000a"
+    tickets.write_text(json.dumps([{"identifier": "oswe-1", "issue_id": noncanonical_issue_id}]))
 
     assert wave.load_status_tickets(tickets) == [
         {
             "identifier": "OSWE-1",
-            "issue_id": STATUS_ISSUE_IDS[0],
-            "thread_id": wave.derive_linear_thread_id(STATUS_ISSUE_IDS[0]),
+            "issue_id": canonical_issue_id,
+            "thread_id": wave.derive_linear_thread_id(canonical_issue_id),
         }
     ]
     args = wave.parser().parse_args(
@@ -1315,6 +1317,46 @@ def test_status_ticket_validation_derives_thread_and_parser_binds(tmp_path: Path
     )
     assert args.func is wave.cmd_status_sweep
     assert args.divergence_minutes == 15
+
+
+def test_status_ticket_uuid_equivalence_is_duplicate(tmp_path: Path) -> None:
+    tickets = tmp_path / "tickets.json"
+    tickets.write_text(
+        json.dumps(
+            [
+                {
+                    "identifier": "OSWE-1",
+                    "issue_id": "00000000-0000-4000-8000-00000000000a",
+                    "thread_id": "thread-1",
+                },
+                {
+                    "identifier": "OSWE-2",
+                    "issue_id": "0000000000004000800000000000000A",
+                    "thread_id": "thread-2",
+                },
+            ]
+        )
+    )
+
+    with pytest.raises(wave.WaveOpsError, match="duplicates issue_id"):
+        wave.load_status_tickets(tickets)
+
+
+def test_status_ticket_explicit_thread_id_is_trimmed_as_supplied(tmp_path: Path) -> None:
+    tickets = tmp_path / "tickets.json"
+    tickets.write_text(
+        json.dumps(
+            [
+                {
+                    "identifier": "OSWE-1",
+                    "issue_id": "0000000000004000800000000000000A",
+                    "thread_id": "  Custom-Thread-ID  ",
+                }
+            ]
+        )
+    )
+
+    assert wave.load_status_tickets(tickets)[0]["thread_id"] == "Custom-Thread-ID"
 
 
 def test_github_pr_list_is_exactly_one_repository_wide_call(
@@ -1550,21 +1592,57 @@ def test_sibling_divergence_terminal_peers_and_missing_timestamps() -> None:
 
 def test_status_pr_matching_validates_metadata_repository_before_number() -> None:
     prs = [{"number": 7, "body": "Closes OSWE-1"}]
+    metadata = {
+        "pr_number": 7,
+        "pr_owner": "owner",
+        "pr_repo": "repo",
+        "repo_owner": "owner",
+        "repo_name": "repo",
+    }
 
-    assert wave.match_status_pr("OSWE-1", {"pr_number": 7}, prs, repo_slug="owner/repo") == (
-        prs[0],
-        [],
-    )
+    assert wave.match_status_pr("OSWE-1", metadata, prs, repo_slug="owner/repo") == (prs[0], [])
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pr_owner", "other"),
+        ("pr_repo", "other"),
+        ("repo_owner", "other"),
+        ("repo_name", "other"),
+    ],
+)
+def test_status_pr_matching_rejects_repository_metadata_mismatch(field: str, value: str) -> None:
+    prs = [{"number": 7, "body": "Closes OSWE-1"}]
+    metadata = {"pr_number": 7, "pr_owner": "owner", "pr_repo": "repo"}
+    metadata[field] = value
+
+    matched, errors = wave.match_status_pr("OSWE-1", metadata, prs, repo_slug="owner/repo")
+
+    assert matched is None
+    assert errors == [f"thread metadata {field} {value!r} does not match --repo owner/repo"]
+
+
+def test_status_pr_matching_rejects_conflicting_repository_fields() -> None:
+    prs = [{"number": 7, "body": "Closes OSWE-1"}]
+
     matched, errors = wave.match_status_pr(
         "OSWE-1",
-        {"pr_number": 7, "repo_owner": "other", "repo_name": "repo"},
+        {
+            "pr_number": 7,
+            "pr_owner": "owner",
+            "pr_repo": "repo",
+            "repo_owner": "conflicting-owner",
+            "repo_name": "repo",
+        },
         prs,
         repo_slug="owner/repo",
     )
+
     assert matched is None
-    assert len(errors) == 1
-    assert "repo_owner" in errors[0]
-    assert "does not match --repo owner/repo" in errors[0]
+    assert errors == [
+        "thread metadata repo_owner 'conflicting-owner' does not match --repo owner/repo"
+    ]
 
 
 @pytest.mark.parametrize(

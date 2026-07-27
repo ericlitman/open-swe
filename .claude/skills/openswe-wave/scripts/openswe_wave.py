@@ -549,17 +549,17 @@ def load_status_tickets(path: str | Path) -> list[dict[str, str]]:
         if not isinstance(issue_id, str):
             raise WaveOpsError(f"--tickets row {index} has malformed issue_id")
         try:
-            uuid.UUID(issue_id)
+            canonical_issue_id = str(uuid.UUID(issue_id))
         except (ValueError, AttributeError) as exc:
             raise WaveOpsError(f"--tickets row {index} has malformed issue_id") from exc
         if thread_id is not None and (not isinstance(thread_id, str) or not thread_id.strip()):
             raise WaveOpsError(f"--tickets row {index} has malformed thread_id")
         normalized = {
             "identifier": identifier.upper(),
-            "issue_id": issue_id,
+            "issue_id": canonical_issue_id,
             "thread_id": thread_id.strip()
             if isinstance(thread_id, str)
-            else derive_linear_thread_id(issue_id),
+            else derive_linear_thread_id(canonical_issue_id),
         }
         duplicate_fields = []
         for name, value in normalized.items():
@@ -594,7 +594,13 @@ def match_status_pr(
     if metadata_number is not None:
         if repo_slug is not None:
             owner, repo = repo_slug.split("/", 1)
-            for field, expected in (("repo_owner", owner), ("repo_name", repo)):
+            repository_fields = (
+                ("pr_owner", owner),
+                ("pr_repo", repo),
+                ("repo_owner", owner),
+                ("repo_name", repo),
+            )
+            for field, expected in repository_fields:
                 value = metadata.get(field)
                 if value is None:
                     continue
