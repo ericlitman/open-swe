@@ -67,7 +67,10 @@ class RecoveryDecision:
 
 def emit(payload: Any, *, pretty: bool = True) -> None:
     """Print stable JSON output."""
-    print(json.dumps(payload, indent=2 if pretty else None, sort_keys=True, default=str))
+    print(
+        json.dumps(payload, indent=2 if pretty else None, sort_keys=True, default=str),
+        flush=True,
+    )
 
 
 def require_env(*names: str) -> dict[str, str]:
