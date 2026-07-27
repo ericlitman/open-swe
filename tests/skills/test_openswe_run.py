@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.machinery
 import importlib.util
 import io
 import json
@@ -20,15 +19,12 @@ ROOT = Path(__file__).parents[2]
 SKILL = ROOT / ".claude/skills/openswe-run"
 WAVE_SKILL = ROOT / ".claude/skills/openswe-wave"
 SCRIPT_PATH = SKILL / "scripts/openswe-run"
-
-# The script is deliberately extensionless (it is the skill's CLI entry point),
-# so spec_from_file_location cannot infer a loader for it.
-LOADER = importlib.machinery.SourceFileLoader("openswe_run", str(SCRIPT_PATH))
-SPEC = importlib.util.spec_from_loader("openswe_run", LOADER)
-assert SPEC is not None
+MODULE_PATH = SKILL / "scripts/openswe_run.py"
+SPEC = importlib.util.spec_from_file_location("openswe_run", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
 run = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = run
-LOADER.exec_module(run)
+SPEC.loader.exec_module(run)
 
 
 def test_entry_point_is_executable_and_self_describes() -> None:
@@ -39,6 +35,147 @@ def test_entry_point_is_executable_and_self_describes() -> None:
     assert SCRIPT_PATH.stat().st_mode & 0o111
     assert result.returncode == 0
     assert "usage:" in result.stdout.lower()
+
+
+def test_handoffs_use_checkout_local_exclude(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True, text=True)
+    gitignore = tmp_path / ".gitignore"
+    gitignore.write_text("*.tmp\n")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", ".gitignore"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+
+    handoffs = run.ensure_handoffs()
+
+    assert handoffs.is_dir()
+    assert gitignore.read_text() == "*.tmp\n"
+    ignored = subprocess.run(
+        ["git", "-C", str(tmp_path), "check-ignore", "handoffs/probe"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ignored.returncode == 0
+
+
+def test_handoffs_use_linked_worktree_local_exclude(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (repo / "tracked").write_text("tracked\n")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "initial"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-b", "linked", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(worktree))
+
+    assert run.ensure_handoffs().is_dir()
+    ignored = subprocess.run(
+        ["git", "-C", str(worktree), "check-ignore", "handoffs/probe"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ignored.returncode == 0
+    assert not (worktree / ".gitignore").exists()
+
+
+def test_handoff_creation_survives_unavailable_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def unavailable_git(*args: Any, **kwargs: Any) -> None:
+        raise OSError
+
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run.subprocess, "run", unavailable_git)
+
+    assert run.ensure_handoffs().is_dir()
+
+
+def test_monitor_python_override_expands_user(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OPENSWE_RUN_PYTHON", "~/venv/bin/python")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        run, "_monitor_python_error", lambda command: commands.append(command) or None
+    )
+
+    assert run.resolve_monitor_python() == [str(tmp_path / "venv/bin/python")]
+    assert commands == [[str(tmp_path / "venv/bin/python")]]
+
+
+def test_monitor_python_override_failure_is_a_run_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_python(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("not found")
+
+    monkeypatch.setenv("OPENSWE_RUN_PYTHON", "python -m uv")
+    monkeypatch.setattr(run.subprocess, "run", missing_python)
+
+    with pytest.raises(run.RunError, match="OPENSWE_RUN_PYTHON.*not found"):
+        run.resolve_monitor_python()
+
+
+def test_monitor_python_probe_requires_both_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def subprocess_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing sdk")
+
+    monkeypatch.setattr(run.subprocess, "run", subprocess_run)
+
+    assert run._monitor_python_error(["python"]) == "missing sdk"
+    assert commands == [["python", "-c", "import httpx, langgraph_sdk"]]
+
+
+def test_monitor_python_falls_through_unusable_control_plane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    control_plane = tmp_path / "python"
+    control_plane.touch()
+    monkeypatch.delenv("OPENSWE_RUN_PYTHON", raising=False)
+    monkeypatch.setattr(run, "CONTROL_PLANE_PYTHON", str(control_plane))
+    monkeypatch.setattr(run.shutil, "which", lambda command: "/usr/bin/uv")
+    commands: list[list[str]] = []
+
+    def probe(command: list[str]) -> str | None:
+        commands.append(command)
+        return "missing sdk" if command == [str(control_plane)] else None
+
+    monkeypatch.setattr(run, "_monitor_python_error", probe)
+
+    resolved = run.resolve_monitor_python()
+
+    assert resolved[0] == "uv"
+    assert commands == [[str(control_plane)], resolved]
 
 
 @pytest.fixture
@@ -91,6 +228,29 @@ def test_env_prints_every_missing_export_fix(
     assert run.LINEAR_ENV_ERROR in captured.err
     assert run.LANGGRAPH_ENV_ERROR in captured.err
     assert run.GH_ENV_ERROR in captured.err
+
+
+def test_env_is_not_ready_when_monitor_python_is_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
+    monkeypatch.setenv("GH_TOKEN", "github")
+
+    def unusable_monitor_python() -> None:
+        raise run.RunError("bad sdk")
+
+    monkeypatch.setattr(run, "skill_checkout_warning", lambda: None)
+    monkeypatch.setattr(run, "resolve_monitor_python", unusable_monitor_python)
+
+    assert run.cmd_env(argparse.Namespace()) == 2
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False
+    assert report["monitor_python"] == "UNRESOLVED: bad sdk"
 
 
 def test_env_requires_a_token_not_just_the_gh_executable(
@@ -794,7 +954,7 @@ def test_plan_actions_guard_transition_shared_baseline_post_then_poll(
 
 def test_timeout_annotation_exists_only_in_child_timeout_evidence() -> None:
     assert run.HANDOFF_MONITOR_SNIPPET.count("plan_status_nontransactional") == 1
-    source = SCRIPT_PATH.read_text()
+    source = MODULE_PATH.read_text()
     assert source.count("plan_status_nontransactional") == 1
     assert 'evidence["plan_status_nontransactional"] = PLAN_CONTEXT' in source
 
