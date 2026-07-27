@@ -3,37 +3,59 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from langgraph.graph.state import RunnableConfig
 
-from .github_app import get_github_app_execution_token_with_expiry
+from ..dashboard.team_settings import get_team_default_repo
+from .github_app import get_github_app_installation_token_with_expiry
 from .github_token import cache_github_token_for_thread, invalidate_cached_github_token
 
 logger = logging.getLogger(__name__)
 
 
-def target_repo_from_configurable(configurable: Mapping[str, Any]) -> str | None:
-    repo = configurable.get("repo")
+def _repository_parts(repo: object) -> tuple[str, str] | None:
     if not isinstance(repo, Mapping):
         return None
     owner = repo.get("owner")
     name = repo.get("name")
     if isinstance(owner, str) and owner and isinstance(name, str) and name:
-        return f"{owner}/{name}"
+        return owner, name
     return None
 
 
-def repository_matches_configurable(configurable: Mapping[str, Any], owner: str, repo: str) -> bool:
-    target_repo = target_repo_from_configurable(configurable)
-    return target_repo is not None and target_repo.casefold() == f"{owner}/{repo}".casefold()
+async def resolve_trusted_repository(
+    configurable: Mapping[str, Any],
+    *,
+    default_repo_resolver: Callable[[], Awaitable[dict[str, str] | None]] | None = None,
+) -> tuple[str, str] | None:
+    configured = _repository_parts(configurable.get("repo"))
+    if configured is not None:
+        return configured
+    if configurable.get("repo_explicitly_none") is True:
+        return None
+    resolver = default_repo_resolver or get_team_default_repo
+    return _repository_parts(await resolver())
+
+
+async def repository_matches_configurable(
+    configurable: Mapping[str, Any], owner: str, repo: str
+) -> bool:
+    trusted = await resolve_trusted_repository(configurable)
+    return (
+        trusted is not None
+        and trusted[0].casefold() == owner.casefold()
+        and trusted[1].casefold() == repo.casefold()
+    )
 
 
 async def _resolve_bot_installation_token(
-    thread_id: str, target_repo: str
+    thread_id: str, owner: str, repository: str
 ) -> tuple[str, str | None]:
-    token, expires_at = await get_github_app_execution_token_with_expiry(target_repo=target_repo)
+    token, expires_at = await get_github_app_installation_token_with_expiry(
+        target_repo=f"{owner}/{repository}", repositories=[repository]
+    )
     if not token:
         raise RuntimeError(
             "GitHub App installation token unavailable. Set GITHUB_APP_ID, "
@@ -52,7 +74,7 @@ async def _resolve_bot_installation_token(
 
 async def resolve_github_token(
     config: Mapping[str, Any] | RunnableConfig, thread_id: str
-) -> tuple[str | None, str | None]:
+) -> tuple[str, str | None]:
     """Resolve and cache the repository-scoped GitHub App installation token."""
     configurable = config.get("configurable")
     if not isinstance(configurable, Mapping):
@@ -60,13 +82,9 @@ async def resolve_github_token(
     if not configurable.get("source"):
         logger.error("Missing source for thread %s; cannot resolve GitHub auth", thread_id)
         raise RuntimeError(f"GitHub auth failed for thread {thread_id}: missing source")
-    target_repo = target_repo_from_configurable(configurable)
-    if target_repo is None:
-        if configurable.get("repo_explicitly_none") is True:
-            await invalidate_cached_github_token(thread_id)
-            logger.info("Running thread %s without GitHub credentials", thread_id)
-            return None, None
+    trusted = await resolve_trusted_repository(configurable)
+    if trusted is None:
         raise RuntimeError(
             f"GitHub auth failed for thread {thread_id}: missing trusted repository context"
         )
-    return await _resolve_bot_installation_token(thread_id, target_repo)
+    return await _resolve_bot_installation_token(thread_id, *trusted)

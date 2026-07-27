@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -146,53 +145,6 @@ async def test_installation_token_can_be_scoped_to_repository_ids(
     assert expires_at == "expires"
     assert _FakeAsyncClient.last_post is not None
     assert _FakeAsyncClient.last_post["json"] == {"repository_ids": [123]}
-
-
-@pytest.mark.asyncio
-async def test_execution_token_is_always_scoped_to_one_repository(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _configure(monkeypatch, _FakeAsyncClient)
-    monkeypatch.setattr(
-        github_app,
-        "_resolve_installation_id",
-        AsyncMock(return_value="2"),
-    )
-
-    token, expires_at = await github_app.get_github_app_execution_token_with_expiry(
-        target_repo="acme/widgets"
-    )
-
-    assert token == "token"
-    assert expires_at == "expires"
-    assert _FakeAsyncClient.last_post is not None
-    assert _FakeAsyncClient.last_post["json"] == {"repositories": ["widgets"]}
-
-
-@pytest.mark.asyncio
-async def test_execution_token_can_scope_by_repository_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _configure(monkeypatch, _FakeAsyncClient)
-    monkeypatch.setattr(
-        github_app,
-        "_resolve_installation_id",
-        AsyncMock(return_value="2"),
-    )
-
-    await github_app.get_github_app_execution_token_with_expiry(
-        target_repo="acme/widgets",
-        repository_id=123,
-    )
-
-    assert _FakeAsyncClient.last_post is not None
-    assert _FakeAsyncClient.last_post["json"] == {"repository_ids": [123]}
-
-
-@pytest.mark.asyncio
-async def test_execution_token_rejects_missing_repository_context() -> None:
-    with pytest.raises(ValueError, match="cannot be blank"):
-        await github_app.get_github_app_execution_token_with_expiry(target_repo="")
 
 
 @pytest.mark.asyncio

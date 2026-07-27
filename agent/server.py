@@ -78,7 +78,6 @@ from .integrations.notion_mcp import load_notion_tools
 from .integrations.stagehand_browser import load_browser_tools
 from .middleware import (
     BasePrepareRunMiddleware,
-    ExcludeToolsMiddleware,
     ModelFallbackMiddleware,
     PlanModeMiddleware,
     PullRequestCreationGuardMiddleware,
@@ -133,7 +132,7 @@ from .tools import (
     web_search,
 )
 from .utils import ttl_cache
-from .utils.auth import resolve_github_token
+from .utils.auth import resolve_github_token, resolve_trusted_repository
 from .utils.authorship import (
     OPEN_SWE_BOT_EMAIL,
     OPEN_SWE_BOT_NAME,
@@ -141,8 +140,8 @@ from .utils.authorship import (
 )
 from .utils.dashboard_links import dashboard_plan_url, dashboard_thread_url
 from .utils.deferred_model import make_deferred_error_model
-from .utils.github_app import get_github_app_execution_token_with_expiry
-from .utils.github_proxy import clear_proxy_token_expiry, record_proxy_token_expiry
+from .utils.github_app import get_github_app_installation_token_with_expiry
+from .utils.github_proxy import record_proxy_token_expiry
 from .utils.json_types import as_json_object
 from .utils.model import (
     DEFAULT_LLM_REASONING,
@@ -184,21 +183,14 @@ def _tool_loader_timeout_seconds() -> float:
 
 
 async def _resolve_prompt_default_repo(configurable: dict[str, Any]) -> dict[str, str] | None:
-    repo_config = configurable.get("repo")
-    if isinstance(repo_config, dict):
-        owner = repo_config.get("owner")
-        name = repo_config.get("name")
-        if isinstance(owner, str) and isinstance(name, str):
-            return {"owner": owner, "name": name}
-
-    if configurable.get("repo_explicitly_none") is True:
-        return None
-
     try:
-        return await get_team_default_repo()
+        trusted = await resolve_trusted_repository(
+            configurable, default_repo_resolver=get_team_default_repo
+        )
     except Exception:
         logger.debug("Failed to load team default repo for prompt", exc_info=True)
         return None
+    return {"owner": trusted[0], "name": trusted[1]} if trusted is not None else None
 
 
 async def _resolve_repo_custom_instructions(
@@ -246,14 +238,16 @@ async def _resolve_proxy_token(
     repo: dict[str, str] | None = None,
 ) -> tuple[str | None, str | None, None]:
     """Resolve the proxy token and its expiry."""
+    if github_proxy_token:
+        return github_proxy_token, None, None
     owner = repo.get("owner") if repo else None
     name = repo.get("name") if repo else None
     target_repo = f"{owner}/{name}" if owner and name else None
-    if not target_repo:
+    if not target_repo or not name:
         return None, None, None
-    if github_proxy_token:
-        return github_proxy_token, None, None
-    token, expires_at = await get_github_app_execution_token_with_expiry(target_repo=target_repo)
+    token, expires_at = await get_github_app_installation_token_with_expiry(
+        target_repo=target_repo, repositories=[name]
+    )
     return token, expires_at, None
 
 
@@ -291,26 +285,23 @@ async def _create_sandbox_with_proxy(
     permissions = None
     if sandbox_type == "langsmith":
         token, expires_at, permissions = await _resolve_proxy_token(github_proxy_token, repo)
-        if repo is not None and not token:
+        if not token:
             msg = "Cannot configure proxy: GitHub App installation token is unavailable"
             logger.error(msg)
             raise GitHubProxyTokenUnavailable(msg)
 
     sandbox_backend = await create_sandbox(snapshot_id=snapshot_id)
     if sandbox_type == "langsmith":
-        if token:
-            await _start_langsmith_sandbox_if_needed(sandbox_backend)
-            await _configure_github_proxy(sandbox_backend.id, token)
-            repo_name = repo.get("name") if repo else None
-            record_proxy_token_expiry(
-                thread_id,
-                expires_at,
-                repositories=[repo_name] if repo_name else github_proxy_repositories,
-                permissions=permissions,
-                target_repo=f"{repo['owner']}/{repo['name']}" if repo else None,
-            )
-        else:
-            clear_proxy_token_expiry(thread_id)
+        assert token is not None
+        await _start_langsmith_sandbox_if_needed(sandbox_backend)
+        await _configure_github_proxy(sandbox_backend.id, token)
+        record_proxy_token_expiry(
+            thread_id,
+            expires_at,
+            repositories=[repo["name"]] if repo else github_proxy_repositories,
+            permissions=permissions,
+            target_repo=f"{repo['owner']}/{repo['name']}" if repo else None,
+        )
 
     return sandbox_backend
 
@@ -328,12 +319,6 @@ async def _refresh_github_proxy(
         return
 
     token, expires_at, permissions = await _resolve_proxy_token(github_proxy_token, repo)
-    if repo is None:
-        current_backend = unwrap_sandbox_backend(sandbox_backend)
-        await _start_langsmith_sandbox_if_needed(current_backend)
-        await _configure_github_proxy(current_backend.id, None)
-        clear_proxy_token_expiry(thread_id)
-        return
     if not token:
         msg = "Cannot configure proxy: GitHub App installation token is unavailable"
         logger.error(msg)
@@ -342,11 +327,10 @@ async def _refresh_github_proxy(
     current_backend = unwrap_sandbox_backend(sandbox_backend)
     await _start_langsmith_sandbox_if_needed(current_backend)
     await _configure_github_proxy(current_backend.id, token)
-    repo_name = repo.get("name")
     record_proxy_token_expiry(
         thread_id,
         expires_at,
-        repositories=[repo_name] if repo_name else github_proxy_repositories,
+        repositories=[repo["name"]] if repo else github_proxy_repositories,
         permissions=permissions,
         target_repo=f"{repo['owner']}/{repo['name']}" if repo else None,
     )
@@ -1083,13 +1067,6 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     configurable["auto_merge_eligible"] = merge_eligible
     configurable["merge_hold_requested"] = merge_hold_requested
     configurable["merge_hold_known"] = merge_hold_known
-    effective_repo = await _resolve_prompt_default_repo(configurable)
-    if effective_repo:
-        configurable["repo"] = effective_repo
-        configurable.pop("repo_explicitly_none", None)
-    else:
-        configurable.pop("repo", None)
-        configurable["repo_explicitly_none"] = True
 
     plan_profile = resolve_stage_profile(
         "plan",
@@ -1104,9 +1081,10 @@ async def get_agent(config: RunnableConfig) -> Pregel:
 
     async def reconnect_backend(
         _thread_id: str = thread_id,
-        _effective_repo: dict[str, str] | None = effective_repo,
+        _configurable: dict[str, Any] = configurable,
     ) -> SandboxBackendProtocol:
-        return await ensure_sandbox_for_thread(_thread_id, repo=_effective_repo)
+        prompt_default_repo = await _resolve_prompt_default_repo(_configurable)
+        return await ensure_sandbox_for_thread(_thread_id, repo=prompt_default_repo)
 
     def backend_factory(_runtime: object, _thread_id: str = thread_id) -> SandboxBackendProtocol:
         return _get_cached_sandbox_backend(_thread_id, reconnect=reconnect_backend)
@@ -1259,7 +1237,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     trusted_skills_ref = ""
     prepared_sandbox_backend: SandboxBackendProtocol | None = None
     prepared_work_dir: str | None = None
-    prompt_default_repo = effective_repo
+    prompt_default_repo = await _resolve_prompt_default_repo(configurable)
     if prompt_default_repo:
         repo_owner = prompt_default_repo.get("owner", "")
         repo_name = prompt_default_repo.get("name", "")
@@ -1316,11 +1294,6 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             initial=plan_mode,
         )
     ]
-    repository_scope_middleware: list[Any] = []
-    if prompt_default_repo is None:
-        repository_scope_middleware.append(
-            ExcludeToolsMiddleware(excluded=frozenset({"open_pull_request", "request_pr_review"}))
-        )
     return create_deep_agent(
         model=main_model,
         system_prompt="",
@@ -1414,7 +1387,6 @@ async def get_agent(config: RunnableConfig) -> Pregel:
                 ),
                 ToolArtifactMiddleware(),
                 PullRequestCreationGuardMiddleware(),
-                *repository_scope_middleware,
                 refresh_github_proxy_before_model,
                 check_message_queue_before_model,
                 SlackAssistantStatusMiddleware(),

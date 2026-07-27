@@ -100,11 +100,8 @@ def _install_client(monkeypatch: pytest.MonkeyPatch, client: _FakeClient | _Rout
 
 
 def _set_config(monkeypatch: pytest.MonkeyPatch, configurable: dict[str, Any]) -> None:
-    effective = {
-        "repo": {"owner": "langchain-ai", "name": "open-swe"},
-        **configurable,
-    }
-    monkeypatch.setattr(opr, "get_config", lambda: {"configurable": effective})
+    configurable.setdefault("repo", {"owner": "langchain-ai", "name": "open-swe"})
+    monkeypatch.setattr(opr, "get_config", lambda: {"configurable": configurable})
 
 
 def _open(*, title: str = "feat: x", body: str = "body") -> dict[str, Any]:
@@ -134,11 +131,12 @@ def test_uses_installation_token_for_every_source(
 
     monkeypatch.setattr(profiles, "get_valid_access_token", fail_user_token)
 
-    async def fake_bot(*, target_repo: str) -> str:
+    async def fake_bot(*, target_repo: str, repositories: list[str]) -> str:
         assert target_repo == "langchain-ai/open-swe"
+        assert repositories == ["open-swe"]
         return "bot-tok"
 
-    monkeypatch.setattr(opr, "get_github_app_execution_token", fake_bot)
+    monkeypatch.setattr(opr, "get_github_app_installation_token", fake_bot)
     client = _FakeClient(
         post=_FakeResponse(
             201,
@@ -160,19 +158,10 @@ def test_uses_installation_token_for_every_source(
     assert client.post_calls[0]["headers"]["Authorization"] == "Bearer bot-tok"
 
 
-def test_rejects_repository_outside_run_scope(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        opr,
-        "get_config",
-        lambda: {
-            "configurable": {
-                "source": "dashboard",
-                "repo": {"owner": "acme", "name": "authorized"},
-            }
-        },
-    )
-    token = AsyncMock(return_value="bot-token")
-    monkeypatch.setattr(opr, "get_github_app_execution_token", token)
+def test_rejects_repository_outside_trusted_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config(monkeypatch, {"source": "slack", "repo": {"owner": "acme", "name": "other"}})
+    token = AsyncMock(return_value="bot-tok")
+    monkeypatch.setattr(opr, "get_github_app_installation_token", token)
 
     result = _open()
 
@@ -187,7 +176,7 @@ def test_returns_existing_pr_on_422(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent.dashboard import profiles
 
     monkeypatch.setattr(profiles, "get_valid_access_token", lambda *_a, **_k: _coro("user-tok"))
-    monkeypatch.setattr(opr, "get_github_app_execution_token", lambda **_kw: _coro("bot"))
+    monkeypatch.setattr(opr, "get_github_app_installation_token", lambda **_kw: _coro("bot"))
 
     client = _FakeClient(
         post=_FakeResponse(422, text="A pull request already exists"),
@@ -218,7 +207,7 @@ def test_updates_existing_pr_body_with_linear_closing_line(
     from agent.dashboard import profiles
 
     monkeypatch.setattr(profiles, "get_valid_access_token", lambda *_a, **_k: _coro("user-tok"))
-    monkeypatch.setattr(opr, "get_github_app_execution_token", lambda **_kw: _coro("bot"))
+    monkeypatch.setattr(opr, "get_github_app_installation_token", lambda **_kw: _coro("bot"))
 
     client = _FakeClient(
         post=_FakeResponse(422, text="A pull request already exists"),
@@ -247,7 +236,7 @@ def test_error_surfaced_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent.dashboard import profiles
 
     monkeypatch.setattr(profiles, "get_valid_access_token", lambda *_a, **_k: _coro("user-tok"))
-    monkeypatch.setattr(opr, "get_github_app_execution_token", lambda **_kw: _coro("bot"))
+    monkeypatch.setattr(opr, "get_github_app_installation_token", lambda **_kw: _coro("bot"))
 
     client = _FakeClient(post=_FakeResponse(403, {"message": "Resource not accessible"}))
     _install_client(monkeypatch, client)

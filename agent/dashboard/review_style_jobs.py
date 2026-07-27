@@ -100,6 +100,7 @@ async def start_bootstrap_analysis(
     configurable: dict[str, Any] = {
         "thread_id": thread_id,
         "review_style_full_name": full_name,
+        "review_style_github_token": github_token,
         "review_style_samples_text": samples_text,
         "review_style_top_reviewers": samples.top_reviewers,
         "review_style_prs_sampled": samples.prs_scanned,

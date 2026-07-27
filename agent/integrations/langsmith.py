@@ -347,7 +347,7 @@ async def _create_sandbox_with_retry(
     raise RuntimeError("unreachable sandbox retry state")
 
 
-async def _configure_github_proxy(sandbox_name: str, github_token: str | None) -> None:
+async def _configure_github_proxy(sandbox_name: str, github_token: str) -> None:
     """Configure sandbox proxy to inject GitHub auth for GitHub traffic.
 
     Uses the LangSmith proxy-config API to set up header injection so that
@@ -356,7 +356,7 @@ async def _configure_github_proxy(sandbox_name: str, github_token: str | None) -
 
     Args:
         sandbox_name: The sandbox name/ID returned by the LangSmith API.
-        github_token: GitHub token to inject, or ``None`` to remove GitHub auth rules.
+        github_token: GitHub token to inject as Authorization header.
     """
     api_key = _get_sandbox_api_key()
     if not api_key:
@@ -364,7 +364,7 @@ async def _configure_github_proxy(sandbox_name: str, github_token: str | None) -
         return
     langsmith_endpoint = _get_sandbox_endpoint()
     url = f"{langsmith_endpoint}/v2/sandboxes/boxes/{sandbox_name}"
-    payload = {"proxy_config": {"rules": _github_proxy_rules(github_token) if github_token else []}}
+    payload = {"proxy_config": {"rules": _github_proxy_rules(github_token)}}
     async with httpx.AsyncClient(timeout=PROXY_CONFIG_TIMEOUT_SECONDS) as client:
         for attempt in range(PROXY_CONFIG_MAX_ATTEMPTS):
             try:

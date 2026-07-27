@@ -117,7 +117,7 @@ async def test_push_event_skips_when_pr_diff_unchanged_since_last_review() -> No
             return_value=True,
         ),
         patch(
-            "agent.webhooks.common.get_github_app_execution_token_with_expiry",
+            "agent.webhooks.common.get_github_app_installation_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("t", None),
         ),
@@ -195,7 +195,7 @@ async def test_push_event_triggers_re_review_run_when_watching() -> None:
             return_value="t",
         ),
         patch(
-            "agent.webhooks.common.get_github_app_execution_token_with_expiry",
+            "agent.webhooks.common.get_github_app_installation_token_with_expiry",
             new_callable=AsyncMock,
             return_value=("t", None),
         ),
@@ -323,42 +323,42 @@ async def test_push_event_idempotent_when_head_unchanged() -> None:
 @pytest.mark.asyncio
 async def test_reviewer_token_for_repo_public_scopes_by_id() -> None:
     get_token = AsyncMock(return_value=("scoped", "exp"))
-    with patch("agent.webhooks.common.get_github_app_execution_token_with_expiry", get_token):
+    with patch("agent.webhooks.common.get_github_app_installation_token_with_expiry", get_token):
         token, expires = await webhook_common._reviewer_token_for_repo(
             {"owner": "lc", "name": "repo"}, repo_private=False, repo_id=123
         )
     assert (token, expires) == ("scoped", "exp")
-    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_id=123)
+    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_ids=[123])
 
 
 @pytest.mark.asyncio
 async def test_reviewer_token_for_repo_public_scopes_by_name_without_id() -> None:
     get_token = AsyncMock(return_value=("scoped", "exp"))
-    with patch("agent.webhooks.common.get_github_app_execution_token_with_expiry", get_token):
+    with patch("agent.webhooks.common.get_github_app_installation_token_with_expiry", get_token):
         await webhook_common._reviewer_token_for_repo(
             {"owner": "lc", "name": "repo"}, repo_private=False, repo_id=None
         )
-    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_id=None)
+    get_token.assert_awaited_once_with(target_repo="lc/repo", repositories=["repo"])
 
 
 @pytest.mark.asyncio
-async def test_reviewer_token_for_repo_private_is_scoped() -> None:
-    get_token = AsyncMock(return_value=("scoped", "exp"))
-    with patch("agent.webhooks.common.get_github_app_execution_token_with_expiry", get_token):
+async def test_reviewer_token_for_repo_private_scopes_by_id() -> None:
+    get_token = AsyncMock(return_value=("full", "exp"))
+    with patch("agent.webhooks.common.get_github_app_installation_token_with_expiry", get_token):
         await webhook_common._reviewer_token_for_repo(
             {"owner": "lc", "name": "repo"}, repo_private=True, repo_id=123
         )
-    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_id=123)
+    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_ids=[123])
 
 
 @pytest.mark.asyncio
-async def test_reviewer_token_for_repo_unknown_privacy_is_scoped() -> None:
-    get_token = AsyncMock(return_value=("scoped", "exp"))
-    with patch("agent.webhooks.common.get_github_app_execution_token_with_expiry", get_token):
+async def test_reviewer_token_for_repo_unknown_privacy_scopes_by_id() -> None:
+    get_token = AsyncMock(return_value=("full", "exp"))
+    with patch("agent.webhooks.common.get_github_app_installation_token_with_expiry", get_token):
         await webhook_common._reviewer_token_for_repo(
             {"owner": "lc", "name": "repo"}, repo_private=None, repo_id=123
         )
-    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_id=123)
+    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_ids=[123])
 
 
 @pytest.mark.asyncio
@@ -382,7 +382,7 @@ async def test_push_event_public_repo_uses_scoped_token() -> None:
             new_callable=AsyncMock,
             return_value=True,
         ),
-        patch("agent.webhooks.common.get_github_app_execution_token_with_expiry", get_token),
+        patch("agent.webhooks.common.get_github_app_installation_token_with_expiry", get_token),
         patch(
             "agent.webhooks.common._fetch_open_pr_for_branch",
             new_callable=AsyncMock,
@@ -410,7 +410,7 @@ async def test_push_event_public_repo_uses_scoped_token() -> None:
     ):
         await github_webhooks.process_github_push_event(payload)
 
-    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_id=123)
+    get_token.assert_awaited_once_with(target_repo="lc/repo", repository_ids=[123])
     assert fake_client.runs.create.await_args is not None
     _, kwargs = fake_client.runs.create.await_args
     assert kwargs["config"]["configurable"]["repo_private"] is False
@@ -437,7 +437,7 @@ async def test_push_event_rescopes_token_when_pr_metadata_reveals_public() -> No
             new_callable=AsyncMock,
             return_value=True,
         ),
-        patch("agent.webhooks.common.get_github_app_execution_token_with_expiry", get_token),
+        patch("agent.webhooks.common.get_github_app_installation_token_with_expiry", get_token),
         patch(
             "agent.webhooks.common._fetch_open_pr_for_branch",
             new_callable=AsyncMock,
@@ -466,8 +466,8 @@ async def test_push_event_rescopes_token_when_pr_metadata_reveals_public() -> No
         await github_webhooks.process_github_push_event(payload)
 
     assert get_token.await_args_list == [
-        call(target_repo="lc/repo", repository_id=None),
-        call(target_repo="lc/repo", repository_id=456),
+        call(target_repo="lc/repo", repositories=["repo"]),
+        call(target_repo="lc/repo", repository_ids=[456]),
     ]
     assert fake_client.runs.create.await_args is not None
     _, kwargs = fake_client.runs.create.await_args

@@ -74,16 +74,3 @@ def validate_sandbox_startup_config() -> None:
         from agent.integrations.langsmith import LangSmithProvider
 
         LangSmithProvider.validate_startup_config()
-    elif sandbox_type == "local" and (
-        os.environ.get("GITHUB_APP_ID") or os.environ.get("GITHUB_APP_PRIVATE_KEY")
-    ):
-        if os.environ.get("ALLOW_UNSAFE_LOCAL_SANDBOX", "").lower() not in {
-            "1",
-            "true",
-            "yes",
-        }:
-            raise ValueError(
-                "SANDBOX_TYPE=local cannot run with GitHub App credentials. "
-                "Use an isolated sandbox provider, or set ALLOW_UNSAFE_LOCAL_SANDBOX=true "
-                "only for deliberate local development."
-            )

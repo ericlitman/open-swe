@@ -60,8 +60,8 @@ def apply() -> None:
     async def _dummy_install_token(**_kwargs: object) -> str:
         return "dummy-installation-token"
 
-    auth.get_github_app_execution_token_with_expiry = _dummy_install_token_with_expiry
-    opr.__dict__["get_github_app_execution_token"] = _dummy_install_token
+    auth.get_github_app_installation_token_with_expiry = _dummy_install_token_with_expiry
+    opr.__dict__["get_github_app_installation_token"] = _dummy_install_token
 
     # Point the real PR/Slack code at the in-process fakes.
     opr.__dict__["GITHUB_API"] = FAKE_GITHUB_API

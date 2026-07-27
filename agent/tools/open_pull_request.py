@@ -19,7 +19,7 @@ from ..dashboard.plan_store import PLAN_STATUS_APPROVED, get_plan_content
 from ..dashboard.team_settings import AUTO_MERGE_ALWAYS, AUTO_MERGE_ON_PLAN_APPROVAL
 from ..utils.auth import repository_matches_configurable
 from ..utils.dashboard_links import dashboard_plan_url
-from ..utils.github_app import get_github_app_execution_token
+from ..utils.github_app import get_github_app_installation_token
 from ..utils.github_comments import derive_pr_state
 from ..utils.slack import get_slack_permalink
 
@@ -38,10 +38,12 @@ _AUTO_MERGE_METADATA_LOCKS: dict[str, asyncio.Lock] = {}
 
 async def _resolve_pr_author_token(owner: str, repo: str) -> tuple[str | None, str]:
     """Return the GitHub App installation token used to open the PR."""
-    configurable = _configurable()
-    if not repository_matches_configurable(configurable, owner, repo):
+    if not await repository_matches_configurable(_configurable(), owner, repo):
         return None, "repository_mismatch"
-    return await get_github_app_execution_token(target_repo=f"{owner}/{repo}"), "bot"
+    return (
+        await get_github_app_installation_token(target_repo=f"{owner}/{repo}", repositories=[repo]),
+        "bot",
+    )
 
 
 def _auth_headers(token: str) -> dict[str, str]:
