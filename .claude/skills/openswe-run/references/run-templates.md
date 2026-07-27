@@ -16,6 +16,7 @@ Enter plan mode first. Re-anchor all cited paths and symbols against `<ref>`, st
 Required scope: <scope>.
 Boundaries: <non-goals>.
 Verification: <focused tests>, `make lint`, and `make typecheck`.
+Code standard: smallest root-cause change; no speculative validation or layered defenses; the diff must be acceptable upstream.
 PR body: include the Linear reference and `Closes <TICKET>` as a standalone line. Let normal Open SWE Review and required CI run; do not directly merge or bypass gates.
 ```
 
