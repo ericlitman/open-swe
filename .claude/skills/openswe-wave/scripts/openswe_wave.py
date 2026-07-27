@@ -34,6 +34,7 @@ LINEAR_URL = "https://api.linear.app/graphql"
 HTTP_TIMEOUT_SECONDS = 30.0
 COMMAND_TIMEOUT_SECONDS = 60.0
 MAX_PAGINATION_PAGES = 100
+MAX_REVIEW_THREAD_SNAPSHOT_ATTEMPTS = 3
 STATUS_SWEEP_PR_LIMIT = 1000
 STATUS_STAGE_RANK = {
     "dispatched": 0,
@@ -53,6 +54,10 @@ class _PollDeadlineError(WaveOpsError):
     """A poll iteration exceeded its deadline."""
 
 
+class _ReviewThreadsHeadChanged(WaveOpsError):
+    """The PR head changed while review threads were read."""
+
+
 @dataclass(frozen=True)
 class RecoveryDecision:
     """A recovery decision and the evidence supporting it."""
@@ -67,7 +72,10 @@ class RecoveryDecision:
 
 def emit(payload: Any, *, pretty: bool = True) -> None:
     """Print stable JSON output."""
-    print(json.dumps(payload, indent=2 if pretty else None, sort_keys=True, default=str))
+    print(
+        json.dumps(payload, indent=2 if pretty else None, sort_keys=True, default=str),
+        flush=True,
+    )
 
 
 def require_env(*names: str) -> dict[str, str]:
@@ -244,7 +252,10 @@ def _paginate_pr_connection(
         if not isinstance(pr, dict):
             raise WaveOpsError(f"Pull request {owner}/{repo}#{number} was not returned by GitHub")
         if pr.get("headRefOid") != expected_head:
-            raise WaveOpsError(f"Pull request head changed while {connection_name} was paginated")
+            error = f"Pull request head changed while {connection_name} was paginated"
+            if connection_name == "reviewThreads":
+                raise _ReviewThreadsHeadChanged(error)
+            raise WaveOpsError(error)
         connection = pr.get(connection_name) or {}
         nodes.extend(item for item in connection.get("nodes") or [] if isinstance(item, dict))
         page_info = connection.get("pageInfo") or {}
@@ -257,10 +268,10 @@ def _paginate_pr_connection(
     raise WaveOpsError(f"GitHub {connection_name} pagination exceeded {MAX_PAGINATION_PAGES} pages")
 
 
-def github_pr_snapshot(
+def _github_pr_snapshot_once(
     repo_slug: str, number: int, *, deadline: float | None = None
 ) -> dict[str, Any]:
-    """Fetch the PR state, including complete queue and actor evidence, through GraphQL."""
+    """Fetch one complete PR snapshot attempt through GraphQL."""
     owner, repo = repo_slug.split("/", 1)
     variables: dict[str, Any] = {"owner": owner, "repo": repo, "number": number}
     events: list[dict[str, Any]] = []
@@ -316,6 +327,19 @@ def github_pr_snapshot(
     }
     first_pr["defaultBranch"] = default_branch
     return first_pr
+
+
+def github_pr_snapshot(
+    repo_slug: str, number: int, *, deadline: float | None = None
+) -> dict[str, Any]:
+    """Fetch the PR state, including complete queue and actor evidence, through GraphQL."""
+    for attempt in range(MAX_REVIEW_THREAD_SNAPSHOT_ATTEMPTS):
+        try:
+            return _github_pr_snapshot_once(repo_slug, number, deadline=deadline)
+        except _ReviewThreadsHeadChanged:
+            if attempt == MAX_REVIEW_THREAD_SNAPSHOT_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable")
 
 
 def github_pr_list(repo_slug: str) -> list[dict[str, Any]]:
