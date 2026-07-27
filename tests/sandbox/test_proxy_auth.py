@@ -285,6 +285,17 @@ class TestCreateSandboxWithProxy:
 
     @pytest.mark.asyncio
     async def test_repo_less_langsmith_sandbox_has_no_proxy_credentials(self) -> None:
+        from agent.utils.github_proxy import (
+            proxy_token_needs_refresh,
+            record_proxy_token_expiry,
+        )
+
+        record_proxy_token_expiry(
+            "thread-123",
+            "2000-01-01T00:00:00Z",
+            repositories=["widgets"],
+            target_repo="acme/widgets",
+        )
         with (
             patch("agent.server.create_sandbox", new_callable=AsyncMock) as mock_create,
             patch(
@@ -299,12 +310,16 @@ class TestCreateSandboxWithProxy:
 
             from agent.server import _create_sandbox_with_proxy
 
-            sandbox = await _create_sandbox_with_proxy()
+            sandbox = await _create_sandbox_with_proxy(
+                "ghs_stale",
+                thread_id="thread-123",
+            )
 
             assert sandbox is mock_create.return_value
             mock_create.assert_awaited_once_with(snapshot_id=None)
             mock_get_token.assert_not_awaited()
             mock_proxy.assert_not_awaited()
+            assert proxy_token_needs_refresh("thread-123") is False
 
 
 class _DummyAgent:

@@ -246,13 +246,13 @@ async def _resolve_proxy_token(
     repo: dict[str, str] | None = None,
 ) -> tuple[str | None, str | None, None]:
     """Resolve the proxy token and its expiry."""
-    if github_proxy_token:
-        return github_proxy_token, None, None
     owner = repo.get("owner") if repo else None
     name = repo.get("name") if repo else None
     target_repo = f"{owner}/{name}" if owner and name else None
     if not target_repo:
         return None, None, None
+    if github_proxy_token:
+        return github_proxy_token, None, None
     token, expires_at = await get_github_app_execution_token_with_expiry(target_repo=target_repo)
     return token, expires_at, None
 
@@ -297,17 +297,20 @@ async def _create_sandbox_with_proxy(
             raise GitHubProxyTokenUnavailable(msg)
 
     sandbox_backend = await create_sandbox(snapshot_id=snapshot_id)
-    if sandbox_type == "langsmith" and token:
-        await _start_langsmith_sandbox_if_needed(sandbox_backend)
-        await _configure_github_proxy(sandbox_backend.id, token)
-        repo_name = repo.get("name") if repo else None
-        record_proxy_token_expiry(
-            thread_id,
-            expires_at,
-            repositories=[repo_name] if repo_name else github_proxy_repositories,
-            permissions=permissions,
-            target_repo=f"{repo['owner']}/{repo['name']}" if repo else None,
-        )
+    if sandbox_type == "langsmith":
+        if token:
+            await _start_langsmith_sandbox_if_needed(sandbox_backend)
+            await _configure_github_proxy(sandbox_backend.id, token)
+            repo_name = repo.get("name") if repo else None
+            record_proxy_token_expiry(
+                thread_id,
+                expires_at,
+                repositories=[repo_name] if repo_name else github_proxy_repositories,
+                permissions=permissions,
+                target_repo=f"{repo['owner']}/{repo['name']}" if repo else None,
+            )
+        else:
+            clear_proxy_token_expiry(thread_id)
 
     return sandbox_backend
 
