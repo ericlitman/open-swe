@@ -152,7 +152,10 @@ def linear_gql(query: str, variables: dict) -> dict:
 
 ISSUE_QUERY = """
 query RunIssue($id: String!) {
-  issue(id: $id) { id identifier title url }
+  issue(id: $id) {
+    id identifier title url completedAt canceledAt
+    state { type name }
+  }
 }
 """
 
@@ -479,6 +482,27 @@ def guard_placeholders(ticket: str, body: str, force: bool) -> None:
         dogfood(ticket, "note", f"--force posted body with placeholders: {', '.join(leftovers)}")
 
 
+def guard_terminal_issue(ticket: str, issue: dict, force: bool) -> None:
+    state = issue.get("state") or {}
+    state_type = str(state.get("type") or "").lower()
+    timestamp_field = {"completed": "completedAt", "canceled": "canceledAt"}.get(state_type)
+    if timestamp_field is None:
+        return
+    state_name = str(state.get("name") or state_type)
+    timestamp = issue.get(timestamp_field)
+    detail = f"state {state_name!r} (type {state_type!r})"
+    if timestamp:
+        detail += f"; completion evidence: {timestamp_field}={timestamp}"
+    if force:
+        dogfood(ticket, "cmd", f"--force overriding terminal Linear {detail} before dispatch")
+        return
+    dogfood(ticket, "error", f"refused dispatch for {issue['identifier']}: {detail}")
+    raise RunError(
+        f"Refusing to dispatch {issue['identifier']}: Linear {detail}. "
+        "Pass --force to override this terminal-state guard."
+    )
+
+
 HANDOFF_BASELINE_SENTINEL = "OPENSWE_HANDOFF_BASELINE "
 HANDOFF_RESULT_SENTINEL = "OPENSWE_HANDOFF_RESULT "
 HANDOFF_MONITOR_SNIPPET = r"""
@@ -732,6 +756,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         "identifier": issue["identifier"],
         "issue_id": issue["id"],
         "issue_url": issue["url"],
+        "issue_state": issue.get("state"),
         "thread_id": thread_id,
         "repo": args.repo,
         "dispatched": not args.dry_run,
@@ -740,6 +765,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         result["body"] = body
         print(json.dumps(result, indent=2))
         return 0
+    guard_terminal_issue(args.ticket, issue, args.force)
     result["handoff"] = _post_with_handoff("start", args.ticket, issue["id"], body, thread_id)
     handoff = result["handoff"]
     dogfood(

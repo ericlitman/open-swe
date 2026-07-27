@@ -685,6 +685,174 @@ def test_child_timeout_result_is_reported_directly() -> None:
     assert '"plan_status_nontransactional"' in message
 
 
+def _start_args(**overrides) -> argparse.Namespace:
+    values = {
+        "ticket": "ABC-1",
+        "repo": "owner/name",
+        "ref": "main",
+        "scope": None,
+        "boundaries": None,
+        "verify": None,
+        "body_file": None,
+        "dry_run": False,
+        "force": False,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def test_issue_query_resolves_workflow_state_and_terminal_timestamps() -> None:
+    assert "state { type name }" in run.ISSUE_QUERY
+    assert "completedAt" in run.ISSUE_QUERY
+    assert "canceledAt" in run.ISSUE_QUERY
+
+
+@pytest.mark.parametrize(
+    ("state_type", "state_name", "timestamp_field", "timestamp"),
+    [
+        ("completed", "Done", "completedAt", "2026-07-26T16:11:00Z"),
+        ("canceled", "Canceled", "canceledAt", "2026-07-26T17:12:00Z"),
+    ],
+)
+def test_start_refuses_terminal_issue_and_dogfood_logs_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    state_type: str,
+    state_name: str,
+    timestamp_field: str,
+    timestamp: str,
+) -> None:
+    logs: list[tuple[str, str]] = []
+    issue = {
+        "id": "issue-1",
+        "identifier": "ABC-1",
+        "url": "https://linear.example/ABC-1",
+        "state": {"type": state_type, "name": state_name},
+        timestamp_field: timestamp,
+    }
+    monkeypatch.setattr(run, "log_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "resolve_issue", lambda ticket: issue)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "thread-1"}),
+    )
+    monkeypatch.setattr(run, "dogfood", lambda ticket, tag, message: logs.append((tag, message)))
+    monkeypatch.setattr(
+        run,
+        "_post_with_handoff",
+        lambda *args, **kwargs: pytest.fail("terminal issue must be refused before handoff"),
+    )
+
+    with pytest.raises(run.RunError) as raised:
+        run.cmd_start(_start_args())
+
+    message = str(raised.value)
+    assert state_name in message
+    assert state_type in message
+    assert f"{timestamp_field}={timestamp}" in message
+    assert "--force" in message
+    assert logs == [
+        (
+            "error",
+            f"refused dispatch for ABC-1: state {state_name!r} (type {state_type!r}); "
+            f"completion evidence: {timestamp_field}={timestamp}",
+        )
+    ]
+
+
+def test_start_terminal_issue_without_timestamp_uses_state_only_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs: list[str] = []
+    issue = {
+        "id": "issue-1",
+        "identifier": "ABC-1",
+        "url": "https://linear.example/ABC-1",
+        "state": {"type": "completed", "name": "Done"},
+        "completedAt": None,
+    }
+    monkeypatch.setattr(run, "log_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "resolve_issue", lambda ticket: issue)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "thread-1"}),
+    )
+    monkeypatch.setattr(run, "dogfood", lambda ticket, tag, message: logs.append(message))
+
+    with pytest.raises(run.RunError) as raised:
+        run.cmd_start(_start_args())
+
+    assert "state 'Done' (type 'completed')" in str(raised.value)
+    assert "completedAt" not in str(raised.value)
+    assert "state 'Done' (type 'completed')" in logs[0]
+
+
+def test_start_force_logs_terminal_override_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    events: list[str] = []
+    issue = {
+        "id": "issue-1",
+        "identifier": "ABC-1",
+        "url": "https://linear.example/ABC-1",
+        "state": {"type": "completed", "name": "Done"},
+        "completedAt": "2026-07-26T16:11:00Z",
+    }
+    monkeypatch.setattr(run, "log_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "resolve_issue", lambda ticket: issue)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "thread-1"}),
+    )
+    monkeypatch.setattr(run, "dogfood", lambda ticket, tag, message: events.append(message))
+    monkeypatch.setattr(
+        run,
+        "_post_with_handoff",
+        lambda *args, **kwargs: (
+            events.append("handoff") or {"thread_status": "busy", "run_ids": ["run-1"]}
+        ),
+    )
+
+    assert run.cmd_start(_start_args(force=True)) == 0
+    capsys.readouterr()
+    assert "--force overriding terminal Linear state 'Done'" in events[0]
+    assert "completedAt=2026-07-26T16:11:00Z" in events[0]
+    assert events[1] == "handoff"
+    assert events[2].startswith("dispatched ABC-1 to owner/name")
+
+
+def test_start_force_cannot_bypass_body_hygiene(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run, "log_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        run,
+        "resolve_issue",
+        lambda ticket: {
+            "id": "issue-1",
+            "identifier": "ABC-1",
+            "url": "https://linear.example/ABC-1",
+            "state": {"type": "completed", "name": "Done"},
+        },
+    )
+    monkeypatch.setattr(run, "read_body", lambda args: "not a directive")
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: pytest.fail("body hygiene must run before terminal-state force handling"),
+    )
+
+    with pytest.raises(run.RunError, match="begin exactly"):
+        run.cmd_start(_start_args(body_file="body.md", force=True))
+
+
 @pytest.mark.parametrize("terminal_period", ["", "."])
 def test_start_dry_run_normalizes_punctuation_without_posting(
     monkeypatch: pytest.MonkeyPatch,
@@ -700,8 +868,11 @@ def test_start_dry_run_normalizes_punctuation_without_posting(
             "id": "issue-1",
             "identifier": "ABC-1",
             "url": "https://linear.example/ABC-1",
+            "state": {"type": "completed", "name": "Done"},
+            "completedAt": "2026-07-26T16:11:00Z",
         },
     )
+    monkeypatch.setattr(run, "dogfood", lambda *args: pytest.fail("dry-run must not log"))
     monkeypatch.setattr(
         run,
         "import_wave_module",
@@ -731,6 +902,7 @@ def test_start_dry_run_normalizes_punctuation_without_posting(
 
     assert run.cmd_start(args) == 0
     payload = json.loads(capsys.readouterr().out)
+    assert payload["issue_state"] == {"type": "completed", "name": "Done"}
     assert "Required scope: do the thing.\n" in payload["body"]
     assert "Boundaries: nothing else.\n" in payload["body"]
     assert "Verification: focused tests.\n" in payload["body"]
