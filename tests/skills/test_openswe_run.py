@@ -41,6 +41,150 @@ def test_entry_point_is_executable_and_self_describes() -> None:
     assert "usage:" in result.stdout.lower()
 
 
+@pytest.fixture
+def cold_tunnel(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """A live SSH tunnel can miss the 3s cold first hit, then answer immediately."""
+    attempts: list[int] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    def urlopen(url: str, *, timeout: int):
+        attempts.append(timeout)
+        if len(attempts) == 1:
+            raise TimeoutError("cold tunnel first hit")
+        return Response()
+
+    monkeypatch.setattr(run.urllib.request, "urlopen", urlopen)
+    return attempts
+
+
+def _env_setup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "resolve_monitor_python", lambda: ["python-with-sdk"])
+    monkeypatch.setattr(run, "skill_checkout_warning", lambda: None)
+
+
+def test_env_prints_every_missing_export_fix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _env_setup(monkeypatch, tmp_path)
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("LANGGRAPH_URL", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(run, "probe_local_langgraph", lambda: False)
+    monkeypatch.setattr(run, "gh_auth_token", lambda: "")
+
+    assert run.cmd_env(argparse.Namespace()) == 2
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["ready"] is False
+    assert run.LINEAR_ENV_ERROR in captured.err
+    assert run.LANGGRAPH_ENV_ERROR in captured.err
+    assert run.GH_ENV_ERROR in captured.err
+
+
+def test_env_requires_a_token_not_just_the_gh_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _env_setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(run.shutil, "which", lambda command: "/usr/bin/gh")
+    monkeypatch.setattr(
+        run.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, stdout="", stderr=""),
+    )
+
+    assert run.cmd_env(argparse.Namespace()) == 2
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["gh_token"] is False
+    assert run.GH_ENV_ERROR in captured.err
+
+
+def test_env_accepts_a_healthy_tunnel_after_a_cold_first_hit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    cold_tunnel: list[int],
+) -> None:
+    _env_setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.delenv("LANGGRAPH_URL", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "github")
+
+    assert run.cmd_env(argparse.Namespace()) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True
+    assert report["langgraph_url"] == run.LOCAL_LANGGRAPH_URL
+    assert cold_tunnel == [3, 3]
+
+
+@pytest.mark.parametrize("fetch_returncode", [0, 1])
+def test_skill_checkout_warning_detects_refreshed_or_stale_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    fetch_returncode: int,
+) -> None:
+    def git(command, **kwargs):
+        if command[-2:] == ["rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout="/checkout\n", stderr="")
+        if "fetch" in command:
+            return subprocess.CompletedProcess(
+                command, fetch_returncode, stdout="", stderr="offline"
+            )
+        if "@{upstream}" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="origin/main\n", stderr="")
+        if "rev-list" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="2\n", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(run.subprocess, "run", git)
+
+    warning = run.skill_checkout_warning()
+
+    assert warning is not None
+    assert "2 commits behind origin/main" in warning
+    assert ("origin refresh failed, using stale origin/main" in warning) is bool(fetch_returncode)
+    assert "git -C /checkout pull" in warning
+
+
+def test_env_warns_about_checkout_drift_without_blocking_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _env_setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
+    monkeypatch.setenv("GH_TOKEN", "github")
+    monkeypatch.setattr(
+        run,
+        "skill_checkout_warning",
+        lambda: "skill checkout is 1 commit behind origin/main. Update it with: git pull",
+    )
+
+    assert run.cmd_env(argparse.Namespace()) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["ready"] is True
+    assert "warning: skill checkout is 1 commit behind origin/main" in captured.err
+
+
 def test_every_reference_path_named_in_skill_md_resolves_exactly() -> None:
     """A doc that points at a missing reference is a broken skill, not a typo."""
     skill_md = (SKILL / "SKILL.md").read_text()
