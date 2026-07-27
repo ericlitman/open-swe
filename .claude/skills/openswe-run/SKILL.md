@@ -114,8 +114,9 @@ Omitting `--phase` selects `plan`. The plan phase defaults to 30 minutes and `de
 to 90 minutes. `--timeout-min N` explicitly overrides either default. The phase is included in
 watch-start logs and `watch_timeout` evidence.
 
-Wake nodes: `plan_posted`, `review_findings_posted`, `run_blocked`, `terminal_merged`,
-`terminal_closed`, `terminal_run_error`, `unhandled_condition`, plus wrapper-level
+Wake nodes: `plan_posted`, `pr_opened`, `review_findings_posted`, `review_complete`,
+`run_blocked`, `review_absent`, `merge_conflict`, `terminal_merged`, `terminal_closed`,
+`terminal_run_error`, `unhandled_condition`, plus wrapper-level
 `watch_timeout` (rc 3).
 `--pr-number N` is optional; when omitted, the monitor discovers the PR from LangGraph thread metadata so PR recovery checks engage as soon as it exists.
 Known monitor sharp edges are inherited, not re-fixed here: OSWE-135 (torn reviewThreads

@@ -21,8 +21,12 @@ from typing import Any
 
 WAKE_NODES = (
     "plan_posted",
+    "pr_opened",
     "review_findings_posted",
+    "review_complete",
     "run_blocked",
+    "review_absent",
+    "merge_conflict",
     "terminal_merged",
     "terminal_closed",
     "terminal_run_error",
@@ -34,7 +38,7 @@ LINEAR_URL = "https://api.linear.app/graphql"
 HTTP_TIMEOUT_SECONDS = 30.0
 COMMAND_TIMEOUT_SECONDS = 60.0
 MAX_PAGINATION_PAGES = 100
-MAX_REVIEW_THREAD_SNAPSHOT_ATTEMPTS = 3
+MAX_REVIEW_DATA_SNAPSHOT_ATTEMPTS = 3
 STATUS_SWEEP_PR_LIMIT = 1000
 STATUS_STAGE_RANK = {
     "dispatched": 0,
@@ -54,8 +58,8 @@ class _PollDeadlineError(WaveOpsError):
     """A poll iteration exceeded its deadline."""
 
 
-class _ReviewThreadsHeadChanged(WaveOpsError):
-    """The PR head changed while review threads were read."""
+class _ReviewDataHeadChanged(WaveOpsError):
+    """The PR head changed while review data was read."""
 
 
 @dataclass(frozen=True)
@@ -182,13 +186,25 @@ def gh_graphql(
     return payload.get("data", {})
 
 
+PR_STATE_QUERY = """
+query WavePrState($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id number url title createdAt state isDraft baseRefName headRefOid mergeStateStatus
+      isInMergeQueue autoMergeRequest { enabledAt }
+      statusCheckRollup { state }
+    }
+  }
+}
+"""
+
 PR_QUERY = """
 query WavePr($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
     defaultBranchRef { name }
     pullRequest(number: $number) {
-      id number url state isDraft baseRefName headRefOid mergeStateStatus isInMergeQueue
-      autoMergeRequest { enabledAt }
+      id number url title createdAt state isDraft baseRefName headRefOid mergeStateStatus
+      isInMergeQueue autoMergeRequest { enabledAt }
       statusCheckRollup { state }
       timelineItems(first: 100, after: $cursor, itemTypes: [CONVERT_TO_DRAFT_EVENT]) {
         nodes {
@@ -232,6 +248,20 @@ query WaveReviewThreads($owner: String!, $repo: String!, $number: Int!, $cursor:
 }
 """
 
+REVIEWS_QUERY = """
+query WaveReviews($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      headRefOid
+      reviews(first: 100, after: $cursor) {
+        nodes { id submittedAt author { login } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
 
 def _paginate_pr_connection(
     query: str,
@@ -253,8 +283,8 @@ def _paginate_pr_connection(
             raise WaveOpsError(f"Pull request {owner}/{repo}#{number} was not returned by GitHub")
         if pr.get("headRefOid") != expected_head:
             error = f"Pull request head changed while {connection_name} was paginated"
-            if connection_name == "reviewThreads":
-                raise _ReviewThreadsHeadChanged(error)
+            if connection_name in {"reviewThreads", "reviews"}:
+                raise _ReviewDataHeadChanged(error)
             raise WaveOpsError(error)
         connection = pr.get(connection_name) or {}
         nodes.extend(item for item in connection.get("nodes") or [] if isinstance(item, dict))
@@ -325,6 +355,26 @@ def _github_pr_snapshot_once(
             deadline=deadline,
         )
     }
+    first_pr["reviews"] = {
+        "nodes": _paginate_pr_connection(
+            REVIEWS_QUERY,
+            "reviews",
+            owner,
+            repo,
+            number,
+            expected_head,
+            deadline=deadline,
+        )
+    }
+    state_data = gh_graphql(
+        PR_STATE_QUERY, {"owner": owner, "repo": repo, "number": number}, deadline=deadline
+    )
+    latest_pr = (state_data.get("repository") or {}).get("pullRequest")
+    if not isinstance(latest_pr, dict):
+        raise WaveOpsError(f"Pull request {repo_slug}#{number} was not returned by GitHub")
+    if latest_pr.get("headRefOid") != expected_head:
+        raise _ReviewDataHeadChanged("Pull request head changed while review data was read")
+    first_pr.update(latest_pr)
     first_pr["defaultBranch"] = default_branch
     return first_pr
 
@@ -333,11 +383,11 @@ def github_pr_snapshot(
     repo_slug: str, number: int, *, deadline: float | None = None
 ) -> dict[str, Any]:
     """Fetch the PR state, including complete queue and actor evidence, through GraphQL."""
-    for attempt in range(MAX_REVIEW_THREAD_SNAPSHOT_ATTEMPTS):
+    for attempt in range(MAX_REVIEW_DATA_SNAPSHOT_ATTEMPTS):
         try:
             return _github_pr_snapshot_once(repo_slug, number, deadline=deadline)
-        except _ReviewThreadsHeadChanged:
-            if attempt == MAX_REVIEW_THREAD_SNAPSHOT_ATTEMPTS - 1:
+        except _ReviewDataHeadChanged:
+            if attempt == MAX_REVIEW_DATA_SNAPSHOT_ATTEMPTS - 1:
                 raise
     raise AssertionError("unreachable")
 
@@ -762,8 +812,12 @@ def _event_node(event: dict[str, Any]) -> str | None:
     """Map a normalized observation to an approved wake node."""
     mapping = {
         "plan_posted": "plan_posted",
+        "pr_opened": "pr_opened",
         "review_findings": "review_findings_posted",
+        "review_complete": "review_complete",
         "run_blocked": "run_blocked",
+        "review_absent": "review_absent",
+        "merge_conflict": "merge_conflict",
         "merged": "terminal_merged",
         "closed": "terminal_closed",
         "run_error": "terminal_run_error",
@@ -870,7 +924,7 @@ def comments_to_events(
         lower = body.lower()
         user = comment.get("user") or {}
         kind = "progress"
-        if "/plan" in lower and "plan" in lower and ("ready" in lower or "review" in lower):
+        if re.search(r"(?im)^## plan(?:\s*:|\s*$)", body):
             kind = "plan_posted"
         elif _is_blocker_comment(body):
             kind = "run_blocked"
@@ -905,15 +959,91 @@ def terminal_pr_state_event(
     return event
 
 
+def _auto_merge_armed(snapshot: dict[str, Any]) -> bool:
+    """Return whether GitHub reports an active auto-merge request."""
+    return (snapshot.get("pr") or {}).get("autoMergeRequest") is not None
+
+
+def _pr_readiness(pr: dict[str, Any]) -> str:
+    """Return the operator-facing PR readiness label."""
+    return "draft" if pr.get("isDraft") is True else "ready"
+
+
+def merge_conflict_event(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """Return an actionable merge-conflict observation."""
+    pr = snapshot.get("pr") or {}
+    if pr.get("state") != "OPEN" or pr.get("mergeStateStatus") != "DIRTY":
+        return None
+    number = snapshot.get("pr_number") or pr.get("number")
+    return {
+        "kind": "merge_conflict",
+        "source": "github",
+        "summary": f"PR #{number} is blocked by merge conflicts",
+    }
+
+
+def review_absent_event(
+    snapshot: dict[str, Any], review_absent_seconds: float
+) -> dict[str, Any] | None:
+    """Return an observation when an open PR has waited too long for review."""
+    pr = snapshot.get("pr") or {}
+    if pr.get("state") != "OPEN" or snapshot.get("review_ids"):
+        return None
+    created_at = _timestamp(pr.get("createdAt"))
+    observed_at = _timestamp(snapshot.get("observed_at"))
+    if created_at is None or observed_at is None:
+        return None
+    age_seconds = (observed_at - created_at).total_seconds()
+    if age_seconds < review_absent_seconds:
+        return None
+    number = snapshot.get("pr_number") or pr.get("number")
+    window = f"{review_absent_seconds / 60:g} minutes"
+    summary = f"PR #{number} has no Open SWE review after {window}"
+    if pr.get("isDraft") is True:
+        summary += "; draft PR may have skipped auto-review — mark it ready for review"
+    return {"kind": "review_absent", "source": "github", "summary": summary}
+
+
 def snapshot_transition_events(
     previous: dict[str, Any], current: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Normalize review-thread and LangGraph run transitions."""
+    """Normalize PR, review, and LangGraph run transitions."""
     events: list[dict[str, Any]] = []
+    pr = current.get("pr") or {}
+    previous_number = previous.get("pr_number")
+    current_number = current.get("pr_number")
+    if (
+        not previous_number
+        and current_number
+        and pr.get("state") == "OPEN"
+        and not _auto_merge_armed(current)
+    ):
+        title = str(pr.get("title") or "untitled PR")
+        events.append(
+            {
+                "kind": "pr_opened",
+                "source": "github",
+                "summary": f"PR #{current_number} opened {_pr_readiness(pr)}: {title}",
+            }
+        )
     old_threads = set(previous.get("unresolved_review_thread_ids") or [])
     new_threads = set(current.get("unresolved_review_thread_ids") or [])
     added_threads = sorted(new_threads - old_threads)
-    if added_threads:
+    old_reviews = set(previous.get("review_ids") or [])
+    new_reviews = set(current.get("review_ids") or [])
+    added_reviews = sorted(new_reviews - old_reviews)
+    if added_reviews and not _auto_merge_armed(current):
+        count = len(added_threads)
+        noun = "finding" if count == 1 else "findings"
+        events.append(
+            {
+                "kind": "review_complete",
+                "source": "github",
+                "summary": f"Open SWE review complete: {count} {noun}",
+                "review_ids": added_reviews,
+            }
+        )
+    if added_threads and (not added_reviews or _auto_merge_armed(current)):
         events.append(
             {
                 "kind": "review_findings",
@@ -921,6 +1051,11 @@ def snapshot_transition_events(
                 "summary": f"new unresolved review threads: {', '.join(added_threads)}",
             }
         )
+    old_merge_state = (previous.get("pr") or {}).get("mergeStateStatus")
+    if old_merge_state != "DIRTY":
+        conflict = merge_conflict_event(current)
+        if conflict:
+            events.append(conflict)
     old_errors = set(previous.get("error_run_ids") or [])
     new_errors = set(current.get("error_run_ids") or [])
     added_errors = sorted(new_errors - old_errors)
@@ -974,6 +1109,14 @@ def live_snapshot(
     unresolved_ids = sorted(
         str(item.get("id")) for item in threads if item.get("id") and not item.get("isResolved")
     )
+    reviews = (pr.get("reviews") or {}).get("nodes") or []
+    review_ids = sorted(
+        str(item.get("id"))
+        for item in reviews
+        if item.get("id")
+        and item.get("submittedAt")
+        and (item.get("author") or {}).get("login") == AGENT_BOT_LOGIN
+    )
     latest_status, latest_at, error_ids = _run_observations(langgraph)
     return {
         "linear": linear,
@@ -981,6 +1124,7 @@ def live_snapshot(
         "pr": pr,
         "pr_number": int(discovered_number) if str(discovered_number or "").isdigit() else None,
         "unresolved_review_thread_ids": unresolved_ids,
+        "review_ids": review_ids,
         "latest_run_status": latest_status,
         "latest_run_at": latest_at,
         "error_run_ids": error_ids,
@@ -1661,16 +1805,28 @@ def cmd_watch(args: argparse.Namespace) -> int:
         )
     }
     terminal_states_emitted: set[str] = set()
+    baseline_events: list[dict[str, Any]] = []
     terminal_event = terminal_pr_state_event(previous, terminal_states_emitted)
     if terminal_event:
+        baseline_events.append(terminal_event)
+    conflict_event = merge_conflict_event(previous)
+    if conflict_event:
+        baseline_events.append(conflict_event)
+    absent_event = review_absent_event(previous, args.review_absent_seconds)
+    review_absent_emitted = False
+    if absent_event:
+        baseline_events.append(absent_event)
+    if baseline_events:
         poll_id = str(previous.get("observed_at") or "baseline")
-        result = replay_events(assign_poll_id([terminal_event], poll_id), viewer_id)
+        result = replay_events(assign_poll_id(baseline_events, poll_id), viewer_id)
         for wake in result["wakes"]:
             emit(wake, pretty=False)
             if wake["wake_node"] == "terminal_merged":
                 terminal_states_emitted.add("MERGED")
             elif wake["wake_node"] == "terminal_closed":
                 terminal_states_emitted.add("CLOSED")
+            elif wake["wake_node"] == "review_absent":
+                review_absent_emitted = True
     iterations = 0
     last_recovery_fingerprint: str | None = None
     active_unhandled: set[str] = set()
@@ -1695,6 +1851,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 if terminal_event:
                     events.append(terminal_event)
                 events.extend(snapshot_transition_events(previous, current))
+                absent_event = review_absent_event(current, args.review_absent_seconds)
+                if absent_event and not review_absent_emitted:
+                    events.append(absent_event)
                 stale = liveness_event(previous, current, args.run_stall_seconds)
                 if stale:
                     events.append(stale)
@@ -1773,6 +1932,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         terminal_states_emitted.add("MERGED")
                     elif wake["wake_node"] == "terminal_closed":
                         terminal_states_emitted.add("CLOSED")
+                    elif wake["wake_node"] == "review_absent":
+                        review_absent_emitted = True
                 known_ids.update(str(item.get("id")) for item in comments)
                 previous = current
                 last_poll_error = None
@@ -1877,6 +2038,7 @@ def parser() -> argparse.ArgumentParser:
     watch.add_argument("--interval", type=float, default=60)
     watch.add_argument("--iterations", type=int, default=0)
     watch.add_argument("--run-stall-seconds", type=int, default=1800)
+    watch.add_argument("--review-absent-seconds", type=float, default=900)
     watch.set_defaults(func=cmd_watch)
 
     sweep = sub.add_parser("status-sweep")
