@@ -167,6 +167,30 @@ def test_plan_defaults_to_all_non_viewer_comments_since_latest_dispatch(
     assert output.count("----- Open SWE at") == 3
 
 
+def test_plan_scopes_after_custom_repo_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    comments = [
+        _comment("old", "Earlier run", "2026-07-27T20:00:00Z", "agent-1", "Open SWE"),
+        _comment(
+            "dispatch",
+            "@openswe repo owner/name\n\nCustom dispatch body for ABC-1.",
+            "2026-07-27T21:34:40Z",
+            "viewer-1",
+            "Operator",
+        ),
+        _comment("ack", "On it!", "2026-07-27T21:34:41Z", "agent-1", "Open SWE"),
+        _comment("plan", "## Plan", "2026-07-27T21:37:58Z", "agent-1", "Open SWE"),
+    ]
+
+    output = _plan_output(monkeypatch, capsys, comments)
+
+    assert "Earlier run" not in output
+    assert output.index("On it!") < output.index("## Plan")
+    assert output.count("----- Open SWE at") == 2
+
+
 def test_plan_without_dispatch_falls_back_to_all_comments_with_true_authors(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

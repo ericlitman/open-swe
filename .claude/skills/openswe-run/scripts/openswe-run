@@ -637,11 +637,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         snapshot["comments"],
         key=lambda comment: (str(comment.get("createdAt") or ""), str(comment.get("id") or "")),
     )
-    dispatch = re.compile(
-        rf"^@openswe\s+repo\s+[^\s/]+/[^\s/]+\s+—\s+Execute\s+"
-        rf"{re.escape(args.ticket)}\s+only\.",
-        re.IGNORECASE,
-    )
+    dispatch = re.compile(r"^@openswe\s+repo\s+[^\s/]+/[^\s/]+\b", re.IGNORECASE)
     start = 0
     for index, comment in enumerate(comments):
         if dispatch.match(str(comment.get("body") or "")):
