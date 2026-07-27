@@ -221,9 +221,7 @@ async def test_auto_merge_stall_cycles_disable_then_rearm_once(
     client = _FakeClient(threads, _FakeRuns({}))
     _patch(monkeypatch, client)
     monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
+    monkeypatch.setattr(reconcile, "get_github_app_execution_token", lambda **_kw: _coro("token"))
     queries: list[str] = []
 
     async def fake_graphql(_client: Any, query: str, _variables: dict[str, Any]):
@@ -249,9 +247,7 @@ async def test_auto_merge_green_draft_alerts_without_readying(
     client = _FakeClient(threads, _FakeRuns({}))
     _patch(monkeypatch, client)
     monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
+    monkeypatch.setattr(reconcile, "get_github_app_execution_token", lambda **_kw: _coro("token"))
     monkeypatch.setattr(
         reconcile,
         "_graphql",
@@ -275,9 +271,7 @@ async def test_auto_merge_hold_disables_and_never_rearms(
     threads = _FakeThreads([[_auto_merge_thread()]])
     _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
     monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
+    monkeypatch.setattr(reconcile, "get_github_app_execution_token", lambda **_kw: _coro("token"))
     queries: list[str] = []
 
     async def fake_graphql(_client: Any, query: str, _variables: dict[str, Any]):
@@ -322,9 +316,7 @@ async def test_auto_merge_persisted_hold_disables_without_label(
     threads = _FakeThreads([[_auto_merge_thread(merge_hold_requested=True)]])
     _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
     monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
+    monkeypatch.setattr(reconcile, "get_github_app_execution_token", lambda **_kw: _coro("token"))
     queries: list[str] = []
 
     async def fake_graphql(_client: Any, query: str, _variables: dict[str, Any]):
@@ -358,9 +350,7 @@ async def test_auto_merge_failed_rearm_becomes_alertable(
     )
     _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
     monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
+    monkeypatch.setattr(reconcile, "get_github_app_execution_token", lambda **_kw: _coro("token"))
     monkeypatch.setattr(
         reconcile,
         "_graphql",
@@ -383,9 +373,7 @@ async def test_auto_merge_hold_dequeues_queued_pr(
     threads = _FakeThreads([[_auto_merge_thread(merge_hold_requested=True)]])
     _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
     monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
+    monkeypatch.setattr(reconcile, "get_github_app_execution_token", lambda **_kw: _coro("token"))
     queries: list[str] = []
 
     async def fake_graphql(_client: Any, query: str, _variables: dict[str, Any]):
@@ -412,9 +400,7 @@ async def test_auto_merge_queue_entry_keeps_reconciliation_active(
     threads = _FakeThreads([[_auto_merge_thread()]])
     _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
     monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
+    monkeypatch.setattr(reconcile, "get_github_app_execution_token", lambda **_kw: _coro("token"))
     monkeypatch.setattr(
         reconcile,
         "_graphql",

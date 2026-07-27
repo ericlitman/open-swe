@@ -17,8 +17,9 @@ from langgraph_sdk import get_client
 from ..dashboard.agent_usage import record_agent_pr_usage
 from ..dashboard.plan_store import PLAN_STATUS_APPROVED, get_plan_content
 from ..dashboard.team_settings import AUTO_MERGE_ALWAYS, AUTO_MERGE_ON_PLAN_APPROVAL
+from ..utils.auth import repository_matches_configurable
 from ..utils.dashboard_links import dashboard_plan_url
-from ..utils.github_app import get_github_app_installation_token
+from ..utils.github_app import get_github_app_execution_token
 from ..utils.github_comments import derive_pr_state
 from ..utils.slack import get_slack_permalink
 
@@ -37,7 +38,10 @@ _AUTO_MERGE_METADATA_LOCKS: dict[str, asyncio.Lock] = {}
 
 async def _resolve_pr_author_token(owner: str, repo: str) -> tuple[str | None, str]:
     """Return the GitHub App installation token used to open the PR."""
-    return await get_github_app_installation_token(target_repo=f"{owner}/{repo}"), "bot"
+    configurable = _configurable()
+    if not repository_matches_configurable(configurable, owner, repo):
+        return None, "repository_mismatch"
+    return await get_github_app_execution_token(target_repo=f"{owner}/{repo}"), "bot"
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -704,8 +708,9 @@ async def _open_pull_request(
     auto_merge_requested = await _resolve_auto_merge_eligibility(configurable, state)
     token, kind = await _resolve_pr_author_token(owner, repo)
     if not token:
+        repository_mismatch = kind == "repository_mismatch"
         return _failure_payload(
-            code="no_github_token",
+            code="github_repository_not_authorized" if repository_mismatch else "no_github_token",
             owner=owner,
             repo=repo,
             head=head,
@@ -713,8 +718,16 @@ async def _open_pull_request(
             token_kind=kind,
             http_status=None,
             reason="No GitHub token was available to open the pull request",
-            likely_cause="the GitHub App installation token is unavailable",
-            suggested_action="install or grant the Open SWE GitHub App access, then retry",
+            likely_cause=(
+                "the requested repository differs from this run's authorized repository"
+                if repository_mismatch
+                else "the GitHub App installation token is unavailable"
+            ),
+            suggested_action=(
+                "start a repository-bound thread authorized for this repository"
+                if repository_mismatch
+                else "install or grant the Open SWE GitHub App access, then retry"
+            ),
             branch_pushed=None,
             failed_step="resolve_pr_author_token",
         )

@@ -21,7 +21,7 @@ from fastapi import HTTPException
 
 from ..review.diff import fetch_pr_diff
 from ..review.findings import REVIEWER_THREAD_KIND
-from ..utils.github_app import get_github_app_installation_token
+from ..utils.github_app import get_github_app_execution_token
 from ..utils.json_types import as_json_object
 from ..utils.thread_ops import langgraph_client, langgraph_url
 from .options import SUPPORTED_MODEL_IDS, model_supports_effort
@@ -385,9 +385,7 @@ async def _enrich_chat_command(
 
     if needs_seed:
         try:
-            token = await get_github_app_installation_token(
-                target_repo=f"{owner}/{repo}", repositories=[repo]
-            )
+            token = await get_github_app_execution_token(target_repo=f"{owner}/{repo}")
             if not token:
                 raise HTTPException(503, "GitHub App token unavailable")
             pr_files, head_sha = await _build_pr_context(

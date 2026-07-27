@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -407,7 +408,7 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
 
     monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
     monkeypatch.setattr(
-        webhook_common, "get_github_app_installation_token_with_expiry", fake_get_token_with_expiry
+        webhook_common, "get_github_app_execution_token_with_expiry", fake_get_token_with_expiry
     )
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", fake_cache_token)
     monkeypatch.setattr(webhook_common, "fetch_pr_review_threads", fake_fetch_threads)
@@ -496,7 +497,7 @@ def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(mon
 
     monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
     monkeypatch.setattr(
-        webhook_common, "get_github_app_installation_token_with_expiry", fake_get_token_with_expiry
+        webhook_common, "get_github_app_execution_token_with_expiry", fake_get_token_with_expiry
     )
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", fake_cache_token)
     monkeypatch.setattr(webhook_common, "fetch_pr_review_threads", fake_fetch_threads)
@@ -1057,7 +1058,7 @@ def test_slack_webhook_ignores_unmentioned_non_plan_reply(monkeypatch) -> None:
 def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_get_github_app_installation_token_with_expiry(
+    async def fake_get_github_app_execution_token_with_expiry(
         **_kwargs: object,
     ) -> tuple[str | None, str | None]:
         return "app-token", None
@@ -1089,8 +1090,8 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
 
     monkeypatch.setattr(
         webhook_common,
-        "get_github_app_installation_token_with_expiry",
-        fake_get_github_app_installation_token_with_expiry,
+        "get_github_app_execution_token_with_expiry",
+        fake_get_github_app_execution_token_with_expiry,
     )
 
     async def fake_post_review_started_comment(**kwargs: object) -> int:
@@ -1173,7 +1174,7 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(
     async def fake_get_github_app_installation_token(**_kwargs: object) -> str | None:
         return "app-token"
 
-    async def fake_get_github_app_installation_token_with_expiry(
+    async def fake_get_github_app_execution_token_with_expiry(
         **_kwargs: object,
     ) -> tuple[str | None, str | None]:
         return "app-token", None
@@ -1228,8 +1229,8 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(
     monkeypatch.setattr(webhook_common, "_is_repo_auto_review_enabled", fake_auto_review_enabled)
     monkeypatch.setattr(
         webhook_common,
-        "get_github_app_installation_token_with_expiry",
-        fake_get_github_app_installation_token_with_expiry,
+        "get_github_app_execution_token_with_expiry",
+        fake_get_github_app_execution_token_with_expiry,
     )
 
     async def fake_post_review_started_comment(**kwargs: object) -> int:
@@ -1331,6 +1332,7 @@ async def test_request_pr_review_tool_uses_shared_trigger(monkeypatch) -> None:
                 "source": "github",
                 "github_login": "octocat",
                 "github_user_id": 123,
+                "repo": {"owner": "langchain-ai", "name": "open-swe"},
                 "slack_thread": {"channel_id": "C123", "thread_ts": "1700000000.000100"},
             }
         },
@@ -1347,6 +1349,29 @@ async def test_request_pr_review_tool_uses_shared_trigger(monkeypatch) -> None:
     assert captured["slack_channel_id"] == "C123"
     assert captured["slack_thread_ts"] == "1700000000.000100"
     assert result["success"] is True
+
+
+async def test_request_pr_review_tool_rejects_other_repository(monkeypatch) -> None:
+    trigger = AsyncMock()
+    monkeypatch.setattr(request_pr_review_module, "trigger_pr_review_from_ref", trigger)
+    monkeypatch.setattr(
+        request_pr_review_module,
+        "get_config",
+        lambda: {
+            "configurable": {
+                "source": "dashboard",
+                "repo": {"owner": "acme", "name": "authorized"},
+            }
+        },
+    )
+
+    result = await request_pr_review_tool("https://github.com/acme/other/pull/1")
+
+    assert result == {
+        "success": False,
+        "error": "Pull request repository is not authorized for this run",
+    }
+    trigger.assert_not_awaited()
 
 
 def test_process_github_pr_comment_without_email_uses_app_token(

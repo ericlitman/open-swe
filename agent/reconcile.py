@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .utils.github_app import get_github_app_installation_token
+from .utils.github_app import get_github_app_execution_token
 from .utils.github_http import GITHUB_API_BASE, GITHUB_GRAPHQL, github_client, github_request
 from .utils.thread_ops import langgraph_client
 
@@ -241,9 +241,8 @@ async def reconcile_auto_merge_prs(
             continue
         counts["threads_checked"] += 1
         try:
-            token = await get_github_app_installation_token(
+            token = await get_github_app_execution_token(
                 target_repo=f"{owner}/{repo}",
-                repositories=[repo],
                 permissions={"contents": "write", "pull_requests": "write"},
             )
             if not token:

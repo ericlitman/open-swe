@@ -22,7 +22,7 @@ from typing import Any
 from .review.findings import REVIEWER_THREAD_KIND
 from .review.publish import settle_review_check_run
 from .utils.dashboard_links import dashboard_thread_url
-from .utils.github_app import get_github_app_installation_token
+from .utils.github_app import get_github_app_execution_token
 from .utils.github_checks import incomplete_review_check_result
 from .utils.github_comments import post_github_comment
 from .utils.linear import comment_on_linear_issue
@@ -95,7 +95,7 @@ async def _settle_failed_reviewer_check(thread_id: str, metadata: dict[str, Any]
     if not isinstance(owner, str) or not owner or not isinstance(repo, str) or not repo:
         return
     try:
-        token = await get_github_app_installation_token(target_repo=f"{owner}/{repo}")
+        token = await get_github_app_execution_token(target_repo=f"{owner}/{repo}")
         if not token:
             logger.warning("run-complete: no GitHub token to settle review check for %s", thread_id)
             return
@@ -161,7 +161,11 @@ async def _post_failure_reply(thread_id: str, metadata: dict[str, Any], status: 
             owner = repo_config.get("owner")
             repo = repo_config.get("name")
             target_repo = f"{owner}/{repo}" if owner and repo else None
-            token = await get_github_app_installation_token(target_repo=target_repo)
+            token = (
+                await get_github_app_execution_token(target_repo=target_repo)
+                if target_repo
+                else None
+            )
             if token:
                 return await post_github_comment(repo_config, number, text, token=token)
         return False

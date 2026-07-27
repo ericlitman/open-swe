@@ -428,7 +428,7 @@ def _patch_enrich_deps(
 
     monkeypatch.setattr(review_chat_api, "get_review", fake_get_review)
     monkeypatch.setattr(review_chat_api, "fetch_pr_diff", fake_diff)
-    monkeypatch.setattr(review_chat_api, "get_github_app_installation_token", fake_token)
+    monkeypatch.setattr(review_chat_api, "get_github_app_execution_token", fake_token)
     monkeypatch.setattr(review_chat_api, "get_pr_head_sha", fake_head)
     return captured
 
