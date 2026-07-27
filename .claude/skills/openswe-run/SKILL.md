@@ -193,9 +193,9 @@ explicitly if the log has no `[ISSUE]` lines.
 
 Every command appends evidence to `<stable-root>/handoffs/<TICKET>-<date>-run.md`
 (stable root defaults to `~/projects/open-swe`, override with
-`OPENSWE_STABLE_ROOT`; the directory is kept gitignored, regardless of which repo the run
-targets). When you hit friction — confusing output, a hang, a wrong doc, an awkward
-command — record it the moment it happens:
+`OPENSWE_STABLE_ROOT`; in a Git checkout, the directory is added to the checkout-local
+exclude file without changing tracked files). When you hit friction — confusing output, a hang, a
+wrong doc, an awkward command — record it the moment it happens:
 
 ```bash
 scripts/openswe-run log --ticket OSWE-123 --issue "what happened, with the exact evidence"
