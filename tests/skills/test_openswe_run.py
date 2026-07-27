@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -252,6 +253,92 @@ def test_locked_plan_statuses_match_the_products_refusals() -> None:
     assert set(run.PLAN_STATUS_LOCKED) == {"shared", "cancelled"}
     assert run.PLAN_STATUS_LOCKED[0] in run.PLAN_STATUS_SNIPPET
     assert run.PLAN_STATUS_LOCKED[1] in run.PLAN_STATUS_SNIPPET
+
+
+def test_midnight_run_uses_one_log_and_report_includes_all_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Clock:
+        current = datetime(2026, 7, 26, 23, 59, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz: object) -> datetime:
+            return cls.current
+
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "datetime", Clock)
+
+    path = run.log_path("ABC-1", new_run=True)
+    run.dogfood("ABC-1", "ISSUE", "before midnight")
+    Clock.current = datetime(2026, 7, 27, 0, 1, tzinfo=UTC)
+    run.dogfood("ABC-1", "ISSUE", "after midnight")
+
+    assert run.log_path("ABC-1") == path
+    assert list((tmp_path / "handoffs").glob("ABC-1-*-run.md")) == [path]
+    assert run.cmd_report(argparse.Namespace(ticket="ABC-1")) == 0
+    output = capsys.readouterr().out
+    assert "dogfood issues (2):" in output
+    assert "before midnight" in output
+    assert "after midnight" in output
+
+
+def test_non_start_log_establishes_a_timestamped_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+
+    args = argparse.Namespace(ticket="ABC-1", issue=False, text="pre-dispatch evidence")
+    assert run.cmd_log(args) == 0
+
+    logs = list((tmp_path / "handoffs").glob("ABC-1-*-run.md"))
+    assert len(logs) == 1
+    assert re.fullmatch(r"ABC-1-\d{8}T\d{12}Z-run\.md", logs[0].name)
+    assert str(logs[0]) in capsys.readouterr().out
+    assert "pre-dispatch evidence" in logs[0].read_text()
+
+
+def test_log_path_uses_the_lexically_latest_ticket_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    handoffs = run.ensure_handoffs()
+    older = handoffs / "ABC-1-20260726-run.md"
+    latest = handoffs / "ABC-1-20260727T000100000000Z-run.md"
+    older.write_text("older")
+    latest.write_text("latest")
+
+    assert run.log_path("ABC-1") == latest
+
+
+def test_report_discovers_a_legacy_dated_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    legacy = run.ensure_handoffs() / "ABC-1-20260726-run.md"
+    legacy.write_text("- 2026-07-26T23:59:00Z [ISSUE] legacy evidence\n")
+
+    assert run.cmd_report(argparse.Namespace(ticket="ABC-1")) == 0
+
+    output = capsys.readouterr().out
+    assert f"log: {legacy}" in output
+    assert "legacy evidence" in output
+
+
+def test_report_refuses_to_create_a_missing_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+
+    with pytest.raises(run.RunError, match="No dogfood log found for ABC-1"):
+        run.cmd_report(argparse.Namespace(ticket="ABC-1"))
+
+    assert not list((tmp_path / "handoffs").glob("ABC-1-*-run.md"))
 
 
 def test_no_operator_home_path_is_hardcoded_in_the_source() -> None:
@@ -673,6 +760,8 @@ def test_start_success_records_handoff_in_json_and_dogfood(
         lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "thread-1"}),
     )
     monkeypatch.setattr(run, "_post_with_handoff", lambda *args, **kwargs: final)
+    new_runs: list[bool] = []
+    monkeypatch.setattr(run, "log_path", lambda ticket, *, new_run=False: new_runs.append(new_run))
     monkeypatch.setattr(run, "dogfood", lambda ticket, tag, message: logs.append(message))
     args = argparse.Namespace(
         ticket="ABC-1",
@@ -689,6 +778,7 @@ def test_start_success_records_handoff_in_json_and_dogfood(
     assert run.cmd_start(args) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["handoff"] == final
+    assert new_runs == [True]
     assert logs == [
         "dispatched ABC-1 to owner/name (https://linear.example/ABC-1); handoff status=busy runs=1"
     ]
