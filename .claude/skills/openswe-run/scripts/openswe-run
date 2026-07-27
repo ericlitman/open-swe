@@ -1042,7 +1042,11 @@ def cmd_log(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    path = log_path(args.ticket)
+    handoffs = ensure_handoffs()
+    candidates = sorted(handoffs.glob(f"{args.ticket.upper()}-*-run.md"))
+    if not candidates:
+        raise RunError(f"No dogfood log found for {args.ticket} under {handoffs}")
+    path = candidates[-1]
     entries = [line for line in path.read_text().splitlines() if line.startswith("- ")]
     issues = [line for line in entries if "[ISSUE]" in line]
     wakes = [line for line in entries if "[wake]" in line]

@@ -330,6 +330,17 @@ def test_report_discovers_a_legacy_dated_log(
     assert "legacy evidence" in output
 
 
+def test_report_refuses_to_create_a_missing_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+
+    with pytest.raises(run.RunError, match="No dogfood log found for ABC-1"):
+        run.cmd_report(argparse.Namespace(ticket="ABC-1"))
+
+    assert not list((tmp_path / "handoffs").glob("ABC-1-*-run.md"))
+
+
 def test_no_operator_home_path_is_hardcoded_in_the_source() -> None:
     """This repo is public. The resolved value contains a home path by design;
     what must not appear is a literal one baked into the source."""
