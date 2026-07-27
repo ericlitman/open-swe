@@ -39,6 +39,16 @@ DEFAULT_STABLE_ROOT = str(Path.home() / "projects" / "open-swe")
 LINEAR_URL = "https://api.linear.app/graphql"
 LOCAL_LANGGRAPH_URL = "http://127.0.0.1:2029"
 CONTROL_PLANE_PYTHON = "/opt/mobilyze/open-swe-control-plane/current/.venv/bin/python"
+LINEAR_ENV_ERROR = "LINEAR_API_KEY is not set. Set it with: export LINEAR_API_KEY=..."
+LANGGRAPH_ENV_ERROR = (
+    "LANGGRAPH_URL is not set and the local control plane did not answer. "
+    "Set it with: export LANGGRAPH_URL=http://127.0.0.1:2029 "
+    "(off studio2, tunnel first: ssh -N -L 2029:127.0.0.1:2029 studio2)"
+)
+GH_ENV_ERROR = (
+    "GH_TOKEN is not set and `gh auth token` produced nothing. "
+    "Set it with: export GH_TOKEN=$(gh auth token)  # or a PAT with repo scope"
+)
 WAKE_TIMEOUT_EXIT = 3
 CHILD_FAILURE_EXIT = 4
 HANDOFF_TIMEOUT_SECONDS = 60.0
@@ -133,7 +143,7 @@ def dogfood(ticket: str, tag: str, text: str) -> None:
 def linear_gql(query: str, variables: dict) -> dict:
     key = os.environ.get("LINEAR_API_KEY")
     if not key:
-        raise RunError("LINEAR_API_KEY is not set. Set it with: export LINEAR_API_KEY=...")
+        raise RunError(LINEAR_ENV_ERROR)
     payload = json.dumps({"query": query, "variables": variables}).encode()
     request = urllib.request.Request(
         LINEAR_URL,
@@ -211,43 +221,89 @@ def post_comment(issue_id: str, body: str) -> None:
 
 
 def probe_local_langgraph() -> bool:
+    for _ in range(2):
+        try:
+            with urllib.request.urlopen(f"{LOCAL_LANGGRAPH_URL}/ok", timeout=3) as response:
+                return bool(json.loads(response.read()).get("ok"))
+        except Exception:
+            pass
+    return False
+
+
+def gh_auth_token() -> str:
+    if not shutil.which("gh"):
+        return ""
+    probe = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+    return probe.stdout.strip() if probe.returncode == 0 else ""
+
+
+def skill_checkout_warning() -> str | None:
+    root_probe = subprocess.run(
+        ["git", "-C", str(SKILL_DIR), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if root_probe.returncode != 0:
+        return None
+    root = root_probe.stdout.strip()
+    refresh_failed = False
     try:
-        with urllib.request.urlopen(f"{LOCAL_LANGGRAPH_URL}/ok", timeout=3) as response:
-            return bool(json.loads(response.read()).get("ok"))
-    except Exception:
-        return False
+        refresh = subprocess.run(
+            ["git", "-C", root, "fetch", "--quiet", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        refresh_failed = refresh.returncode != 0
+    except (OSError, subprocess.TimeoutExpired):
+        refresh_failed = True
+    upstream_probe = subprocess.run(
+        ["git", "-C", root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if upstream_probe.returncode != 0:
+        return None
+    upstream = upstream_probe.stdout.strip()
+    behind_probe = subprocess.run(
+        ["git", "-C", root, "rev-list", "--count", f"HEAD..{upstream}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    behind = int(behind_probe.stdout.strip()) if behind_probe.returncode == 0 else 0
+    if behind:
+        stale = f"; origin refresh failed, using stale {upstream}" if refresh_failed else ""
+        return (
+            f"skill checkout is {behind} commit{'s' if behind != 1 else ''} behind {upstream}{stale}. "
+            f"Update it with: git -C {root} pull"
+        )
+    if refresh_failed:
+        return f"origin refresh failed; stale {upstream} comparison found no known skill drift"
+    return None
 
 
 def ensure_env(ticket: str, *, langgraph: bool, github: bool) -> list[str]:
     """Fail fast with copy-pasteable exports; auto-derive what is safely derivable."""
     notes: list[str] = []
     if not os.environ.get("LINEAR_API_KEY"):
-        raise RunError("LINEAR_API_KEY is not set. Set it with: export LINEAR_API_KEY=...")
+        raise RunError(LINEAR_ENV_ERROR)
     if langgraph and not os.environ.get("LANGGRAPH_URL"):
         if probe_local_langgraph():
             os.environ["LANGGRAPH_URL"] = LOCAL_LANGGRAPH_URL
             notes.append(f"auto-set LANGGRAPH_URL={LOCAL_LANGGRAPH_URL} (local /ok probe passed)")
         else:
-            raise RunError(
-                "LANGGRAPH_URL is not set and the local control plane did not answer. "
-                "Set it with: export LANGGRAPH_URL=http://127.0.0.1:2029 "
-                "(off studio2, tunnel first: ssh -N -L 2029:127.0.0.1:2029 studio2)"
-            )
+            raise RunError(LANGGRAPH_ENV_ERROR)
     if github and not os.environ.get("GH_TOKEN"):
-        token = ""
-        if shutil.which("gh"):
-            probe = subprocess.run(
-                ["gh", "auth", "token"], capture_output=True, text=True, check=False
-            )
-            token = probe.stdout.strip() if probe.returncode == 0 else ""
+        token = gh_auth_token()
         if token:
             os.environ["GH_TOKEN"] = token
             notes.append("auto-derived GH_TOKEN from `gh auth token`")
         else:
-            raise RunError(
-                "GH_TOKEN is not set and `gh auth token` produced nothing. "
-                "Set it with: export GH_TOKEN=$(gh auth token)  # or a PAT with repo scope"
-            )
+            raise RunError(GH_ENV_ERROR)
     for note in notes:
         dogfood(ticket, "note", note)
     return notes
@@ -690,7 +746,7 @@ def cmd_env(args: argparse.Namespace) -> int:
         "linear_api_key": bool(os.environ.get("LINEAR_API_KEY")),
         "langgraph_url": os.environ.get("LANGGRAPH_URL")
         or (LOCAL_LANGGRAPH_URL if probe_local_langgraph() else None),
-        "gh_token": bool(os.environ.get("GH_TOKEN")) or bool(shutil.which("gh")),
+        "gh_token": bool(os.environ.get("GH_TOKEN")) or bool(gh_auth_token()),
         "stable_root": str(stable_root()),
         "handoffs": str(ensure_handoffs()),
     }
@@ -701,6 +757,16 @@ def cmd_env(args: argparse.Namespace) -> int:
     missing = [k for k in ("linear_api_key", "langgraph_url", "gh_token") if not report[k]]
     report["ready"] = not missing and not str(report["monitor_python"]).startswith("UNRESOLVED")
     print(json.dumps(report, indent=2))
+    errors = {
+        "linear_api_key": LINEAR_ENV_ERROR,
+        "langgraph_url": LANGGRAPH_ENV_ERROR,
+        "gh_token": GH_ENV_ERROR,
+    }
+    for key in missing:
+        print(f"openswe-run: {errors[key]}", file=sys.stderr)
+    warning = skill_checkout_warning()
+    if warning:
+        print(f"openswe-run: warning: {warning}", file=sys.stderr)
     return 0 if report["ready"] else 2
 
 
