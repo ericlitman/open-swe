@@ -1029,11 +1029,19 @@ def test_terminal_state_ignores_absent_pr_without_latching() -> None:
     assert emitted_states == set()
 
 
-def test_watch_surfaces_existing_conflict_at_baseline_once(
+def test_watch_surfaces_coalesced_review_absence_after_baseline_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     baseline = _watch_snapshot("OPEN", observed_at="2026-07-24T12:00:00Z")
-    baseline["pr"].update({"number": 53, "mergeStateStatus": "DIRTY"})
+    baseline["pr"].update(
+        {
+            "number": 53,
+            "isDraft": True,
+            "createdAt": "2026-07-24T11:45:00Z",
+            "mergeStateStatus": "DIRTY",
+        }
+    )
+    baseline["review_ids"] = []
     current = deepcopy(baseline)
     current["observed_at"] = "2026-07-24T12:01:00Z"
     snapshots = iter([baseline, current])
@@ -1044,7 +1052,7 @@ def test_watch_surfaces_existing_conflict_at_baseline_once(
     monkeypatch.setattr(wave, "emit", lambda payload, **_kwargs: emitted.append(payload))
 
     assert wave.cmd_watch(_watch_args(pr_number=53)) == 0
-    assert [item["wake_node"] for item in emitted] == ["merge_conflict"]
+    assert [item["wake_node"] for item in emitted] == ["merge_conflict", "review_absent"]
 
 
 def test_watch_surfaces_existing_review_absence_but_not_historical_review(

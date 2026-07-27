@@ -1813,7 +1813,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if conflict_event:
         baseline_events.append(conflict_event)
     absent_event = review_absent_event(previous, args.review_absent_seconds)
-    review_absent_emitted = absent_event is not None
+    review_absent_emitted = False
     if absent_event:
         baseline_events.append(absent_event)
     if baseline_events:
@@ -1825,6 +1825,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 terminal_states_emitted.add("MERGED")
             elif wake["wake_node"] == "terminal_closed":
                 terminal_states_emitted.add("CLOSED")
+            elif wake["wake_node"] == "review_absent":
+                review_absent_emitted = True
     iterations = 0
     last_recovery_fingerprint: str | None = None
     active_unhandled: set[str] = set()
@@ -1852,7 +1854,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 absent_event = review_absent_event(current, args.review_absent_seconds)
                 if absent_event and not review_absent_emitted:
                     events.append(absent_event)
-                    review_absent_emitted = True
                 stale = liveness_event(previous, current, args.run_stall_seconds)
                 if stale:
                     events.append(stale)
@@ -1931,6 +1932,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         terminal_states_emitted.add("MERGED")
                     elif wake["wake_node"] == "terminal_closed":
                         terminal_states_emitted.add("CLOSED")
+                    elif wake["wake_node"] == "review_absent":
+                        review_absent_emitted = True
                 known_ids.update(str(item.get("id")) for item in comments)
                 previous = current
                 last_poll_error = None
