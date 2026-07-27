@@ -407,6 +407,35 @@ async def test_launch_scheduled_agent_run_skips_when_app_scope_missing(
     assert stored["last_error"] == "repository is not covered by the GitHub App installation"
 
 
+async def test_launch_repo_less_schedule_starts_without_repository_config(
+    fake_client, auth
+) -> None:  # noqa: ANN001, ARG001
+    record = {
+        "id": "sched_repo_less",
+        "name": "Inbox triage",
+        "prompt": "Summarize the inbox",
+        "schedule": "0 9 * * 1",
+        "repo": None,
+        "model": "Default",
+        "effort": None,
+        "enabled": True,
+        "cron_id": "cron_1",
+        "created_by": "alice",
+        "user_email": "alice@example.com",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    await fake_client.store.put_item(schedules.SCHEDULES_NAMESPACE, "sched_repo_less", record)
+
+    result = await schedules.launch_scheduled_agent_run("sched_repo_less")
+
+    assert result["status"] == "started"
+    run_config = fake_client.runs.created[0]["config"]["configurable"]
+    assert run_config["source"] == "schedule"
+    assert "repo" not in run_config
+    assert "repo_explicitly_none" not in run_config
+
+
 async def test_launch_scheduled_agent_run_starts_fresh_agent_thread(fake_client, auth) -> None:  # noqa: ANN001, ARG001
     record = {
         "id": "sched_1",
