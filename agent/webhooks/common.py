@@ -5,7 +5,6 @@ import hmac
 import json
 import logging
 import os
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, quote
@@ -117,7 +116,7 @@ from ..utils.slack_feedback import (
     process_slack_reaction_added,
     process_slack_reaction_removed,
 )
-from ..utils.thread_ids import generate_thread_id_from_slack_thread
+from ..utils.thread_ids import generate_reviewer_thread_id, generate_thread_id_from_slack_thread
 from ..utils.thread_ops import queue_message_for_thread  # noqa: F401
 
 __all__ = [
@@ -434,11 +433,6 @@ def generate_thread_id_from_github_issue(issue_id: str) -> str:
         f"{hash_bytes[:8]}-{hash_bytes[8:12]}-{hash_bytes[12:16]}-"
         f"{hash_bytes[16:20]}-{hash_bytes[20:32]}"
     )
-
-
-def generate_reviewer_thread_id(owner: str, repo: str, pr_number: int) -> str:
-    stable_key = f"{owner}/{repo}/pr/{pr_number}/reviewer"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
 
 
 def _extract_repo_config_from_thread(thread: ThreadLike) -> dict[str, str] | None:

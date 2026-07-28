@@ -7,9 +7,11 @@ from langgraph.config import get_config
 from ..review.findings import (
     Finding,
     ReviewerThreadMissingError,
+    finding_requires_new_head,
     get_finding,
     get_thread_id_from_runtime,
     mark_finding_replies_reassessed,
+    resolve_review_head_sha,
     thread_missing_tool_result,
     update_finding_fields,
     update_finding_surface,
@@ -72,6 +74,13 @@ async def resolve_finding_thread(
         return {"success": False, "error": "No GitHub token available"}
 
     try:
+        configured_thread_id = configurable.get("thread_id")
+        thread_id = (
+            configured_thread_id
+            if isinstance(configured_thread_id, str) and configured_thread_id
+            else get_thread_id_from_runtime()
+        )
+        head_sha = await resolve_review_head_sha(thread_id, configurable)
         result = await _resolve_finding_thread_async(
             finding_id=finding_id,
             status=status,
@@ -80,6 +89,7 @@ async def resolve_finding_thread(
             repo=str(repo_config["name"]),
             pr_number=pr_number,
             token=token,
+            head_sha=head_sha,
             reply_comment_ids=reply_comment_ids,
         )
     except ReviewerThreadMissingError as exc:
@@ -104,6 +114,7 @@ async def _resolve_finding_thread_async(
     repo: str,
     pr_number: int,
     token: str,
+    head_sha: str,
     reply_comment_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     thread_id = get_thread_id_from_runtime()
@@ -117,6 +128,11 @@ async def _resolve_finding_thread_async(
     )
     if finding is None:
         return {"success": False, "error": f"No finding found with id {finding_id}"}
+    if status == "resolved" and finding_requires_new_head(finding, head_sha):
+        return {
+            "success": False,
+            "error": "A surfaced finding can only be resolved as fixed on a newer PR head.",
+        }
 
     github_thread_ids = _thread_ids_for_finding(finding)
     for comment_id in _comment_ids_for_finding(finding):

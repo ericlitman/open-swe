@@ -149,6 +149,24 @@ async def complete_review_check_run(
     return True
 
 
+async def fetch_pull_request_head_sha(
+    *, owner: str, repo: str, pr_number: int, token: str
+) -> str | None:
+    """Fetch the current head SHA for a pull request."""
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
+    try:
+        async with github_client(token=token) as client:
+            response = await github_request(client, "GET", url)
+            response.raise_for_status()
+    except httpx.HTTPError:
+        logger.warning("Failed to fetch PR head for %s/%s#%s", owner, repo, pr_number)
+        return None
+    data = response.json()
+    head = data.get("head") if isinstance(data, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    return sha if isinstance(sha, str) and sha else None
+
+
 async def post_autofix_status_check(
     *,
     owner: str,

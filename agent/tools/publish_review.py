@@ -37,6 +37,7 @@ from ..review.findings import (
     get_thread_last_reviewed_sha,
     get_thread_metadata,
     get_thread_slack_ref,
+    open_surfaced_finding_count,
     replace_findings,
     resolve_review_head_sha,
     set_reviewer_thread_metadata,
@@ -63,6 +64,8 @@ from ..review.publish import (
 from ..review.reconcile import reconcile_findings_with_review_threads
 from ..utils.dashboard_links import dashboard_review_url, dashboard_thread_url
 from ..utils.github_checks import (
+    CheckConclusion,
+    fetch_pull_request_head_sha,
     post_autofix_status_check,
     review_check_blocking_enabled,
     review_check_conclusion,
@@ -81,6 +84,7 @@ logger = logging.getLogger(__name__)
 
 _AUTOFIX_MAX_CYCLES = 2
 _AUTOFIX_NUDGE = "Process the pending Open SWE review auto-fix event for this pull request."
+_REVIEW_CHECK_DEFERRED_RESULT_KEY = "review_check_deferred_result"
 
 
 async def publish_review(
@@ -225,14 +229,7 @@ async def _review_check_finding_count(thread_id: str, newly_posted_count: int) -
     # Blocking checks count all standing findings; informational checks preserve publish-time count.
     if not review_check_blocking_enabled():
         return newly_posted_count
-    findings = await list_findings_async(thread_id)
-    return sum(
-        1
-        for finding in findings
-        if finding.get("status", "open") == "open"
-        and isinstance((surface := finding.get("surface")), dict)
-        and surface.get("state") in {"surfaced", "resolve_pending"}
-    )
+    return open_surfaced_finding_count(await list_findings_async(thread_id))
 
 
 async def _publish_review_eval_dry_run_async(
@@ -283,6 +280,185 @@ async def _publish_review_eval_dry_run_async(
         "hidden_count": max(len(open_unpublished) - len(eligible_with_payload), 0),
         "resolved_thread_count": 0,
     }
+
+
+def _run_value(run: Any, name: str) -> Any:
+    return run.get(name) if isinstance(run, Mapping) else getattr(run, name, None)
+
+
+async def _implementation_run_state(
+    *, owner: str, repo: str, branch_name: str
+) -> tuple[str, str | None, str | None, str | None]:
+    if not branch_name:
+        return "inactive", None, None, None
+    client = dispatch_client()
+    try:
+        thread_id, thread = await _resolve_review_autofix_thread(client, owner, repo, branch_name)
+    except RuntimeError as exc:
+        if str(exc).startswith("could not resolve implementation thread from branch"):
+            return "inactive", None, None, None
+        logger.debug("Could not validate implementation thread", exc_info=True)
+        return "unknown", None, None, None
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not resolve implementation thread", exc_info=True)
+        return "unknown", None, None, None
+    try:
+        runs = await client.runs.list(thread_id, limit=1)
+    except Exception:  # noqa: BLE001
+        if thread.get("status") == "busy":
+            return "active", thread_id, None, None
+        logger.debug("Could not inspect implementation runs", exc_info=True)
+        return "unknown", thread_id, None, None
+    latest = runs[0] if runs else None
+    status = _run_value(latest, "status")
+    normalized_status = status.lower() if isinstance(status, str) else None
+    run_id = _run_value(latest, "run_id") or _run_value(latest, "id")
+    normalized_run_id = run_id if isinstance(run_id, str) and run_id else None
+    if normalized_status in {"pending", "running"}:
+        return "active", thread_id, normalized_run_id, normalized_status
+    if normalized_status in {"success", "error", "timeout", "interrupted"}:
+        return "inactive", thread_id, normalized_run_id, normalized_status
+    if thread.get("status") == "busy":
+        return "active", thread_id, normalized_run_id, normalized_status
+    return "inactive", thread_id, normalized_run_id, normalized_status
+
+
+async def _settle_or_defer_review_check(
+    *,
+    thread_id: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    branch_name: str,
+    token: str,
+    conclusion: CheckConclusion,
+    title: str,
+    summary: str,
+    head_sha: str,
+) -> bool:
+    (
+        state,
+        implementation_thread_id,
+        implementation_run_id,
+        run_status,
+    ) = await _implementation_run_state(owner=owner, repo=repo, branch_name=branch_name)
+    if conclusion != "success" or state == "inactive":
+        final_conclusion = conclusion
+        final_title = title
+        final_summary = summary
+        if (
+            conclusion == "success"
+            and implementation_thread_id is not None
+            and run_status in {"error", "timeout", "interrupted"}
+        ):
+            final_conclusion = "failure"
+            final_title = "Implementation work did not complete"
+            final_summary = (
+                "The PR-linked Open SWE run ended without landing a new commit. "
+                "Re-run the requested work before merging."
+            )
+        await settle_review_check_run(
+            thread_id=thread_id,
+            owner=owner,
+            repo=repo,
+            token=token,
+            conclusion=final_conclusion,
+            title=final_title,
+            summary=final_summary,
+            head_sha=head_sha,
+            create_if_missing=True,
+        )
+        return False
+    if state == "unknown" or implementation_thread_id is None:
+        await settle_review_check_run(
+            thread_id=thread_id,
+            owner=owner,
+            repo=repo,
+            token=token,
+            conclusion="failure",
+            title="Implementation state unavailable",
+            summary="Open SWE could not verify that PR-linked implementation work is complete.",
+            head_sha=head_sha,
+            create_if_missing=True,
+        )
+        return False
+
+    metadata = await get_thread_metadata(thread_id)
+    check_run_id = metadata.get("review_check_run_id")
+    if not isinstance(check_run_id, int):
+        await settle_review_check_run(
+            thread_id=thread_id,
+            owner=owner,
+            repo=repo,
+            token=token,
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+            head_sha=head_sha,
+            create_if_missing=True,
+        )
+        return False
+    deferred = {
+        "implementation_thread_id": implementation_thread_id,
+        "implementation_run_id": implementation_run_id,
+        "review_check_run_id": check_run_id,
+        "head_sha": head_sha,
+        "pr_number": pr_number,
+        "conclusion": conclusion,
+        "title": title,
+        "summary": summary,
+    }
+    await set_reviewer_thread_metadata(
+        thread_id, extra={_REVIEW_CHECK_DEFERRED_RESULT_KEY: deferred}
+    )
+
+    (
+        state,
+        _implementation_thread_id,
+        latest_run_id,
+        latest_status,
+    ) = await _implementation_run_state(owner=owner, repo=repo, branch_name=branch_name)
+    if state == "active":
+        if latest_run_id != implementation_run_id:
+            deferred["implementation_run_id"] = latest_run_id
+            await set_reviewer_thread_metadata(
+                thread_id, extra={_REVIEW_CHECK_DEFERRED_RESULT_KEY: deferred}
+            )
+        return True
+
+    current_metadata = await get_thread_metadata(thread_id)
+    current_deferred = current_metadata.get(_REVIEW_CHECK_DEFERRED_RESULT_KEY)
+    if not isinstance(current_deferred, dict):
+        return True
+    held_check_run_id = current_deferred.get("review_check_run_id")
+    current_check_run_id = current_metadata.get("review_check_run_id")
+    if current_check_run_id != held_check_run_id:
+        return True
+    live_head = await fetch_pull_request_head_sha(
+        owner=owner, repo=repo, pr_number=pr_number, token=token
+    )
+    if live_head != head_sha:
+        return True
+    if state == "inactive" and latest_status == "success":
+        final_conclusion, final_title, final_summary = conclusion, title, summary
+    else:
+        final_conclusion = "failure"
+        final_title = "Implementation work did not complete"
+        final_summary = (
+            "The PR-linked Open SWE run ended without landing a new commit. "
+            "Re-run the requested work before merging."
+        )
+    await settle_review_check_run(
+        thread_id=thread_id,
+        owner=owner,
+        repo=repo,
+        token=token,
+        conclusion=final_conclusion,
+        title=final_title,
+        summary=final_summary,
+        expected_check_run_id=held_check_run_id,
+    )
+    return state == "active"
 
 
 async def _publish_review_async(
@@ -384,16 +560,17 @@ async def _publish_review_async(
         await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
         check_finding_count = await _review_check_finding_count(thread_id, 0)
         conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
-        await settle_review_check_run(
+        await _settle_or_defer_review_check(
             thread_id=thread_id,
             owner=owner,
             repo=repo,
+            pr_number=pr_number,
+            branch_name=branch_name,
             token=token,
             conclusion=conclusion,
             title=check_title,
             summary=check_summary,
             head_sha=head_sha,
-            create_if_missing=True,
         )
         return {
             "success": True,
@@ -573,16 +750,17 @@ async def _publish_review_async(
     await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
     check_finding_count = await _review_check_finding_count(thread_id, len(inline_comments))
     conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
-    await settle_review_check_run(
+    await _settle_or_defer_review_check(
         thread_id=thread_id,
         owner=owner,
         repo=repo,
+        pr_number=pr_number,
+        branch_name=branch_name,
         token=token,
         conclusion=conclusion,
         title=check_title,
         summary=check_summary,
         head_sha=head_sha,
-        create_if_missing=True,
     )
     if review_id is not None and eligible_with_payload:
         await _maybe_dispatch_review_autofix(

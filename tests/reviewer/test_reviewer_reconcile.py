@@ -8,7 +8,7 @@ from agent.review.reconcile import reconcile_findings_with_review_threads
 
 
 @pytest.mark.asyncio
-async def test_reconcile_marks_resolved_github_thread_resolved() -> None:
+async def test_reconcile_records_thread_resolution_without_closing_finding() -> None:
     findings = [
         {
             "id": "f1",
@@ -35,7 +35,7 @@ async def test_reconcile_marks_resolved_github_thread_resolved() -> None:
             ],
         )
 
-    assert result[0]["status"] == "resolved"
+    assert result[0]["status"] == "open"
     assert result[0]["github_thread_resolved"] is True
     replace.assert_awaited_once()
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -31,6 +31,10 @@ def _stub_resolve_review_head_sha() -> Iterator[None]:
     with (
         patch("agent.tools.add_finding.resolve_review_head_sha", AsyncMock(side_effect=_head)),
         patch("agent.tools.update_finding.resolve_review_head_sha", AsyncMock(side_effect=_head)),
+        patch(
+            "agent.tools.resolve_finding_thread.resolve_review_head_sha",
+            AsyncMock(side_effect=_head),
+        ),
     ):
         yield
 
@@ -340,6 +344,7 @@ async def test_resolve_finding_thread_resolves_all_known_threads() -> None:
         "status": "open",
         "github_review_thread_ids": ["THREAD_1", "THREAD_2"],
         "github_review_comment_ids": [11, 12],
+        "surface": {"state": "surfaced", "surfaced_at_sha": "old-head"},
     }
     update = AsyncMock(return_value={**finding, "status": "resolved"})
     resolve = AsyncMock(return_value=True)
@@ -827,3 +832,102 @@ async def test_update_finding_returns_structured_error_when_thread_missing() -> 
     assert result["success"] is False
     assert result["error"] == "thread_not_found"
     assert result["thread_id"] == "tid-1"
+
+
+async def test_resolve_finding_thread_rejects_same_head_fix_resolution() -> None:
+    finding = {
+        "id": "f1",
+        "status": "open",
+        "github_review_thread_ids": ["THREAD_1"],
+        "github_review_comment_ids": [11],
+        "surface": {"state": "surfaced", "surfaced_at_sha": "sha-head"},
+    }
+    resolve = AsyncMock(return_value=True)
+    reply = AsyncMock(return_value={"id": 999})
+    with (
+        patch(
+            "agent.tools.resolve_finding_thread.get_config",
+            return_value=_config(repo={"owner": "o", "name": "r"}, pr_number=7),
+        ),
+        patch("agent.tools.resolve_finding_thread.get_github_token", return_value="token"),
+        patch(
+            "agent.tools.resolve_finding_thread.get_thread_id_from_runtime", return_value="tid-1"
+        ),
+        patch("agent.tools.resolve_finding_thread.get_finding", AsyncMock(return_value=finding)),
+        patch("agent.tools.resolve_finding_thread.resolve_review_thread", resolve),
+        patch("agent.tools.resolve_finding_thread.reply_to_review_comment", reply),
+    ):
+        result = await resolve_finding_thread(
+            "f1", status="resolved", note="Acknowledged; fixing now."
+        )
+
+    assert result == {
+        "success": False,
+        "error": "A surfaced finding can only be resolved as fixed on a newer PR head.",
+    }
+    resolve.assert_not_awaited()
+    reply.assert_not_awaited()
+
+
+async def test_resolve_finding_thread_allows_same_head_reasoned_dismissal() -> None:
+    finding = {
+        "id": "f1",
+        "status": "open",
+        "github_review_thread_ids": ["THREAD_1"],
+        "github_review_comment_ids": [11],
+        "surface": {"state": "surfaced", "surfaced_at_sha": "sha-head"},
+    }
+    with (
+        patch(
+            "agent.tools.resolve_finding_thread.get_config",
+            return_value=_config(repo={"owner": "o", "name": "r"}, pr_number=7),
+        ),
+        patch("agent.tools.resolve_finding_thread.get_github_token", return_value="token"),
+        patch(
+            "agent.tools.resolve_finding_thread.get_thread_id_from_runtime", return_value="tid-1"
+        ),
+        patch(
+            "agent.tools.resolve_finding_thread.get_finding",
+            AsyncMock(side_effect=[finding, {**finding, "status": "dismissed"}]),
+        ),
+        patch(
+            "agent.tools.resolve_finding_thread.fetch_review_thread_id_for_comment",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "agent.tools.resolve_finding_thread.resolve_review_thread", AsyncMock(return_value=True)
+        ),
+        patch(
+            "agent.tools.resolve_finding_thread.reply_to_review_comment",
+            AsyncMock(return_value={"id": 999}),
+        ),
+        patch(
+            "agent.tools.resolve_finding_thread.update_finding_fields",
+            AsyncMock(return_value={**finding, "status": "dismissed"}),
+        ),
+        patch("agent.tools.resolve_finding_thread.update_finding_surface", AsyncMock()),
+    ):
+        result = await resolve_finding_thread(
+            "f1", status="dismissed", note="Declined: the caller already enforces this guard."
+        )
+
+    assert result["success"] is True
+    assert result["finding"]["status"] == "dismissed"
+
+
+def test_new_head_requirement_prefers_last_confirmed_sha() -> None:
+    from agent.review.findings import Finding, finding_requires_new_head
+
+    finding = cast(
+        Finding,
+        {
+            "id": "f1",
+            "status": "open",
+            "first_seen_sha": "head-a",
+            "last_confirmed_sha": "head-b",
+            "surface": {"state": "surfaced", "surfaced_at_sha": "head-a"},
+        },
+    )
+
+    assert finding_requires_new_head(finding, "head-b") is True
+    assert finding_requires_new_head(finding, "head-c") is False

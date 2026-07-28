@@ -450,7 +450,8 @@ async def settle_review_check_run(
     summary: str,
     head_sha: str | None = None,
     create_if_missing: bool = False,
-) -> None:
+    expected_check_run_id: int | None = None,
+) -> bool:
     """Settle the tracked review check, optionally creating a completed one.
 
     The dispatching webhook stores ``review_check_run_id`` in reviewer thread
@@ -465,6 +466,38 @@ async def settle_review_check_run(
     """
     metadata = await get_thread_metadata(thread_id)
     check_run_id = metadata.get("review_check_run_id")
+    if expected_check_run_id is not None:
+        if check_run_id != expected_check_run_id:
+            return True
+        ok = await complete_review_check_run(
+            owner=owner,
+            repo=repo,
+            check_run_id=expected_check_run_id,
+            token=token,
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+        )
+        if ok:
+            await set_reviewer_thread_metadata(
+                thread_id,
+                extra={
+                    "review_check_pending_result": None,
+                    "review_check_deferred_result": None,
+                },
+            )
+        else:
+            await set_reviewer_thread_metadata(
+                thread_id,
+                extra={
+                    "review_check_pending_result": {
+                        "conclusion": conclusion,
+                        "title": title,
+                        "summary": summary,
+                    }
+                },
+            )
+        return ok
     if not isinstance(check_run_id, int):
         if not (
             create_if_missing
@@ -472,7 +505,7 @@ async def settle_review_check_run(
             and head_sha
             and review_check_blocking_enabled()
         ):
-            return
+            return True
         created = await create_completed_review_check_run(
             owner=owner,
             repo=repo,
@@ -485,7 +518,7 @@ async def settle_review_check_run(
         if not created:
             msg = f"Failed to create completed review check for {owner}/{repo}@{head_sha}"
             raise RuntimeError(msg)
-        return
+        return True
     ok = await complete_review_check_run(
         owner=owner,
         repo=repo,
@@ -498,7 +531,11 @@ async def settle_review_check_run(
     if ok:
         await set_reviewer_thread_metadata(
             thread_id,
-            extra={"review_check_run_id": None, "review_check_pending_result": None},
+            extra={
+                "review_check_run_id": None,
+                "review_check_pending_result": None,
+                "review_check_deferred_result": None,
+            },
         )
     else:
         await set_reviewer_thread_metadata(
@@ -511,6 +548,7 @@ async def settle_review_check_run(
                 }
             },
         )
+    return ok
 
 
 async def open_swe_review_exists(

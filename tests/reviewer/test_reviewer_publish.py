@@ -1085,6 +1085,10 @@ async def test_publish_review_uses_resolved_head_sha_for_commit_and_last_reviewe
             new_callable=AsyncMock,
             return_value=0,
         ),
+        patch(
+            "agent.tools.publish_review.get_thread_metadata",
+            AsyncMock(return_value={"review_check_run_id": 42}),
+        ),
         patch("agent.tools.publish_review.set_reviewer_thread_metadata", set_metadata),
         patch("agent.tools.publish_review.settle_review_check_run", settle),
         patch(
@@ -2446,3 +2450,241 @@ async def test_publish_review_tool_returns_structured_error_when_thread_missing(
     assert result["error"] == "thread_not_found"
     assert result["thread_id"] == "tid"
     assert "Do not retry" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_success_check_is_deferred_while_implementation_run_is_active() -> None:
+    from agent.tools.publish_review import _settle_or_defer_review_check
+
+    set_metadata = AsyncMock()
+    settle = AsyncMock()
+    with (
+        patch(
+            "agent.tools.publish_review._implementation_run_state",
+            AsyncMock(
+                side_effect=[
+                    ("active", "implementation-thread", "run-fix-now", "running"),
+                    ("active", "implementation-thread", "run-fix-now", "running"),
+                ]
+            ),
+        ),
+        patch(
+            "agent.tools.publish_review.get_thread_metadata",
+            AsyncMock(return_value={"review_check_run_id": 42}),
+        ),
+        patch("agent.tools.publish_review.set_reviewer_thread_metadata", set_metadata),
+        patch("agent.tools.publish_review.settle_review_check_run", settle),
+    ):
+        deferred = await _settle_or_defer_review_check(
+            thread_id="reviewer-thread",
+            owner="o",
+            repo="r",
+            pr_number=77,
+            branch_name="open-swe/fix-now",
+            token="token",
+            conclusion="success",
+            title="No issues found",
+            summary="Open SWE reviewed this pull request and found no issues.",
+            head_sha="unchanged-head",
+        )
+
+    assert deferred is True
+    settle.assert_not_awaited()
+    metadata_args = set_metadata.await_args
+    assert metadata_args is not None
+    deferred_state = metadata_args.kwargs["extra"]["review_check_deferred_result"]
+    assert deferred_state["implementation_thread_id"] == "implementation-thread"
+    assert deferred_state["implementation_run_id"] == "run-fix-now"
+    assert deferred_state["review_check_run_id"] == 42
+    assert deferred_state["head_sha"] == "unchanged-head"
+
+
+@pytest.mark.asyncio
+async def test_blocking_check_counts_open_finding_after_thread_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.tools.publish_review import _review_check_finding_count
+
+    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true")
+    finding = _f(
+        id="f_fix_now",
+        status="open",
+        github_thread_resolved=True,
+        surface={"state": "surfaced", "surfaced_at_sha": "unchanged-head"},
+    )
+    with patch("agent.tools.publish_review.list_findings_async", AsyncMock(return_value=[finding])):
+        count = await _review_check_finding_count("reviewer-thread", 0)
+
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_defer_rechecks_run_to_close_missed_completion_window() -> None:
+    from agent.tools.publish_review import _settle_or_defer_review_check
+
+    deferred_state = {
+        "implementation_thread_id": "implementation-thread",
+        "implementation_run_id": "run-fix-now",
+        "review_check_run_id": 42,
+        "head_sha": "held-head",
+        "pr_number": 64,
+        "conclusion": "success",
+        "title": "No issues found",
+        "summary": "Open SWE reviewed this pull request and found no issues.",
+    }
+    state = AsyncMock(
+        side_effect=[
+            ("active", "implementation-thread", "run-fix-now", "running"),
+            ("inactive", "implementation-thread", "run-fix-now", "success"),
+        ]
+    )
+    settle = AsyncMock()
+    with (
+        patch("agent.tools.publish_review._implementation_run_state", state),
+        patch(
+            "agent.tools.publish_review.get_thread_metadata",
+            AsyncMock(
+                side_effect=[
+                    {"review_check_run_id": 42},
+                    {
+                        "review_check_run_id": 42,
+                        "review_check_deferred_result": deferred_state,
+                    },
+                ]
+            ),
+        ),
+        patch("agent.tools.publish_review.set_reviewer_thread_metadata", AsyncMock()),
+        patch(
+            "agent.tools.publish_review.fetch_pull_request_head_sha",
+            AsyncMock(return_value="held-head"),
+        ),
+        patch("agent.tools.publish_review.settle_review_check_run", settle),
+    ):
+        deferred = await _settle_or_defer_review_check(
+            thread_id="reviewer-thread",
+            owner="o",
+            repo="r",
+            pr_number=64,
+            branch_name="open-swe/operator-fix",
+            token="token",
+            conclusion="success",
+            title="No issues found",
+            summary="Open SWE reviewed this pull request and found no issues.",
+            head_sha="held-head",
+        )
+
+    assert deferred is False
+    settle.assert_awaited_once_with(
+        thread_id="reviewer-thread",
+        owner="o",
+        repo="r",
+        token="token",
+        conclusion="success",
+        title="No issues found",
+        summary="Open SWE reviewed this pull request and found no issues.",
+        expected_check_run_id=42,
+    )
+
+
+@pytest.mark.asyncio
+async def test_busy_thread_remains_active_when_run_listing_fails() -> None:
+    from agent.tools.publish_review import _implementation_run_state
+
+    client = MagicMock()
+    client.runs.list = AsyncMock(side_effect=RuntimeError("transient"))
+    with (
+        patch("agent.tools.publish_review.dispatch_client", return_value=client),
+        patch(
+            "agent.tools.publish_review._resolve_review_autofix_thread",
+            AsyncMock(return_value=("implementation-thread", {"status": "busy"})),
+        ),
+    ):
+        state = await _implementation_run_state(owner="o", repo="r", branch_name="branch")
+
+    assert state == ("active", "implementation-thread", None, None)
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_overrides_stale_busy_thread_status() -> None:
+    from agent.tools.publish_review import _implementation_run_state
+
+    client = MagicMock()
+    client.runs.list = AsyncMock(return_value=[{"run_id": "run-fix", "status": "success"}])
+    with (
+        patch("agent.tools.publish_review.dispatch_client", return_value=client),
+        patch(
+            "agent.tools.publish_review._resolve_review_autofix_thread",
+            AsyncMock(return_value=("implementation-thread", {"status": "busy"})),
+        ),
+    ):
+        state = await _implementation_run_state(owner="o", repo="r", branch_name="branch")
+
+    assert state == ("inactive", "implementation-thread", "run-fix", "success")
+
+
+@pytest.mark.asyncio
+async def test_implementation_thread_runtime_error_is_not_treated_as_inactive() -> None:
+    from agent.tools.publish_review import _implementation_run_state
+
+    with (
+        patch("agent.tools.publish_review.dispatch_client", return_value=MagicMock()),
+        patch(
+            "agent.tools.publish_review._resolve_review_autofix_thread",
+            AsyncMock(side_effect=RuntimeError("thread transport failed")),
+        ),
+    ):
+        state = await _implementation_run_state(owner="o", repo="r", branch_name="branch")
+
+    assert state == ("unknown", None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_status", ["error", "timeout", "interrupted"])
+async def test_terminal_failed_implementation_run_fails_successful_review(
+    run_status: str,
+) -> None:
+    from agent.tools.publish_review import _settle_or_defer_review_check
+
+    settle = AsyncMock()
+    with (
+        patch(
+            "agent.tools.publish_review._implementation_run_state",
+            AsyncMock(
+                return_value=(
+                    "inactive",
+                    "implementation-thread",
+                    "run-fix-now",
+                    run_status,
+                )
+            ),
+        ),
+        patch("agent.tools.publish_review.settle_review_check_run", settle),
+    ):
+        deferred = await _settle_or_defer_review_check(
+            thread_id="reviewer-thread",
+            owner="o",
+            repo="r",
+            pr_number=99,
+            branch_name="open-swe/fix-now",
+            token="token",
+            conclusion="success",
+            title="No issues found",
+            summary="Open SWE reviewed this pull request and found no issues.",
+            head_sha="unchanged-head",
+        )
+
+    assert deferred is False
+    settle.assert_awaited_once_with(
+        thread_id="reviewer-thread",
+        owner="o",
+        repo="r",
+        token="token",
+        conclusion="failure",
+        title="Implementation work did not complete",
+        summary=(
+            "The PR-linked Open SWE run ended without landing a new commit. "
+            "Re-run the requested work before merging."
+        ),
+        head_sha="unchanged-head",
+        create_if_missing=True,
+    )

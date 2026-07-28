@@ -179,13 +179,10 @@ def _sync_thread_status(finding: Finding, matches: list[ReviewThreadMatch]) -> b
     if not all_resolved:
         return updated
 
-    if finding.get("status") == "open":
-        finding["status"] = "resolved"
-        updated = True
     if not finding.get("github_thread_resolved"):
         finding["github_thread_resolved"] = True
         updated = True
-    if isinstance(finding.get("id"), str):
+    if isinstance(finding.get("id"), str) and finding.get("status") != "open":
         surface = _coerce_surface(finding, str(finding["id"]))
         surface["state"] = "resolved"
         finding["surface"] = surface
