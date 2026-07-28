@@ -59,7 +59,10 @@ PHASE_TIMEOUT_MINUTES = {"plan": 30.0, "delivery": 90.0}
 # ':' exclusion spares autolinks like <https://...>.
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z][^>:\n]*>")
 FENCED_CODE_RE = re.compile(
-    r"^ {0,3}(?P<fence>`{3,})(?!`)[^`\n]*\n.*?^ {0,3}(?P=fence)(?!`)[ \t]*(?:\n|$)",
+    r"^ {0,3}(?:"
+    r"(?P<backticks>`{3,})(?!`)[^`\n]*\n.*?^ {0,3}(?P=backticks)`*(?!`)[ \t]*(?:\n|$)"
+    r"|(?P<tildes>~{3,})(?!~)[^\n]*\n.*?^ {0,3}(?P=tildes)~*(?!~)[ \t]*(?:\n|$)"
+    r")",
     re.DOTALL | re.MULTILINE,
 )
 INLINE_CODE_RE = re.compile(r"(?<![\\`])(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)", re.DOTALL)

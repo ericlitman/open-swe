@@ -382,6 +382,8 @@ def test_wave_symbols_the_script_calls_still_exist() -> None:
         "@openswe plain body with no placeholders",
         "@openswe Use `help <cmd>` for command-specific help.",
         "@openswe Use:\n```text\nhelp <cmd>\n```",
+        "@openswe Use:\n```text\nhelp <cmd>\n````",
+        "@openswe Use:\n~~~text\nhelp <cmd>\n~~~~",
     ],
 )
 def test_placeholder_guard_allows_filled_bodies(body: str) -> None:
@@ -400,7 +402,7 @@ def test_placeholder_guard_rejects_unfilled_bodies() -> None:
         r"@openswe Use \`help <cmd>\`",
         "@openswe Use `help <cmd>``",
         "@openswe Use:\n```text\nhelp <cmd>",
-        "@openswe Use:\n```text\nhelp <cmd>\n````",
+        "@openswe Use:\n````text\nhelp <cmd>\n```",
     ],
 )
 def test_placeholder_guard_rejects_placeholders_outside_complete_code(body: str) -> None:
