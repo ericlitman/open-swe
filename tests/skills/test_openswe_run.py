@@ -280,7 +280,7 @@ def test_env_prints_every_missing_export_fix(
     monkeypatch.delenv("LINEAR_API_KEY", raising=False)
     monkeypatch.delenv("LANGGRAPH_URL", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
-    monkeypatch.setattr(run, "probe_local_langgraph", lambda: False)
+    monkeypatch.setattr(run, "resolve_langgraph_endpoint", lambda: None)
     monkeypatch.setattr(run, "gh_auth_token", lambda: "")
 
     assert run.cmd_env(argparse.Namespace()) == 2
@@ -307,6 +307,9 @@ def test_env_is_not_ready_when_monitor_python_is_unusable(
 
     monkeypatch.setattr(run, "skill_checkout_warning", lambda: None)
     monkeypatch.setattr(run, "resolve_monitor_python", unusable_monitor_python)
+    monkeypatch.setattr(
+        run, "resolve_langgraph_endpoint", lambda: ("https://langgraph.invalid", "environment")
+    )
 
     assert run.cmd_env(argparse.Namespace()) == 2
 
@@ -324,6 +327,9 @@ def test_env_requires_a_token_not_just_the_gh_executable(
     monkeypatch.setenv("LINEAR_API_KEY", "linear")
     monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
     monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        run, "resolve_langgraph_endpoint", lambda: ("https://langgraph.invalid", "environment")
+    )
     monkeypatch.setattr(run.shutil, "which", lambda command: "/usr/bin/gh")
     monkeypatch.setattr(
         run.subprocess,
@@ -354,7 +360,45 @@ def test_env_accepts_a_healthy_tunnel_after_a_cold_first_hit(
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True
     assert report["langgraph_url"] == run.LOCAL_LANGGRAPH_URL
+    assert report["langgraph_url_provenance"] == "studio2-tunnel:2029"
     assert cold_tunnel == [3, 3]
+
+
+def test_endpoint_discovery_deduplicates_a_dead_preferred_tunnel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preferred = "http://127.0.0.1:2029"
+    fallback = "http://127.0.0.1:12029"
+    attempts: list[str] = []
+    monkeypatch.setenv("LANGGRAPH_URL", preferred)
+    monkeypatch.setattr(
+        run,
+        "probe_langgraph",
+        lambda url: attempts.append(url) or url == fallback,
+    )
+
+    assert run.resolve_langgraph_endpoint() == (fallback, "studio2-tunnel:12029")
+    assert attempts == [preferred, fallback]
+
+
+def test_ensure_env_validates_and_replaces_a_dead_configured_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preferred = "http://127.0.0.1:2029"
+    fallback = "http://127.0.0.1:12029"
+    logs: list[str] = []
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.setenv("LANGGRAPH_URL", preferred)
+    monkeypatch.setattr(run, "probe_langgraph", lambda url: url == fallback)
+    monkeypatch.setattr(run, "dogfood", lambda ticket, tag, message: logs.append(message))
+
+    notes = run.ensure_env("ABC-1", langgraph=True, github=False)
+
+    assert run.os.environ["LANGGRAPH_URL"] == fallback
+    assert notes == [
+        f"failed over LANGGRAPH_URL={fallback} (studio2-tunnel:12029; /ok probe passed)"
+    ]
+    assert logs == notes
 
 
 @pytest.mark.parametrize("fetch_returncode", [0, 1])
@@ -395,6 +439,9 @@ def test_env_warns_about_checkout_drift_without_blocking_readiness(
     monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
     monkeypatch.setenv("GH_TOKEN", "github")
     monkeypatch.setattr(
+        run, "resolve_langgraph_endpoint", lambda: ("https://langgraph.invalid", "environment")
+    )
+    monkeypatch.setattr(
         run,
         "skill_checkout_warning",
         lambda: "skill checkout is 1 commit behind origin/main. Update it with: git pull",
@@ -414,6 +461,20 @@ def test_every_reference_path_named_in_skill_md_resolves_exactly() -> None:
 
     for reference in references:
         assert (SKILL / reference).is_file(), f"SKILL.md names missing path {reference}"
+
+
+def test_run_skill_loading_contract_stages_assets() -> None:
+    skill = (SKILL / "SKILL.md").read_text()
+
+    for phrase in (
+        "At invocation, load only this `SKILL.md`.",
+        "Treat every file under `scripts/*` as a black-box CLI",
+        "Both `scripts/openswe_run.py` and the sibling wave engine",
+        "Read `references/run-templates.md` only when composing",
+        "Read `../openswe-wave/references/adjudication-checklist.md` only after `plan_posted`",
+        "Read `../openswe-wave/references/recovery-runbook.md` only after a stall",
+    ):
+        assert phrase in skill
 
 
 def test_wave_assets_resolve_from_the_sibling_skill_in_a_checkout() -> None:
@@ -1666,6 +1727,152 @@ def test_watch_timeout_evidence_includes_phase_and_effective_deadline(
             },
         }
     ]
+
+
+def test_watch_fails_over_and_keeps_the_same_issue_under_watch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    preferred = "http://127.0.0.1:2029"
+    fallback = "http://127.0.0.1:12029"
+
+    class Process:
+        def __init__(self, output: str, returncode: int | None) -> None:
+            self.stdout = io.StringIO(output)
+            self.returncode = returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            return None
+
+    poll_wake = {
+        "wake_node": "unhandled_condition",
+        "summary": "wave monitor poll failed: LANGGRAPH_URL request failed: refused",
+    }
+    product_wake = {"wake_node": "plan_posted", "summary": "plan ready"}
+    processes = [
+        Process(json.dumps(poll_wake) + "\n", None),
+        Process(json.dumps(product_wake) + "\n", None),
+    ]
+    spawns: list[tuple[str, str]] = []
+
+    def spawn(args: argparse.Namespace, issue_id: str) -> tuple[Process, list[str]]:
+        spawns.append((issue_id, run.os.environ["LANGGRAPH_URL"]))
+        return processes.pop(0), []
+
+    def select_ready(readers: list[io.StringIO], *_args: Any) -> tuple[list, list, list]:
+        reader = readers[0]
+        return ([reader], [], []) if reader.getvalue() else ([], [], [])
+
+    monkeypatch.setenv("LANGGRAPH_URL", preferred)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: [])
+    monkeypatch.setattr(run, "import_wave_module", lambda: object())
+    monkeypatch.setattr(
+        run,
+        "resolve_issue",
+        lambda ticket: {"id": "issue-1", "identifier": "ABC-1"},
+    )
+    monkeypatch.setattr(run, "bundle_identifiers", lambda *args, **kwargs: ["ABC-1"])
+    monkeypatch.setattr(
+        run,
+        "linear_snapshot",
+        lambda issue_id: {"viewer": {"id": "viewer-1"}, "comments": []},
+    )
+    monkeypatch.setattr(run, "dogfood", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "_spawn_monitor", spawn)
+    monkeypatch.setattr(run.select, "select", select_ready)
+    monkeypatch.setattr(run, "probe_langgraph", lambda url: url == fallback)
+    args = argparse.Namespace(
+        ticket="ABC-1",
+        repo="owner/name",
+        pr_number=None,
+        phase="plan",
+        interval=60,
+        timeout_min=30,
+        heartbeat_min=10,
+        max_restarts=2,
+        follow=False,
+    )
+
+    assert run.cmd_watch(args) == 0
+
+    wakes = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [wake["wake_node"] for wake in wakes] == ["endpoint_failover", "plan_posted"]
+    assert wakes[0]["evidence"] == {
+        "failed_endpoint": preferred,
+        "replacement_endpoint": fallback,
+        "replacement_provenance": "studio2-tunnel:12029",
+        "issue_id": "issue-1",
+        "identifier": "ABC-1",
+    }
+    assert spawns == [("issue-1", preferred), ("issue-1", fallback)]
+
+
+def test_watch_endpoint_loss_without_replacement_fails_once(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    preferred = "http://127.0.0.1:2029"
+
+    poll_wake = {
+        "wake_node": "unhandled_condition",
+        "summary": "wave monitor poll failed: LANGGRAPH_URL request failed: refused",
+    }
+
+    class Process:
+        stdout = io.StringIO(json.dumps(poll_wake) + "\n")
+        returncode = None
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+    spawns: list[str] = []
+    monkeypatch.setenv("LANGGRAPH_URL", preferred)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: [])
+    monkeypatch.setattr(run, "import_wave_module", lambda: object())
+    monkeypatch.setattr(
+        run,
+        "resolve_issue",
+        lambda ticket: {"id": "issue-1", "identifier": "ABC-1"},
+    )
+    monkeypatch.setattr(run, "bundle_identifiers", lambda *args, **kwargs: ["ABC-1"])
+    monkeypatch.setattr(
+        run,
+        "linear_snapshot",
+        lambda issue_id: {"viewer": {"id": "viewer-1"}, "comments": []},
+    )
+    monkeypatch.setattr(run, "dogfood", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        run,
+        "_spawn_monitor",
+        lambda args, issue_id: (spawns.append(issue_id) or Process(), []),
+    )
+    monkeypatch.setattr(run.select, "select", lambda readers, *_args: (readers, [], []))
+    monkeypatch.setattr(run, "probe_langgraph", lambda url: False)
+    args = argparse.Namespace(
+        ticket="ABC-1",
+        repo="owner/name",
+        pr_number=None,
+        phase="plan",
+        interval=60,
+        timeout_min=30,
+        heartbeat_min=10,
+        max_restarts=2,
+        follow=False,
+    )
+
+    assert run.cmd_watch(args) == run.CHILD_FAILURE_EXIT
+
+    wake = json.loads(capsys.readouterr().out)
+    assert wake["wake_node"] == "endpoint_unavailable"
+    assert wake["evidence"]["failed_endpoint"] == preferred
+    assert wake["evidence"]["replacement_endpoint"] is None
+    assert spawns == ["issue-1"]
 
 
 def _bundle_issue(identifier: str, issue_id: str, state_type: str = "started") -> dict[str, Any]:

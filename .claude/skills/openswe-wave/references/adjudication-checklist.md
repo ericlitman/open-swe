@@ -4,6 +4,7 @@
 
 - Pin the current target ref and run `scripts/anchor-sweep` over the canonical ticket text.
 - Open every cited path and symbol; moved anchors require semantic re-verification.
+- Any source declared normative (for example, adopt verbatim, match exactly, or byte-identical) must resolve from the target repository at the pinned ref; otherwise inline the exact content in the ticket or dispatch and identify the substitution explicitly.
 - Verify live-state claims with read-only GitHub, Linear, or LangGraph queries.
 - Separate deployed/runtime claims that cannot be checked into Unverified claims.
 - Reconcile predecessor tickets and recently merged work before preserving old scope.

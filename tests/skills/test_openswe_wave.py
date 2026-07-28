@@ -1640,6 +1640,25 @@ def test_scripts_are_executable_and_offer_help(script: str) -> None:
     assert "usage:" in result.stdout.lower()
 
 
+def test_wave_skill_loading_contract_stages_assets() -> None:
+    skill = (SKILL / "SKILL.md").read_text()
+    checklist = (SKILL / "references/adjudication-checklist.md").read_text()
+
+    for phrase in (
+        "At invocation, load only this `SKILL.md`.",
+        "Treat every file under `scripts/*` as a black-box CLI",
+        "`scripts/openswe_wave.py` is an implementation detail",
+        "Read `references/comment-templates.md` only when composing",
+        "Read `references/adjudication-checklist.md` only when a plan is ready for review",
+        "Read `references/recovery-runbook.md` only after a stall",
+        "Running `scripts/anchor-sweep` over the canonical ticket before dispatch",
+    ):
+        assert phrase in skill
+    assert "Any source declared normative" in checklist
+    assert "must resolve from the target repository at the pinned ref" in checklist
+    assert "inline the exact content in the ticket or dispatch" in checklist
+
+
 def test_skill_contains_all_deliverables_and_closeout_wording() -> None:
     templates = (SKILL / "references/comment-templates.md").read_text()
     skill = (SKILL / "SKILL.md").read_text()
