@@ -10,6 +10,7 @@ managed under this convention.
 ## Setup and extension
 - `docs/INSTALLATION.md` [CANONICAL] — source of truth for installing and running Open SWE.
 - `docs/CUSTOMIZATION.md` [CANONICAL] — source of truth for extension points: sandbox providers, tools, middleware, graphs.
+- `docs/control-plane-production.md` — macOS/Colima cutover from `langgraph dev` to the persistence-backed Agent Server.
 
 ## Point-in-time artifacts
 - `docs/plans/` — Execution plans, investigation notes, comparisons, reviews. Date-prefixed. Not maintained after execution.

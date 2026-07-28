@@ -394,6 +394,8 @@ Create a `.env` file in the project root. Below is the full list — only fill i
 ```bash
 # === LangSmith ===
 LANGSMITH_API_KEY_PROD=""              # From step 4a
+LANGSMITH_API_KEY=""                   # Required by standalone Agent Server; may use the same key as LANGSMITH_API_KEY_PROD
+LANGGRAPH_CLOUD_LICENSE_KEY=""          # Enterprise self-hosted Agent Server license required by make production
 LANGCHAIN_TRACING_V2="true"
 LANGCHAIN_PROJECT=""                   # LangSmith project name for traces
 LANGSMITH_TENANT_ID_PROD=""           
@@ -548,6 +550,8 @@ make dev          # uv run langgraph dev
 # or: uv run langgraph dev --no-browser
 ```
 
+`langgraph dev` is for local development. Its Agent Server 0.11.1 in-memory runtime reloads the full local pickle state and does not execute configured thread TTL sweeps. Use the persistence-backed production path below for a long-lived control plane.
+
 `langgraph dev` serves **all three graphs** (`agent`, `reviewer`, `analyzer`) *and* the FastAPI app (`agent.webapp:app`) together on `http://localhost:2024`. The FastAPI app owns both the webhooks and the dashboard API:
 
 | Endpoint | Purpose |
@@ -620,7 +624,7 @@ Other UI scripts: `pnpm run build`, `pnpm run typecheck`, `pnpm run lint`, `pnpm
 
 ## 10. Production deployment
 
-Production runs the backend and dashboard separately.
+Production runs the backend and dashboard separately. Do not supervise `langgraph dev` as a production service: use `make production` for the self-hosted PostgreSQL/Redis stack on port 2024, or deploy to LangGraph Cloud / Platform. Validate the production configuration with `make production-check`. The macOS/Colima LaunchAgent cutover and rollback procedure is in [Control-plane production cutover](control-plane-production.md).
 
 **Backend** — deploy on [LangGraph Cloud / Platform](https://langchain-ai.github.io/langgraph/cloud/):
 
