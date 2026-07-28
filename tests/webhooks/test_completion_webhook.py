@@ -4,8 +4,11 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from agent import completion
+from agent import completion, dispatch
+from agent.api import health
 
 
 class _FakeThreads:
@@ -425,6 +428,25 @@ def test_verify_run_complete_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert completion.verify_run_complete_token("s3cret") is True
     assert completion.verify_run_complete_token("wrong") is False
     assert completion.verify_run_complete_token(None) is False
+
+
+def test_run_complete_route_decodes_encoded_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = 's3cret& with "quote"'
+    monkeypatch.setattr(completion, "RUN_COMPLETE_WEBHOOK_SECRET", secret)
+    handle_completion = AsyncMock(return_value={"status": "ok"})
+    monkeypatch.setattr(health, "handle_run_completion", handle_completion)
+    app = FastAPI()
+    app.include_router(health.router)
+    webhook_url = dispatch._resolve_completion_webhook_url(
+        "https://example.test/webhooks/run-complete", secret
+    )
+    assert webhook_url is not None
+
+    response = TestClient(app).post(webhook_url, json={"status": "success"})
+
+    assert response.status_code == 200
+    assert completion.verify_run_complete_token(secret) is True
+    handle_completion.assert_awaited_once_with({"status": "success"})
 
 
 class _DeferredThreads:
