@@ -416,6 +416,20 @@ def test_every_reference_path_named_in_skill_md_resolves_exactly() -> None:
         assert (SKILL / reference).is_file(), f"SKILL.md names missing path {reference}"
 
 
+def test_run_skill_loading_contract_stages_assets() -> None:
+    skill = (SKILL / "SKILL.md").read_text()
+
+    for phrase in (
+        "At invocation, load only this `SKILL.md`.",
+        "Treat every file under `scripts/*` as a black-box CLI",
+        "Both `scripts/openswe_run.py` and the sibling wave engine",
+        "Read `references/run-templates.md` only when composing",
+        "Read `../openswe-wave/references/adjudication-checklist.md` only after `plan_posted`",
+        "Read `../openswe-wave/references/recovery-runbook.md` only after a stall",
+    ):
+        assert phrase in skill
+
+
 def test_wave_assets_resolve_from_the_sibling_skill_in_a_checkout() -> None:
     """The wave assets come from the sibling skill; without this fallback the
     skill is unrunnable from a checkout."""
