@@ -9,6 +9,7 @@ from typing import Any
 from langgraph.graph.state import RunnableConfig
 
 from ..dashboard.team_settings import get_team_default_repo
+from . import github_app
 from .github_app import get_github_app_installation_token_with_expiry
 from .github_token import cache_github_token_for_thread, invalidate_cached_github_token
 
@@ -57,6 +58,10 @@ async def _resolve_bot_installation_token(
         target_repo=f"{owner}/{repository}", repositories=[repository]
     )
     if not token:
+        if not github_app.GITHUB_APP_ID or not github_app.GITHUB_APP_PRIVATE_KEY:
+            raise RuntimeError(
+                "GitHub App credentials are missing. Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY."
+            )
         target_repo = f"{owner}/{repository}"
         raise RuntimeError(
             f"No GitHub App installation covers repository {target_repo}. "

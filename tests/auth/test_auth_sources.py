@@ -138,6 +138,32 @@ def test_repo_less_schedule_token_mint_fails_closed(
         )
 
 
+def test_missing_app_credentials_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_APP_ID", raising=False)
+    monkeypatch.delenv("GITHUB_APP_PRIVATE_KEY", raising=False)
+    monkeypatch.setattr(github_app, "GITHUB_APP_ID", "")
+    monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", "")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(
+            auth.resolve_github_token(
+                {
+                    "configurable": {
+                        "source": "dashboard",
+                        "repo": {"owner": "acme", "name": "widgets"},
+                    }
+                },
+                "thread-1",
+            )
+        )
+
+    message = str(exc_info.value)
+    assert "GitHub App credentials are missing" in message
+    assert "GITHUB_APP_ID" in message
+    assert "GITHUB_APP_PRIVATE_KEY" in message
+    assert "No GitHub App installation covers repository" not in message
+
+
 def test_transferred_repo_error_with_app_id_and_key_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
