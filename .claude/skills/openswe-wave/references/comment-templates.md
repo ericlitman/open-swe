@@ -16,6 +16,40 @@ Code standard: smallest root-cause change; no speculative validation or layered 
 PR body: include the Linear reference and `Closes <TICKET>` as a standalone line. Let normal Open SWE Review and required CI run; do not directly merge or bypass gates.
 ```
 
+## Bundle Dispatch
+
+(Default body when `start` receives one or more `--include-ticket` values.)
+
+```markdown
+@openswe repo <owner/repo> — Execute one ticket bundle with primary <PRIMARY> and included tickets <INCLUDED>.
+
+Enter plan mode first. Read and reconcile every bundle ticket before planning: <MEMBERS>. Re-anchor all cited paths and symbols against `<ref>`, state any refuted premise as a Challenge, and do not implement until the combined plan is approved in this Linear thread.
+
+Treat the bundle as one atomic scope on the primary thread and one thread-stable branch. Included tickets must not be dispatched independently.
+Required scope: <scope>.
+Boundaries: <non-goals>.
+Verification: focused tests plus the repository's own lint and typecheck gates; name the exact commands in the plan.
+Code standard: smallest root-cause change; no speculative validation or layered defenses; the diff must be acceptable upstream.
+Open or update exactly one PR for the bundle. Its body must include the Linear references and these standalone closing lines:
+Closes <PRIMARY>
+Closes <INCLUDED-1>
+Let normal Open SWE Review and required CI run; do not directly merge or bypass gates.
+```
+
+## Bundle Approval Reference
+
+```markdown
+@openswe Combined plan approved for <PRIMARY>, <INCLUDED-1>. Proceed with the one atomic bundle only.
+
+Challenge adjudication:
+- <ratified/refused challenge and evidence across the combined scope>
+
+Clarifications:
+- <binding implementation clarification>
+
+Run the focused tests plus the repository's own lint and typecheck gates named in the approved plan. Keep the primary thread and thread-stable branch, and open or update exactly one PR with a standalone `Closes <ID>` line for every bundle member. Let Open SWE Review and required CI run; do not directly merge or bypass gates.
+```
+
 ## Approval
 
 ```markdown

@@ -2177,3 +2177,68 @@ def test_status_sweep_skill_documents_only_deterministic_contract() -> None:
         "deadline",
     ):
         assert phrase in skill
+
+
+def test_status_sweep_reuses_snapshot_for_shared_thread_and_shared_pr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tickets = tmp_path / "tickets.json"
+    tickets.write_text(
+        json.dumps(
+            [
+                {"identifier": "OSWE-1", "issue_id": STATUS_ISSUE_IDS[0], "thread_id": "shared"},
+                {"identifier": "OSWE-2", "issue_id": STATUS_ISSUE_IDS[1], "thread_id": "shared"},
+            ]
+        )
+    )
+    prs = [
+        {
+            "number": 7,
+            "body": "Closes OSWE-1\nCloses OSWE-2",
+            "state": "OPEN",
+            "createdAt": "2026-07-27T02:00:00Z",
+        }
+    ]
+    calls: list[str] = []
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(wave, "github_pr_list", lambda repo: prs)
+    monkeypatch.setattr(
+        wave,
+        "langgraph_sweep_snapshot",
+        lambda thread_id: calls.append(thread_id) or _status_snapshot(metadata={"pr_number": 7}),
+    )
+    monkeypatch.setattr(wave, "emit", lambda payload, **kwargs: emitted.append(payload))
+
+    assert (
+        wave.cmd_status_sweep(
+            SimpleNamespace(repo="owner/repo", tickets=str(tickets), divergence_minutes=15)
+        )
+        == 0
+    )
+    assert calls == ["shared"]
+    assert [row["pr_number"] for row in emitted] == [7, 7]
+    assert [row["lifecycle_stage"] for row in emitted] == ["pr-open", "pr-open"]
+
+
+def test_same_thread_rows_never_count_as_sibling_divergence() -> None:
+    rows = [
+        {
+            **_status_ticket("OSWE-1", 0),
+            "thread_id": "shared",
+            "lifecycle_stage": "merged",
+            "stage_at": "2026-07-27T00:00:00Z",
+            "sibling_divergence": False,
+        },
+        {
+            **_status_ticket("OSWE-2", 1),
+            "thread_id": "shared",
+            "lifecycle_stage": "planned",
+            "stage_at": "2026-07-27T00:00:00Z",
+            "sibling_divergence": False,
+        },
+    ]
+
+    wave.add_sibling_divergence(rows, 15, now=wave.datetime(2026, 7, 27, 1, 0, tzinfo=wave.UTC))
+
+    assert not rows[1]["sibling_divergence"]
+    assert "divergence_from" not in rows[1]

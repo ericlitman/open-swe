@@ -506,6 +506,22 @@ def _template_body(path: Path, heading: str) -> str:
     return fenced.split("\n```", 1)[0] + "\n"
 
 
+def test_single_ticket_dispatch_template_is_byte_pinned() -> None:
+    assert (
+        run.DISPATCH_TEMPLATE
+        == """@openswe repo {repo} — Execute {ticket} only.
+
+Enter plan mode first. Re-anchor all cited paths and symbols against `{ref}`, state any refuted premise as a Challenge, and do not implement until approval is posted in this Linear thread.
+
+Required scope: {scope}.
+Boundaries: {boundaries}.
+Verification: {verify}.
+Code standard: smallest root-cause change; no speculative validation or layered defenses; the diff must be acceptable upstream.
+PR body: include the Linear reference and `Closes {ticket}` as a standalone line. Let normal Open SWE Review and required CI run; do not directly merge or bypass gates.
+"""
+    )
+
+
 def test_dispatch_template_matches_reference_docs() -> None:
     expected = run.DISPATCH_TEMPLATE.format(
         repo="<owner/repo>",
@@ -1375,10 +1391,11 @@ def test_start_force_logs_terminal_override_before_dispatch(
 
     assert run.cmd_start(_start_args(force=True)) == 0
     capsys.readouterr()
-    assert "--force overriding terminal Linear state 'Done'" in events[0]
+    assert "--force overriding terminal Linear issue ABC-1: state 'Done'" in events[0]
     assert "completedAt=2026-07-26T16:11:00Z" in events[0]
-    assert events[1] == "handoff"
-    assert events[2].startswith("dispatched ABC-1 to owner/name")
+    assert events[1].startswith('{"version":1,"primary":{"identifier":"ABC-1"')
+    assert events[2] == "handoff"
+    assert events[3].startswith("dispatched ABC-1 to owner/name")
 
 
 def test_start_force_cannot_bypass_body_hygiene(
@@ -1522,7 +1539,9 @@ def test_start_success_records_handoff_in_json_and_dogfood(
     assert payload["handoff"] == final
     assert new_runs == [True]
     assert logs == [
-        "dispatched ABC-1 to owner/name (https://linear.example/ABC-1); handoff status=busy runs=1"
+        '{"version":1,"primary":{"identifier":"ABC-1","issue_id":"issue-1"},'
+        '"members":[{"identifier":"ABC-1","issue_id":"issue-1"}]}',
+        "dispatched ABC-1 to owner/name (https://linear.example/ABC-1); handoff status=busy runs=1",
     ]
 
 
@@ -1647,3 +1666,366 @@ def test_watch_timeout_evidence_includes_phase_and_effective_deadline(
             },
         }
     ]
+
+
+def _bundle_issue(identifier: str, issue_id: str, state_type: str = "started") -> dict[str, Any]:
+    return {
+        "id": issue_id,
+        "identifier": identifier,
+        "url": f"https://linear.example/{identifier}",
+        "state": {"type": state_type, "name": state_type.title()},
+        "completedAt": "2026-07-27T00:00:00Z" if state_type == "completed" else None,
+        "canceledAt": None,
+    }
+
+
+def test_manifest_parser_requires_actual_dogfood_tag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    path = run.log_path("OSWE-1", new_run=True)
+    payload = (
+        '{"version":1,"primary":{"identifier":"OSWE-1","issue_id":"issue-1"},'
+        '"members":[{"identifier":"OSWE-1","issue_id":"issue-1"},'
+        '{"identifier":"OSWE-2","issue_id":"issue-2"}]}'
+    )
+    with path.open("a") as fh:
+        fh.write(f"- now [note] free-form text [bundle-manifest] {payload}\n")
+
+    assert run.load_bundle_manifest("OSWE-1", path) is None
+
+
+@pytest.mark.parametrize(
+    ("retry_members", "expected_identifiers"),
+    [
+        ([], ["OSWE-1"]),
+        (["OSWE-3"], ["OSWE-1", "OSWE-3"]),
+    ],
+)
+def test_failed_bundle_retry_persists_latest_attempted_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    retry_members: list[str],
+    expected_identifiers: list[str],
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    issues = {
+        "OSWE-1": _bundle_issue("OSWE-1", "issue-1"),
+        "OSWE-2": _bundle_issue("OSWE-2", "issue-2"),
+        "OSWE-3": _bundle_issue("OSWE-3", "issue-3"),
+    }
+    monkeypatch.setattr(run, "resolve_issue", issues.__getitem__)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "thread-1"}),
+    )
+    attempts = 0
+
+    def post(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise run.RunError("deterministic pre-dispatch handoff failure")
+        return {"thread_status": "busy", "run_ids": ["run-1"]}
+
+    monkeypatch.setattr(run, "_post_with_handoff", post)
+
+    with pytest.raises(run.RunError, match="deterministic"):
+        run.cmd_start(_start_args(ticket="OSWE-1", include_ticket=["OSWE-2"]))
+    first_path = run.log_path("OSWE-1")
+
+    assert run.cmd_start(_start_args(ticket="OSWE-1", include_ticket=retry_members)) == 0
+    capsys.readouterr()
+
+    assert run.log_path("OSWE-1") == first_path
+    assert len(list((tmp_path / "handoffs").glob("OSWE-1-*-run.md"))) == 1
+    manifest = run.load_bundle_manifest("OSWE-1")
+    assert manifest is not None
+    assert [member["identifier"] for member in manifest["members"]] == expected_identifiers
+    assert run.bundle_identifiers("OSWE-1", "OSWE-1", primary_issue_id="issue-1") == (
+        expected_identifiers
+    )
+
+
+def test_bundle_force_logs_per_member_override_evidence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(run, "log_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    issues = {
+        "OSWE-1": _bundle_issue("OSWE-1", "issue-1", "completed"),
+        "OSWE-2": _bundle_issue("OSWE-2", "issue-2", "completed"),
+    }
+    monkeypatch.setattr(run, "resolve_issue", issues.__getitem__)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "thread-1"}),
+    )
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(run, "dogfood", lambda ticket, tag, message: events.append((tag, message)))
+    monkeypatch.setattr(
+        run,
+        "_post_with_handoff",
+        lambda *args, **kwargs: {"thread_status": "busy", "run_ids": ["run-1"]},
+    )
+
+    assert run.cmd_start(_start_args(ticket="OSWE-1", include_ticket=["OSWE-2"], force=True)) == 0
+    capsys.readouterr()
+
+    force_entries = [message for tag, message in events if tag == "cmd" and "--force" in message]
+    assert len(force_entries) == 2
+    assert "issue OSWE-1:" in force_entries[0]
+    assert "issue OSWE-2:" in force_entries[1]
+
+
+def test_bundle_resolution_normalizes_and_rejects_primary_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issues = {
+        "primary alias": _bundle_issue("oswe-1", "ISSUE-1"),
+        "OSWE-2": _bundle_issue("oswe-2", "ISSUE-2"),
+        "OSWE-1": _bundle_issue("OSWE-1", "issue-1"),
+    }
+    monkeypatch.setattr(run, "resolve_issue", issues.__getitem__)
+
+    resolved = run.resolve_bundle("primary alias", ["OSWE-2"])
+
+    assert [item["identifier"] for item in resolved] == ["OSWE-1", "OSWE-2"]
+    with pytest.raises(run.RunError, match="do not include the primary again"):
+        run.resolve_bundle("primary alias", ["OSWE-1"])
+
+
+def test_bundle_start_guards_every_member_before_one_primary_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    issues = {
+        "OSWE-1": _bundle_issue("OSWE-1", "issue-1"),
+        "OSWE-2": _bundle_issue("OSWE-2", "issue-2", "completed"),
+    }
+    monkeypatch.setattr(run, "resolve_issue", issues.__getitem__)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type(
+            "Wave", (), {"derive_linear_thread_id": lambda issue_id: f"thread-{issue_id}"}
+        ),
+    )
+    monkeypatch.setattr(
+        run,
+        "_post_with_handoff",
+        lambda *args, **kwargs: pytest.fail("terminal included ticket must block the only post"),
+    )
+
+    with pytest.raises(run.RunError, match="OSWE-2"):
+        run.cmd_start(_start_args(ticket="OSWE-1", include_ticket=["OSWE-2"]))
+
+
+def test_bundle_custom_dispatch_requires_all_members_even_with_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run, "log_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        run,
+        "resolve_bundle",
+        lambda *args: [_bundle_issue("OSWE-1", "issue-1"), _bundle_issue("OSWE-2", "issue-2")],
+    )
+    monkeypatch.setattr(run, "read_body", lambda args: "@openswe repo owner/name — OSWE-1 only")
+
+    with pytest.raises(run.RunError, match="OSWE-2"):
+        run.cmd_start(
+            _start_args(
+                ticket="OSWE-1",
+                include_ticket=["OSWE-2"],
+                body_file="body.md",
+                force=True,
+            )
+        )
+
+
+def test_bundle_start_persists_manifest_and_posts_once_to_primary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    issues = {
+        "OSWE-1": _bundle_issue("OSWE-1", "issue-1"),
+        "OSWE-2": _bundle_issue("OSWE-2", "issue-2"),
+    }
+    monkeypatch.setattr(run, "resolve_issue", issues.__getitem__)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "primary-thread"}),
+    )
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        run,
+        "_post_with_handoff",
+        lambda *args, **kwargs: calls.append(args) or {"thread_status": "busy", "run_ids": ["run"]},
+    )
+
+    assert run.cmd_start(_start_args(ticket="OSWE-1", include_ticket=["OSWE-2"])) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    manifest = run.load_bundle_manifest("OSWE-1")
+    assert payload["bundle"] == ["OSWE-1", "OSWE-2"]
+    assert len(calls) == 1
+    assert calls[0][2] == "issue-1"
+    assert calls[0][4] == "primary-thread"
+    assert manifest == {
+        "version": 1,
+        "primary": {"identifier": "OSWE-1", "issue_id": "issue-1"},
+        "members": [
+            {"identifier": "OSWE-1", "issue_id": "issue-1"},
+            {"identifier": "OSWE-2", "issue_id": "issue-2"},
+        ],
+    }
+    assert "Closes OSWE-1\nCloses OSWE-2" in calls[0][3]
+
+
+def test_bundle_reject_force_cannot_bypass_placeholders_before_transition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "resolve_issue", lambda ticket: _bundle_issue("OSWE-1", "issue-1"))
+    monkeypatch.setattr(run, "read_body", lambda args: "@openswe Reject <REASON> for OSWE-1.")
+    monkeypatch.setattr(
+        run,
+        "set_plan_status",
+        lambda *args, **kwargs: pytest.fail("placeholder refusal must happen before plan transition"),
+    )
+    run.log_path("OSWE-1", new_run=True)
+    run.write_bundle_manifest(
+        "OSWE-1", [_bundle_issue("OSWE-1", "issue-1"), _bundle_issue("OSWE-2", "issue-2")]
+    )
+
+    with pytest.raises(run.RunError, match="unfilled template placeholders: <REASON>"):
+        run.cmd_reject(argparse.Namespace(ticket="OSWE-1", body_file="body.md", force=True))
+
+
+def test_bundle_approval_membership_and_malformed_manifest_fail_before_transition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "resolve_issue", lambda ticket: _bundle_issue("OSWE-1", "issue-1"))
+    monkeypatch.setattr(run, "read_body", lambda args: "@openswe Approve OSWE-1")
+    monkeypatch.setattr(
+        run,
+        "set_plan_status",
+        lambda *args, **kwargs: pytest.fail("all refusals must happen before plan transition"),
+    )
+    run.log_path("OSWE-1", new_run=True)
+    run.write_bundle_manifest(
+        "OSWE-1", [_bundle_issue("OSWE-1", "issue-1"), _bundle_issue("OSWE-2", "issue-2")]
+    )
+    args = argparse.Namespace(ticket="OSWE-1", body_file="body.md", force=True, adjudicated=True)
+
+    with pytest.raises(run.RunError, match="OSWE-2"):
+        run.cmd_approve(args)
+
+    path = run.log_path("OSWE-1")
+    path.write_text(path.read_text() + "- now [bundle-manifest] {bad json\n")
+    with pytest.raises(run.RunError, match="Malformed bundle manifest"):
+        run.cmd_reject(argparse.Namespace(ticket="OSWE-1", body_file="body.md", force=False))
+
+
+@pytest.mark.parametrize(
+    ("body", "second_state", "expected"),
+    [
+        ("Closes OSWE-1", "completed", "Closes line MISSING"),
+        ("Closes OSWE-1\nCloses OSWE-2", "started", "NONTERMINAL/UNRESOLVED"),
+    ],
+)
+def test_bundle_report_is_incomplete_for_shared_pr_or_partial_linear_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    body: str,
+    second_state: str,
+    expected: str,
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    path = run.log_path("OSWE-1", new_run=True)
+    run.write_bundle_manifest(
+        "OSWE-1", [_bundle_issue("OSWE-1", "issue-1"), _bundle_issue("OSWE-2", "issue-2")]
+    )
+    with path.open("a") as fh:
+        fh.write("- now [cmd] dispatched OSWE-1 to owner/repo (https://linear/OSWE-1)\n")
+        fh.write("- now [wake] terminal_merged via wave-monitor: PR #7 merged\n")
+    resolved = {
+        "OSWE-1": _bundle_issue("OSWE-1", "issue-1", "completed"),
+        "OSWE-2": _bundle_issue("OSWE-2", "issue-2", second_state),
+    }
+    monkeypatch.setattr(run, "resolve_issue", resolved.__getitem__)
+    monkeypatch.setattr(run, "ensure_handoffs", lambda: path.parent)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: pytest.fail("report must not import wave before printing gathered evidence"),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        run.subprocess,
+        "run",
+        lambda command, **kwargs: (
+            calls.append(command)
+            or subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/owner/repo/pull/7",
+                        "state": "MERGED",
+                        "body": body,
+                        "mergeCommit": {"oid": "abc"},
+                    }
+                ),
+                stderr="",
+            )
+        ),
+    )
+
+    assert run.cmd_report(argparse.Namespace(ticket="OSWE-1")) == 2
+
+    output = capsys.readouterr().out
+    assert expected in output
+    assert "bundle completion: INCOMPLETE" in output
+    gh_calls = [call for call in calls if call[:3] == ["gh", "pr", "view"]]
+    assert len(gh_calls) == 1
+    assert gh_calls[0][-1] == "url,state,body,mergeCommit"
+
+
+def test_bundle_dispatch_reference_templates_match_code() -> None:
+    expected = run.BUNDLE_DISPATCH_TEMPLATE.format(
+        repo="<owner/repo>",
+        primary="<PRIMARY>",
+        included="<INCLUDED>",
+        members="<MEMBERS>",
+        ref="<ref>",
+        scope="<scope>",
+        boundaries="<non-goals>",
+        verify=(
+            "focused tests plus the repository's own lint and typecheck gates; "
+            "name the exact commands in the plan"
+        ),
+        closing_lines="Closes <PRIMARY>\nCloses <INCLUDED-1>",
+    )
+
+    run_template = _template_body(SKILL / "references/run-templates.md", "Bundle Dispatch")
+    wave_template = _template_body(
+        WAVE_SKILL / "references/comment-templates.md", "Bundle Dispatch"
+    )
+    assert run_template == expected
+    assert wave_template == expected
+    assert _template_body(
+        SKILL / "references/run-templates.md", "Bundle Approval Reference"
+    ) == _template_body(WAVE_SKILL / "references/comment-templates.md", "Bundle Approval Reference")

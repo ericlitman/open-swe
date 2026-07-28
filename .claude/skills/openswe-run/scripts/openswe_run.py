@@ -95,6 +95,22 @@ Code standard: smallest root-cause change; no speculative validation or layered 
 PR body: include the Linear reference and `Closes {ticket}` as a standalone line. Let normal Open SWE Review and required CI run; do not directly merge or bypass gates.
 """
 
+BUNDLE_DISPATCH_TEMPLATE = """@openswe repo {repo} — Execute one ticket bundle with primary {primary} and included tickets {included}.
+
+Enter plan mode first. Read and reconcile every bundle ticket before planning: {members}. Re-anchor all cited paths and symbols against `{ref}`, state any refuted premise as a Challenge, and do not implement until the combined plan is approved in this Linear thread.
+
+Treat the bundle as one atomic scope on the primary thread and one thread-stable branch. Included tickets must not be dispatched independently.
+Required scope: {scope}.
+Boundaries: {boundaries}.
+Verification: {verify}.
+Code standard: smallest root-cause change; no speculative validation or layered defenses; the diff must be acceptable upstream.
+Open or update exactly one PR for the bundle. Its body must include the Linear references and these standalone closing lines:
+{closing_lines}
+Let normal Open SWE Review and required CI run; do not directly merge or bypass gates.
+"""
+
+BUNDLE_MANIFEST_TAG = "bundle-manifest"
+
 NUDGE_TEMPLATE = """@openswe Status check on {ticket}: no visible progress for {minutes} minutes. Post a brief status update in this thread (current step, and the blocker if you are blocked)."""
 
 
@@ -187,6 +203,97 @@ def dogfood(ticket: str, tag: str, text: str) -> None:
         fh.write(f"- {now_iso()} [{tag}] {clean}\n")
 
 
+def write_bundle_manifest(ticket: str, issues: list[dict]) -> None:
+    """Persist the latest normalized dispatch topology in the primary run log."""
+    members = [
+        {"identifier": str(issue["identifier"]).strip().upper(), "issue_id": str(issue["id"])}
+        for issue in issues
+    ]
+    payload = {"version": 1, "primary": members[0], "members": members}
+    dogfood(ticket, BUNDLE_MANIFEST_TAG, json.dumps(payload, separators=(",", ":")))
+
+
+def load_bundle_manifest(ticket: str, path: Path | None = None) -> dict | None:
+    """Recover and validate the latest bundle record without creating a log."""
+    if path is None:
+        handoffs = stable_root() / "handoffs"
+        if not handoffs.is_dir():
+            return None
+        candidates = sorted(handoffs.glob(f"{ticket.upper()}-*-run.md"))
+        if not candidates:
+            return None
+        path = candidates[-1]
+    record_pattern = re.compile(rf"^- \S+ \[{re.escape(BUNDLE_MANIFEST_TAG)}\] (?P<payload>.*)$")
+    records = [
+        match.group("payload")
+        for line in path.read_text().splitlines()
+        if (match := record_pattern.match(line))
+    ]
+    if not records:
+        return None
+    try:
+        manifest = json.loads(records[-1])
+    except json.JSONDecodeError as exc:
+        raise RunError(f"Malformed bundle manifest in {path}: invalid JSON ({exc.msg})") from exc
+    if not isinstance(manifest, dict) or manifest.get("version") != 1:
+        raise RunError(f"Malformed bundle manifest in {path}: expected version 1 object")
+    primary = manifest.get("primary")
+    members = manifest.get("members")
+    if not isinstance(primary, dict) or not isinstance(members, list) or not members:
+        raise RunError(f"Malformed bundle manifest in {path}: expected primary and 1+ members")
+    normalized = []
+    seen_ids: set[str] = set()
+    seen_identifiers: set[str] = set()
+    for item in members:
+        if not isinstance(item, dict):
+            raise RunError(f"Malformed bundle manifest in {path}: member is not an object")
+        identifier = item.get("identifier")
+        issue_id = item.get("issue_id")
+        if not isinstance(identifier, str) or not identifier.strip():
+            raise RunError(f"Malformed bundle manifest in {path}: member identifier is missing")
+        if not isinstance(issue_id, str) or not issue_id.strip():
+            raise RunError(f"Malformed bundle manifest in {path}: member issue_id is missing")
+        member = {"identifier": identifier.strip().upper(), "issue_id": issue_id.strip()}
+        identifier_key = member["identifier"].casefold()
+        issue_key = member["issue_id"].casefold()
+        if identifier_key in seen_identifiers or issue_key in seen_ids:
+            raise RunError(
+                f"Malformed bundle manifest in {path}: duplicate member {member['identifier']}"
+            )
+        seen_identifiers.add(identifier_key)
+        seen_ids.add(issue_key)
+        normalized.append(member)
+    normalized_primary = {
+        "identifier": str(primary.get("identifier") or "").strip().upper(),
+        "issue_id": str(primary.get("issue_id") or "").strip(),
+    }
+    if normalized_primary != normalized[0]:
+        raise RunError(f"Malformed bundle manifest in {path}: primary must be the first member")
+    return {"version": 1, "primary": normalized_primary, "members": normalized}
+
+
+def bundle_identifiers(
+    ticket: str,
+    primary_identifier: str,
+    path: Path | None = None,
+    *,
+    primary_issue_id: str | None = None,
+) -> list[str]:
+    """Return canonical bundle identifiers, or the primary for a legacy run."""
+    manifest = load_bundle_manifest(ticket, path)
+    if manifest is None:
+        return [primary_identifier.strip().upper()]
+    expected = manifest["primary"]
+    if expected["identifier"] != primary_identifier.strip().upper() or (
+        primary_issue_id is not None and expected["issue_id"] != primary_issue_id.strip()
+    ):
+        raise RunError(
+            f"Bundle manifest primary {expected['identifier']} ({expected['issue_id']}) does not "
+            f"match resolved primary {primary_identifier} ({primary_issue_id or 'id unavailable'})"
+        )
+    return [member["identifier"] for member in manifest["members"]]
+
+
 # --------------------------------------------------------------------------- linear (urllib)
 
 
@@ -245,6 +352,32 @@ def resolve_issue(ticket: str) -> dict:
     if not issue:
         raise RunError(f"Linear issue {ticket} was not found")
     return issue
+
+
+def resolve_bundle(primary_ticket: str, included_tickets: list[str]) -> list[dict]:
+    """Resolve and canonicalize every member, refusing aliases of the same issue."""
+    issues = []
+    for requested in [primary_ticket, *included_tickets]:
+        issue = resolve_issue(requested)
+        identifier = str(issue.get("identifier") or "").strip().upper()
+        issue_id = str(issue.get("id") or "").strip()
+        if not identifier or not issue_id:
+            raise RunError(f"Linear issue {requested} returned no canonical identifier or id")
+        issues.append({**issue, "identifier": identifier, "id": issue_id})
+    seen_ids: dict[str, str] = {}
+    seen_identifiers: dict[str, str] = {}
+    for issue in issues:
+        identifier = issue["identifier"]
+        issue_id = issue["id"]
+        duplicate = seen_ids.get(issue_id.casefold()) or seen_identifiers.get(identifier.casefold())
+        if duplicate is not None:
+            raise RunError(
+                f"Duplicate bundle member {identifier}: it repeats {duplicate}. "
+                "List each Linear issue exactly once and do not include the primary again."
+            )
+        seen_ids[issue_id.casefold()] = identifier
+        seen_identifiers[identifier.casefold()] = identifier
+    return issues
 
 
 def linear_snapshot(issue_id: str) -> dict:
@@ -628,6 +761,39 @@ def guard_placeholders(ticket: str, body: str, force: bool) -> None:
         dogfood(ticket, "note", f"--force posted body with placeholders: {', '.join(leftovers)}")
 
 
+def guard_bundle_membership(body: str, identifiers: list[str]) -> None:
+    """Require every canonical bundle identifier in a custom or approval body."""
+    missing = [
+        identifier
+        for identifier in identifiers
+        if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(identifier)}(?![A-Za-z0-9_-])",
+            body,
+            flags=re.IGNORECASE,
+        )
+        is None
+    ]
+    if missing:
+        raise RunError(
+            "Bundle body is missing member identifier(s): "
+            f"{', '.join(missing)}. Name every bundle member explicitly."
+        )
+
+
+def has_closing_line(body: object, identifier: str) -> bool:
+    """Return whether a PR body has the standalone closing line."""
+    if not isinstance(body, str):
+        return False
+    return (
+        re.search(
+            rf"^[ \t]*Closes[ \t]+{re.escape(identifier)}[ \t]*$",
+            body,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        is not None
+    )
+
+
 def guard_terminal_issue(ticket: str, issue: dict, force: bool) -> None:
     state = issue.get("state") or {}
     state_type = str(state.get("type") or "").lower()
@@ -640,7 +806,11 @@ def guard_terminal_issue(ticket: str, issue: dict, force: bool) -> None:
     if timestamp:
         detail += f"; completion evidence: {timestamp_field}={timestamp}"
     if force:
-        dogfood(ticket, "cmd", f"--force overriding terminal Linear {detail} before dispatch")
+        dogfood(
+            ticket,
+            "cmd",
+            f"--force overriding terminal Linear issue {issue['identifier']}: {detail} before dispatch",
+        )
         return
     dogfood(ticket, "error", f"refused dispatch for {issue['identifier']}: {detail}")
     raise RunError(
@@ -888,50 +1058,78 @@ def cmd_start(args: argparse.Namespace) -> int:
     if not args.dry_run:
         log_path(args.ticket, new_run=True)
     ensure_env(args.ticket, langgraph=not args.dry_run, github=False)
-    issue = resolve_issue(args.ticket)
+    issues = resolve_bundle(args.ticket, list(getattr(args, "include_ticket", []) or []))
+    primary = issues[0]
+    identifiers = [issue["identifier"] for issue in issues]
+    is_bundle = len(issues) > 1
     if args.body_file:
         body = read_body(args)
-    else:
-        body = DISPATCH_TEMPLATE.format(
+    elif is_bundle:
+        body = BUNDLE_DISPATCH_TEMPLATE.format(
             repo=args.repo,
-            ticket=issue["identifier"],
+            primary=primary["identifier"],
+            included=", ".join(identifiers[1:]),
+            members=", ".join(identifiers),
             ref=args.ref,
-            scope=(args.scope or f"execute {issue['identifier']} exactly as ticketed").removesuffix(
-                "."
-            ),
+            scope=(
+                args.scope or f"execute {', '.join(identifiers)} exactly as one ticketed bundle"
+            ).removesuffix("."),
             boundaries=(
-                args.boundaries or f"no changes beyond {issue['identifier']}'s stated scope"
+                args.boundaries
+                or f"no changes beyond the combined stated scope of {', '.join(identifiers)}"
             ).removesuffix("."),
             verify=(
                 args.verify
-                or "focused tests plus the repository's own lint and typecheck gates; "
-                "name the exact commands in the plan"
+                or "focused tests plus the repository's own lint and typecheck gates; name the exact commands in the plan"
+            ).removesuffix("."),
+            closing_lines="\n".join(f"Closes {identifier}" for identifier in identifiers),
+        )
+    else:
+        body = DISPATCH_TEMPLATE.format(
+            repo=args.repo,
+            ticket=primary["identifier"],
+            ref=args.ref,
+            scope=(
+                args.scope or f"execute {primary['identifier']} exactly as ticketed"
+            ).removesuffix("."),
+            boundaries=(
+                args.boundaries or f"no changes beyond {primary['identifier']}'s stated scope"
+            ).removesuffix("."),
+            verify=(
+                args.verify
+                or "focused tests plus the repository's own lint and typecheck gates; name the exact commands in the plan"
             ).removesuffix("."),
         )
     guard_body_hygiene(body)
-    guard_placeholders(args.ticket, body, args.force)
-    wave = import_wave_module()
-    thread_id = wave.derive_linear_thread_id(issue["id"])
+    guard_placeholders(args.ticket, body, False if is_bundle else args.force)
+    if is_bundle:
+        guard_bundle_membership(body, identifiers)
+    thread_id = import_wave_module().derive_linear_thread_id(primary["id"])
     result = {
-        "identifier": issue["identifier"],
-        "issue_id": issue["id"],
-        "issue_url": issue["url"],
-        "issue_state": issue.get("state"),
+        "identifier": primary["identifier"],
+        "issue_id": primary["id"],
+        "issue_url": primary["url"],
+        "issue_state": primary.get("state"),
         "thread_id": thread_id,
         "repo": args.repo,
         "dispatched": not args.dry_run,
     }
+    if is_bundle:
+        result["bundle"] = identifiers
     if args.dry_run:
         result["body"] = body
         print(json.dumps(result, indent=2))
         return 0
-    guard_terminal_issue(args.ticket, issue, args.force)
-    result["handoff"] = _post_with_handoff("start", args.ticket, issue["id"], body, thread_id)
+    for issue in issues:
+        guard_terminal_issue(args.ticket, issue, args.force)
+    write_bundle_manifest(args.ticket, issues)
+    result["handoff"] = _post_with_handoff("start", args.ticket, primary["id"], body, thread_id)
     handoff = result["handoff"]
+    suffix = f"; bundle={','.join(identifiers)}" if is_bundle else ""
     dogfood(
         args.ticket,
         "cmd",
-        f"dispatched {issue['identifier']} to {args.repo} ({issue['url']}); handoff "
+        f"dispatched {primary['identifier']} to {args.repo} ({primary['url']}){suffix}; handoff "
         f"status={handoff.get('thread_status')} runs={len(handoff.get('run_ids') or [])}",
     )
     print(json.dumps(result))
@@ -978,6 +1176,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
     ensure_env(args.ticket, langgraph=True, github=True)
     wave = import_wave_module()
     issue = resolve_issue(args.ticket)
+    bundle_identifiers(
+        args.ticket,
+        str(issue.get("identifier") or args.ticket),
+        primary_issue_id=str(issue["id"]),
+    )
     issue_id = issue["id"]
     timeout_min = watch_timeout_min(args)
     baseline = linear_snapshot(issue_id)
@@ -1082,6 +1285,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
 def cmd_plan(args: argparse.Namespace) -> int:
     ensure_env(args.ticket, langgraph=False, github=False)
     issue = resolve_issue(args.ticket)
+    bundle_identifiers(
+        args.ticket,
+        str(issue.get("identifier") or args.ticket),
+        primary_issue_id=str(issue["id"]),
+    )
     snapshot = linear_snapshot(issue["id"])
     viewer_id = str((snapshot["viewer"] or {}).get("id") or "")
     comments = sorted(
@@ -1142,7 +1350,16 @@ def cmd_approve(args: argparse.Namespace) -> int:
     # the plan approved with no dispatching comment — and the next comment on the
     # issue, of any kind, would then run against an approved plan.
     issue = resolve_issue(args.ticket)
-    guard_placeholders(args.ticket, body, getattr(args, "force", False))
+    identifiers = bundle_identifiers(
+        args.ticket,
+        str(issue.get("identifier") or args.ticket),
+        primary_issue_id=str(issue["id"]),
+    )
+    guard_placeholders(
+        args.ticket, body, False if len(identifiers) > 1 else getattr(args, "force", False)
+    )
+    if len(identifiers) > 1:
+        guard_bundle_membership(body, identifiers)
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
     state = set_plan_status(thread_id, "approved", plan_mode=False)
     dogfood(
@@ -1179,7 +1396,14 @@ def cmd_reject(args: argparse.Namespace) -> int:
     body = read_body(args)
     guard_body_hygiene(body)
     issue = resolve_issue(args.ticket)
-    guard_placeholders(args.ticket, body, getattr(args, "force", False))
+    identifiers = bundle_identifiers(
+        args.ticket,
+        str(issue.get("identifier") or args.ticket),
+        primary_issue_id=str(issue["id"]),
+    )
+    guard_placeholders(
+        args.ticket, body, False if len(identifiers) > 1 else getattr(args, "force", False)
+    )
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
     # Send the record back to revising, as the dashboard's reject endpoint does.
     # Without this a rejection posted after an approval would leave the plan
@@ -1238,6 +1462,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     if not candidates:
         raise RunError(f"No dogfood log found for {args.ticket} under {handoffs}")
     path = candidates[-1]
+    manifest = load_bundle_manifest(args.ticket, path)
+    bundle_manifest = manifest if manifest is not None and len(manifest["members"]) > 1 else None
     entries = [line for line in path.read_text().splitlines() if line.startswith("- ")]
     issues = [line for line in entries if "[ISSUE]" in line]
     wakes = [line for line in entries if "[wake]" in line]
@@ -1260,39 +1486,113 @@ def cmd_report(args: argparse.Namespace) -> int:
     pr_reference = f"{repo}#{pr_number}" if repo and pr_number else None
     pr_url = None
     merge_sha = None
-    if terminal_state == "terminal_merged" and pr_reference:
+    pr_body = None
+    pr_state = None
+    pr_lookup_error = None
+    should_query = bool(
+        pr_reference and (bundle_manifest is not None or terminal_state == "terminal_merged")
+    )
+    if should_query:
+        fields = "url,state,body,mergeCommit" if bundle_manifest else "url,mergeCommit"
         try:
             result = subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "view",
-                    str(pr_number),
-                    "--repo",
-                    repo,
-                    "--json",
-                    "url,mergeCommit",
-                ],
+                ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", fields],
                 capture_output=True,
                 text=True,
                 check=False,
             )
-        except OSError:
+        except OSError as exc:
             result = None
+            pr_lookup_error = str(exc)
         if result is not None and result.returncode == 0:
             try:
                 payload = json.loads(result.stdout)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
                 payload = {}
+                pr_lookup_error = f"invalid GitHub JSON: {exc.msg}"
             pr_url = payload.get("url")
             merge_commit = payload.get("mergeCommit") or {}
             merge_sha = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
+            pr_body = payload.get("body")
+            pr_state = str(payload.get("state") or "").upper() or None
+        elif result is not None:
+            pr_lookup_error = (
+                result.stderr or result.stdout
+            ).strip() or f"gh exited {result.returncode}"
     print(f"log: {path}")
     print(f"terminal state: {terminal_state or '(none recorded)'}")
     if pr_url or pr_reference:
         print(f"PR: {pr_url or pr_reference}")
     if merge_sha:
         print(f"merge SHA: {merge_sha}")
+    complete = True
+    if bundle_manifest is not None:
+        identifiers = [member["identifier"] for member in bundle_manifest["members"]]
+        members_by_identifier = {
+            member["identifier"]: member for member in bundle_manifest["members"]
+        }
+        member_results = []
+        for identifier in identifiers:
+            try:
+                issue = resolve_issue(identifier)
+                canonical_identifier = str(issue.get("identifier") or "").strip().upper()
+                canonical_id = str(issue.get("id") or "").strip()
+                expected = members_by_identifier[identifier]
+                identity_ok = (
+                    canonical_identifier == identifier and canonical_id == expected["issue_id"]
+                )
+                state = issue.get("state") or {}
+                state_type = str(state.get("type") or "").lower()
+                member_results.append(
+                    {
+                        "identifier": canonical_identifier or identifier,
+                        "issue_id": canonical_id or "unresolved",
+                        "state": state.get("name") or state_type or "unknown",
+                        "state_type": state_type or "unknown",
+                        "tracker_terminal": state_type in {"completed", "canceled"},
+                        "identity_ok": identity_ok,
+                        "closing_line": has_closing_line(pr_body, identifier),
+                    }
+                )
+            except RunError as exc:
+                member_results.append(
+                    {
+                        "identifier": identifier,
+                        "issue_id": "unresolved",
+                        "state": "unresolved",
+                        "state_type": "unresolved",
+                        "tracker_terminal": False,
+                        "identity_ok": False,
+                        "closing_line": has_closing_line(pr_body, identifier),
+                        "error": str(exc),
+                    }
+                )
+        pr_terminal = pr_state in {"MERGED", "CLOSED"}
+        complete = (
+            pr_lookup_error is None
+            and pr_terminal
+            and all(
+                item["closing_line"] and item["tracker_terminal"] and item["identity_ok"]
+                for item in member_results
+            )
+        )
+        print(f"shared PR live state: {pr_state or 'unavailable'}")
+        print(f"bundle members ({len(member_results)}):")
+        for item in member_results:
+            closing = "present" if item["closing_line"] else "MISSING"
+            tracker = "terminal" if item["tracker_terminal"] else "NONTERMINAL/UNRESOLVED"
+            identity = "canonical" if item["identity_ok"] else "IDENTITY MISMATCH"
+            print(
+                f"  {item['identifier']} ({item['issue_id']}): Closes line {closing}; "
+                f"Linear {item['state']} ({item['state_type']}) {tracker}; {identity}"
+            )
+            if item.get("error"):
+                print(f"    error: {item['error']}")
+        if pr_lookup_error:
+            print(f"  PR evidence failed: {pr_lookup_error}")
+        if not pr_terminal:
+            print(f"  shared PR terminal state unresolved: {pr_state or 'unavailable'}")
+        print(f"bundle completion: {'complete' if complete else 'INCOMPLETE'}")
     print(f"wakes ({len(wakes)}):")
     for line in wakes:
         print(f"  {line}")
@@ -1302,7 +1602,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     if not issues:
         print("  (none recorded — say so explicitly in the chat summary)")
     print("Reminder: end the run by summarizing these issues in chat output.")
-    return 0
+    return 0 if complete else 2
 
 
 # --------------------------------------------------------------------------- main
@@ -1316,6 +1616,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     start = sub.add_parser("start", help="dispatch one ticket via @openswe Linear comment")
     start.add_argument("--ticket", required=True)
+    start.add_argument(
+        "--include-ticket",
+        action="append",
+        default=[],
+        help="included Linear ticket; repeat for one atomic bundle",
+    )
     start.add_argument("--repo", required=True, help="owner/repo the run should target")
     start.add_argument("--ref", default="main")
     start.add_argument("--scope")

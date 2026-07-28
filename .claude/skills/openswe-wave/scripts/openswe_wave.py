@@ -786,6 +786,7 @@ def add_sibling_divergence(
             candidate
             for candidate in rows
             if candidate is not row
+            and candidate.get("thread_id") != row.get("thread_id")
             and candidate.get("lifecycle_stage") in STATUS_STAGE_RANK
             and STATUS_STAGE_RANK[candidate["lifecycle_stage"]] > STATUS_STAGE_RANK[stage]
         ]
@@ -2016,15 +2017,18 @@ def cmd_status_sweep(args: argparse.Namespace) -> int:
         prs = []
         github_error = f"GitHub PR inventory read failed: {exc}"
     rows = []
+    snapshots: dict[str, dict[str, Any]] = {}
     for ticket in tickets:
-        try:
-            snapshot = langgraph_sweep_snapshot(ticket["thread_id"])
-        except (WaveOpsError, OSError, ValueError) as exc:
-            snapshot = {"thread": None, "plan": None, "errors": [str(exc)]}
+        thread_id = ticket["thread_id"]
+        if thread_id not in snapshots:
+            try:
+                snapshots[thread_id] = langgraph_sweep_snapshot(thread_id)
+            except (WaveOpsError, OSError, ValueError) as exc:
+                snapshots[thread_id] = {"thread": None, "plan": None, "errors": [str(exc)]}
         rows.append(
             classify_status_ticket(
                 ticket,
-                snapshot,
+                snapshots[thread_id],
                 prs,
                 pr_inventory_error=github_error,
             )
