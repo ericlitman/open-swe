@@ -197,7 +197,7 @@ query WavePrState($owner: String!, $repo: String!, $number: Int!) {
         contexts(first: 100) {
           nodes {
             __typename
-            ... on CheckRun { name }
+            ... on CheckRun { name status }
           }
         }
       }
@@ -218,7 +218,7 @@ query WavePr($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         contexts(first: 100) {
           nodes {
             __typename
-            ... on CheckRun { name }
+            ... on CheckRun { name status }
           }
         }
       }
@@ -1010,6 +1010,7 @@ def review_absent_event(
         isinstance(context, dict)
         and context.get("__typename") == "CheckRun"
         and context.get("name") == "Open SWE Review"
+        and context.get("status") in {"IN_PROGRESS", "QUEUED"}
         for context in check_contexts
     )
     if pr.get("state") != "OPEN" or snapshot.get("review_ids") or reviewer_engaged:

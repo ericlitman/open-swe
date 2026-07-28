@@ -310,11 +310,25 @@ def test_review_absent_uses_window_and_draft_recovery_hint() -> None:
     }
 
     snapshot["pr"]["statusCheckRollup"] = {
-        "contexts": {"nodes": [{"__typename": "CheckRun", "name": "Open SWE Review"}]}
+        "contexts": {
+            "nodes": [
+                {"__typename": "CheckRun", "name": "Open SWE Review", "status": "IN_PROGRESS"}
+            ]
+        }
     }
     assert wave.review_absent_event(snapshot, 900) is None
 
-    snapshot["pr"]["statusCheckRollup"] = {"contexts": {"nodes": []}}
+    snapshot["pr"]["statusCheckRollup"] = {
+        "contexts": {
+            "nodes": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "Open SWE Review",
+                    "status": "COMPLETED",
+                }
+            ]
+        }
+    }
     assert wave.review_absent_event(snapshot, 901) is None
     event = wave.review_absent_event(snapshot, 900)
 
@@ -374,7 +388,15 @@ def test_github_snapshot_paginates_complete_actor_timeline(
                 "autoMergeRequest": {"enabledAt": "now"},
                 "mergeStateStatus": "CLEAN",
                 "statusCheckRollup": {
-                    "contexts": {"nodes": [{"__typename": "CheckRun", "name": "Open SWE Review"}]}
+                    "contexts": {
+                        "nodes": [
+                            {
+                                "__typename": "CheckRun",
+                                "name": "Open SWE Review",
+                                "status": "IN_PROGRESS",
+                            }
+                        ]
+                    }
                 },
             }
         elif "WaveLabels" in query:
@@ -424,7 +446,7 @@ def test_github_snapshot_paginates_complete_actor_timeline(
     assert len(pr["timelineItems"]["nodes"]) == 2
     assert pr["autoMergeRequest"] == {"enabledAt": "now"}
     assert pr["statusCheckRollup"]["contexts"]["nodes"] == [
-        {"__typename": "CheckRun", "name": "Open SWE Review"}
+        {"__typename": "CheckRun", "name": "Open SWE Review", "status": "IN_PROGRESS"}
     ]
 
 
