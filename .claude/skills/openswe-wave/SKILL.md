@@ -6,6 +6,7 @@ description: Operate an Open SWE delivery wave with full-weight plan adjudicatio
 # Open SWE wave operations
 
 Keep plan adjudication and spot-audits at full operator weight. Use these files only to remove mechanical polling, status relay, and deterministic recovery work.
+Use `openswe-bundle` first when composing a triaged batch into atomic bundles and sequenced wave siblings.
 
 ## Deployment
 
