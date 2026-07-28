@@ -648,111 +648,72 @@ def _plan_output(
     return capsys.readouterr().out
 
 
-def test_plan_defaults_to_all_non_viewer_comments_since_latest_dispatch(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+def test_plan_selects_only_durable_plan_after_latest_dispatch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     comments = [
         _comment(
             "approval", "@openswe Plan approved.", "2026-07-27T21:38:30Z", "viewer-1", "Operator"
         ),
-        _comment("plan", "## Plan\nImplement it", "2026-07-27T21:37:58Z", "agent-1", "Open SWE"),
+        _comment("ack-after", "On it!", "2026-07-27T21:38:00Z", "open-swe", "Open SWE"),
         _comment(
-            "progress", "Re-anchoring against main", "2026-07-27T21:34:58Z", "agent-1", "Open SWE"
+            "plan", "## Plan\nImplement it", "2026-07-27T21:37:58Z", "viewer-1", "Eric Litman"
         ),
-        _comment("ack", "On it!", "2026-07-27T21:34:41Z", "agent-1", "Open SWE"),
-        _comment(
-            "dispatch",
-            "@openswe repo owner/name — Execute ABC-1 only.\n\nRequired scope: fix it.",
-            "2026-07-27T21:34:40Z",
-            "viewer-1",
-            "Operator",
-        ),
-        _comment("old", "Earlier run", "2026-07-27T20:00:00Z", "agent-1", "Open SWE"),
-    ]
-
-    output = _plan_output(monkeypatch, capsys, comments)
-
-    assert "Earlier run" not in output
-    assert output.index("On it!") < output.index("Re-anchoring against main")
-    assert output.index("Re-anchoring against main") < output.index("## Plan")
-    assert output.count("----- Open SWE at") == 3
-
-
-def test_plan_scopes_after_custom_repo_dispatch(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    comments = [
-        _comment("old", "Earlier run", "2026-07-27T20:00:00Z", "agent-1", "Open SWE"),
-        _comment(
-            "dispatch",
-            "@openswe repo owner/name\n\nCustom dispatch body for ABC-1.",
-            "2026-07-27T21:34:40Z",
-            "viewer-1",
-            "Operator",
-        ),
-        _comment("ack", "On it!", "2026-07-27T21:34:41Z", "agent-1", "Open SWE"),
-        _comment("plan", "## Plan", "2026-07-27T21:37:58Z", "agent-1", "Open SWE"),
-    ]
-
-    output = _plan_output(monkeypatch, capsys, comments)
-
-    assert "Earlier run" not in output
-    assert output.index("On it!") < output.index("## Plan")
-    assert output.count("----- Open SWE at") == 2
-
-
-def test_plan_without_dispatch_falls_back_to_all_comments_with_true_authors(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    comments = [
-        _comment("agent", "## Plan", "2026-07-27T21:37:58Z", "agent-1", "Open SWE"),
-        _comment(
-            "operator", "Please revise", "2026-07-27T21:35:00Z", "operator-1", "Mobilyze Agents"
-        ),
-    ]
-
-    output = _plan_output(monkeypatch, capsys, comments, viewer_id="service-viewer")
-
-    assert output.index("Mobilyze Agents") < output.index("Open SWE")
-    assert "----- Mobilyze Agents at 2026-07-27T21:35:00Z -----" in output
-    assert "----- Open SWE at 2026-07-27T21:37:58Z -----" in output
-
-
-@pytest.mark.parametrize(
-    ("last", "expected", "excluded"),
-    [
-        (2, ["Progress", "## Plan"], ["On it!"]),
-        (10, ["On it!", "Progress", "## Plan"], []),
-    ],
-)
-def test_plan_last_narrows_the_dispatch_scoped_set(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    last: int,
-    expected: list[str],
-    excluded: list[str],
-) -> None:
-    comments = [
-        _comment("plan", "## Plan", "2026-07-27T21:37:58Z", "agent-1", "Open SWE"),
-        _comment("progress", "Progress", "2026-07-27T21:34:58Z", "agent-1", "Open SWE"),
-        _comment("ack", "On it!", "2026-07-27T21:34:41Z", "agent-1", "Open SWE"),
+        _comment("ack", "On it!", "2026-07-27T21:34:41Z", "viewer-1", "Eric Litman"),
         _comment(
             "dispatch",
             "@openswe repo owner/name — Execute ABC-1 only.",
             "2026-07-27T21:34:40Z",
-            "viewer-1",
-            "Operator",
+            "mobilyze",
+            "Mobilyze Agents",
+        ),
+        _comment(
+            "old-plan", "## Plan\nEarlier run", "2026-07-27T20:00:00Z", "open-swe", "Open SWE"
         ),
     ]
 
-    output = _plan_output(monkeypatch, capsys, comments, last=last)
+    output = _plan_output(monkeypatch, capsys, comments, viewer_id="viewer-1")
 
-    positions = [output.index(body) for body in expected]
-    assert positions == sorted(positions)
-    assert all(body not in output for body in excluded)
+    assert "Implement it" in output
+    assert "Eric Litman" in output
+    assert "On it!" not in output
+    assert "Earlier run" not in output
+    assert output.count("-----") == 2
+
+
+def test_plan_last_counts_plan_revisions_not_progress(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    comments = [
+        _comment("plan-2", "## Plan: Revision 2", "2026-07-27T21:38:00Z", "open-swe", "Open SWE"),
+        _comment("progress", "Re-anchoring", "2026-07-27T21:37:00Z", "open-swe", "Open SWE"),
+        _comment("plan-1", "## Plan: Revision 1", "2026-07-27T21:36:00Z", "eric", "Eric Litman"),
+        _comment(
+            "dispatch",
+            "@openswe repo owner/name — Execute ABC-1 only.",
+            "2026-07-27T21:34:40Z",
+            "mobilyze",
+            "Mobilyze Agents",
+        ),
+    ]
+
+    output = _plan_output(monkeypatch, capsys, comments, last=1)
+
+    assert "Revision 2" in output
+    assert "Revision 1" not in output
+    assert "Re-anchoring" not in output
+
+
+def test_plan_without_matching_comment_is_explicit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = _plan_output(
+        monkeypatch,
+        capsys,
+        [_comment("ack", "On it!", "2026-07-27T21:34:41Z", "open-swe", "Open SWE")],
+    )
+
+    assert output == "(no plan comments yet)\n"
 
 
 def test_locked_plan_statuses_match_the_products_refusals() -> None:
@@ -871,6 +832,25 @@ def test_report_discovers_a_legacy_dated_log(
     output = capsys.readouterr().out
     assert f"log: {legacy}" in output
     assert "legacy evidence" in output
+
+
+def test_report_includes_recovered_bear_50_blocker_and_terminal_wakes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    handoffs = run.ensure_handoffs()
+    path = handoffs / "BEAR-50-20260727T000100000000Z-run.md"
+    path.write_text(
+        "- 2026-07-27T02:03:57Z [wake] run_blocked via wave-monitor: BEAR-50 is blocked\n"
+        "- 2026-07-27T13:06:06Z [wake] terminal_merged via wave-monitor: BEAR-50 verification is complete\n"
+    )
+
+    assert run.cmd_report(argparse.Namespace(ticket="BEAR-50")) == 0
+
+    output = capsys.readouterr().out
+    assert "run_blocked" in output
+    assert "terminal_merged" in output
+    assert "wakes (2)" in output
 
 
 def test_report_prints_merged_pr_url_and_sha(
@@ -1606,6 +1586,32 @@ def test_start_success_records_handoff_in_json_and_dogfood(
     ]
 
 
+def test_spawn_monitor_uses_run_watermark_and_until_wake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[str] = []
+
+    class Process:
+        stderr: list[str] = []
+
+    def popen(command: list[str], **_kwargs: Any) -> Process:
+        captured.extend(command)
+        return Process()
+
+    watermark = tmp_path / "BEAR-50-run-known-comment-ids.json"
+    monkeypatch.setattr(run, "resolve_monitor_python", lambda: ["python3"])
+    monkeypatch.setattr(run, "wave_scripts_dir", lambda: tmp_path)
+    monkeypatch.setattr(run, "known_ids_path", lambda _ticket: watermark)
+    monkeypatch.setattr(run.subprocess, "Popen", popen)
+    args = argparse.Namespace(
+        ticket="BEAR-50", repo="owner/name", interval=60, pr_number=None, follow=False
+    )
+
+    run._spawn_monitor(args, "issue-id")
+
+    assert captured[-3:] == ["--known-ids-file", str(watermark), "--until-wake"]
+
+
 def test_watch_parser_defaults_to_plan_and_keeps_timeout_override_authoritative() -> None:
     parser = run.build_parser()
     default = parser.parse_args(["watch", "--ticket", "ABC-1", "--repo", "owner/name"])
@@ -1684,7 +1690,7 @@ def test_watch_timeout_evidence_includes_phase_and_effective_deadline(
         def terminate(self) -> None:
             return None
 
-    moments = iter([0.0, 0.0, elapsed])
+    moments = iter([0.0, elapsed])
     monkeypatch.setattr(run.time, "monotonic", lambda: next(moments))
     monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
     monkeypatch.setattr(run, "import_wave_module", lambda: object())

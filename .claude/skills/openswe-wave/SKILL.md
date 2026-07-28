@@ -63,7 +63,8 @@ On studio2, run live commands with the control-plane interpreter at `/opt/mobily
 ```bash
 uv run --no-project --with httpx --with langgraph-sdk python \
   .claude/skills/openswe-wave/scripts/wave-monitor watch \
-  --issue-id <linear-uuid> --repo <owner/repo> --pr-number <number>
+  --issue-id <linear-uuid> --repo <owner/repo> --pr-number <number> \
+  --known-ids-file <persistent-path> --until-wake
 ```
 
 ## Workflow
@@ -77,7 +78,8 @@ uv run --no-project --with httpx --with langgraph-sdk python \
 ```bash
 /opt/mobilyze/open-swe-control-plane/current/.venv/bin/python \
   .claude/skills/openswe-wave/scripts/wave-monitor watch \
-  --issue-id <linear-uuid> --repo <owner/repo> --pr-number <number>
+  --issue-id <linear-uuid> --repo <owner/repo> --pr-number <number> \
+  --known-ids-file <persistent-path> --until-wake
 ```
 
 The first sample suppresses historical transitions; persistent terminal, conflict, and review-absence states still wake. The only emitted wake nodes are:
@@ -94,7 +96,7 @@ The first sample suppresses historical transitions; persistent terminal, conflic
 - `terminal_run_error`
 - `unhandled_condition`
 
-`pr_opened` and `review_complete` stay quiet when GitHub reports auto-merge already armed. Historical PR creation and completed reviews stay quiet on restart, while an already-conflicted PR and an open PR with neither a published Open SWE review nor an in-progress or queued current-head `Open SWE Review` check after `--review-absent-seconds` (default 900) wake immediately. Draft review-absence summaries include the ready-for-review recovery hint. Acknowledgements, normal progress, successful recoveries, queue entry/position changes, and comments authored by the Linear viewer identity stay quiet. Pass `--session-user-id` only when viewer discovery is unavailable.
+`pr_opened` and `review_complete` stay quiet when GitHub reports auto-merge already armed. Historical PR creation and completed reviews stay quiet on restart, while an already-conflicted PR and an open PR with neither a published Open SWE review nor an in-progress or queued current-head `Open SWE Review` check after `--review-absent-seconds` (default 900) wake immediately. Draft review-absence summaries include the ready-for-review recovery hint. Acknowledgements, normal progress, successful recoveries, queue entry/position changes, and explicit `@openswe` operator actions stay quiet. Plan, blocker, and ticket-matching terminal closeout comments remain actionable regardless of Linear author identity. `--known-ids-file` resumes comment progress across restarts, and `--until-wake` exits successfully after persisting the first emitted wake.
 
 **Sharp edge:** the `Open SWE Auto-fix` check conclusion is always neutral by design; the outcome lives in the check's `output.title`, shown as its title in review-related wake summaries.
 

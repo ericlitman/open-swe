@@ -148,10 +148,10 @@ Wake nodes: `plan_posted`, `pr_opened`, `review_findings_posted`, `review_comple
 exception to exit-on-wake: it is printed immediately, and the same watch continues on the
 replacement endpoint. `endpoint_unavailable` exits fail-closed without retrying the dead endpoint.
 `--pr-number N` is optional; when omitted, the monitor discovers the PR from LangGraph thread metadata so PR recovery checks engage as soon as it exists.
-Known monitor sharp edges are inherited, not re-fixed here: OSWE-135 (torn reviewThreads
-read → spurious `unhandled_condition`; benign, re-watch) and OSWE-136 (hung network read;
-the wrapper's heartbeat detects it, kills the monitor, surfaces the missed wake itself, and
-records an `[ISSUE]` entry).
+The wrapper passes a run-stable comment watermark and `--until-wake` to `wave-monitor`, so a
+child restart resumes from the last successfully classified poll instead of adopting a fresh
+baseline. OSWE-135 remains a known sharp edge (torn reviewThreads read → spurious
+`unhandled_condition`; benign, re-watch); poll deadlines handle the OSWE-136 hung-read path.
 
 ## 3. The plan gate — adjudicate it yourself, at full weight
 
@@ -236,9 +236,9 @@ scripts/openswe-run log --ticket OSWE-123 --issue "what happened, with the exact
 
 ## Sharp edges worth knowing
 
-- Dispatch, approval, and watch must run under the **same** `LINEAR_API_KEY` identity —
-  self-suppression of your own comments is keyed to that viewer; mixing keys turns your own
-  approvals into wake noise.
+- Plan, blocker, and closeout selection is content-typed rather than viewer-typed. Only explicit
+  `@openswe` operator actions are self-suppressed, so supported Linear actor identities may vary
+  within one product workflow.
 - Linear exposes no read API for the workspace app grant, so `env` cannot preflight a stripped
   `app:mentionable`; posting commands self-diagnose that failure and print the full-scope mint
   recovery.

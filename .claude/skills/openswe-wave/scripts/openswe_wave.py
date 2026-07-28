@@ -99,6 +99,30 @@ def read_json(path: str | Path) -> Any:
     return json.loads(Path(path).read_text())
 
 
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def load_known_ids(path: str | None) -> set[str] | None:
+    if not path:
+        return None
+    target = Path(path)
+    if not target.exists():
+        return None
+    payload = read_json(target)
+    if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+        raise WaveOpsError(f"known ids file {target} must contain a JSON string array")
+    return set(payload)
+
+
+def save_known_ids(path: str | None, known_ids: set[str]) -> None:
+    if path:
+        _atomic_write_json(Path(path), sorted(known_ids))
+
+
 def derive_linear_thread_id(issue_id: str) -> str:
     """Derive the production Linear thread ID from a normalized issue ID."""
     value = hashlib.sha256(f"linear-issue:{issue_id}".encode()).hexdigest()
@@ -855,13 +879,13 @@ def event_fingerprint(event: dict[str, Any]) -> str:
 
 
 def replay_events(events: Sequence[dict[str, Any]], session_user_id: str) -> dict[str, Any]:
-    """Replay recorded observations with self suppression and per-poll coalescing."""
+    """Replay recorded observations with scoped operator-action suppression."""
     grouped: dict[str, list[dict[str, Any]]] = {}
     order: list[str] = []
     suppressed = 0
     ignored = 0
     for index, event in enumerate(events):
-        if event.get("author_id") == session_user_id:
+        if event.get("kind") == "operator_action":
             suppressed += 1
             continue
         node = _event_node(event)
@@ -897,19 +921,28 @@ def replay_events(events: Sequence[dict[str, Any]], session_user_id: str) -> dic
     }
 
 
+def is_plan_comment(body: str) -> bool:
+    return bool(re.search(r"(?im)^## plan(?:\s*:|\s*$)", body))
+
+
+def is_operator_action_comment(body: str) -> bool:
+    return bool(re.match(r"(?is)^\s*@openswe\b", body))
+
+
 def _is_blocker_comment(body: str) -> bool:
     """Return whether a comment reports a blocker and a stopped delivery attempt."""
     normalized = " ".join(body.lower().split())
     blocked = bool(
         re.search(
-            r"\b(?:delivery|execution)(?: retry)? "
-            r"(?:is |is still |remains |has )?(?:blocked|failed)\b",
+            r"\b(?:delivery|execution|run|[a-z]+-\d+)\b.{0,160}"
+            r"\b(?:blocked|failed|cannot safely|can't safely)\b",
             normalized,
         )
         or re.search(
             r"\bpush(?:ing)?\b.{0,160}\b(?:failed|returns? 403|denied)\b",
             normalized,
         )
+        or "resource not accessible by integration" in normalized
     )
     stopped = any(
         marker in normalized
@@ -918,6 +951,8 @@ def _is_blocker_comment(body: str) -> bool:
             "holding without retries",
             "no pr was opened",
             "no pr opened",
+            "opened no",
+            "made no mutation",
             "cannot continue",
             "can't continue",
             "unable to continue",
@@ -928,8 +963,49 @@ def _is_blocker_comment(body: str) -> bool:
     return blocked and stopped
 
 
+def _review_comment_kind(body: str) -> str | None:
+    normalized = " ".join(body.lower().split())
+    if "open swe review complete" in normalized:
+        match = re.search(r"\b(\d+) findings?\b", normalized)
+        return "review_findings" if match and int(match.group(1)) else "review_complete"
+    if re.search(r"\breview findings(?: posted| remain|:)\b", normalized):
+        return "review_findings"
+    return None
+
+
+def _terminal_closeout_kind(body: str, issue: dict[str, Any] | None) -> str | None:
+    issue = issue or {}
+    state = issue.get("state") or {}
+    state_type = str(state.get("type") or "").lower()
+    if state_type not in {"completed", "canceled"}:
+        return None
+    identifier = str(issue.get("identifier") or "").lower()
+    normalized = " ".join(body.lower().split())
+    if identifier and identifier not in normalized:
+        return None
+    closeout = any(
+        marker in normalized
+        for marker in (
+            "verification is complete",
+            "verified complete",
+            "supervisor closeout verification",
+        )
+    )
+    if not closeout:
+        return None
+    if state_type == "canceled":
+        return "closed"
+    merged = bool(
+        re.search(r"\b(?:merged|merge sha|merge-sha|mergify merged|protected merge)\b", normalized)
+    )
+    return "merged" if merged else "closed"
+
+
 def comments_to_events(
-    comments: Sequence[dict[str, Any]], session_user_id: str, known_ids: set[str]
+    comments: Sequence[dict[str, Any]],
+    session_user_id: str,
+    known_ids: set[str],
+    issue: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize new Linear comments into monitor observations."""
     events = []
@@ -941,10 +1017,16 @@ def comments_to_events(
         lower = body.lower()
         user = comment.get("user") or {}
         kind = "progress"
-        if re.search(r"(?im)^## plan(?:\s*:|\s*$)", body):
+        if is_plan_comment(body):
             kind = "plan_posted"
+        elif is_operator_action_comment(body):
+            kind = "operator_action"
         elif _is_blocker_comment(body):
             kind = "run_blocked"
+        elif review_kind := _review_comment_kind(body):
+            kind = review_kind
+        elif terminal_kind := _terminal_closeout_kind(body, issue):
+            kind = terminal_kind
         elif "wasn't able to finish" in lower or "unexpected error" in lower:
             kind = "run_error"
         events.append(
@@ -952,12 +1034,59 @@ def comments_to_events(
                 "source": "linear",
                 "poll_id": comment.get("createdAt") or comment_id,
                 "kind": kind,
+                "comment_id": comment_id,
                 "author_id": user.get("id"),
                 "summary": " ".join(body.split())[:300],
                 "session_user_id": session_user_id,
             }
         )
     return events
+
+
+def terminal_linear_state_event(
+    snapshot: dict[str, Any], emitted_states: set[str], known_ids: set[str]
+) -> dict[str, Any] | None:
+    issue = snapshot.get("linear", {}).get("issue") or {}
+    comments = (issue.get("comments") or {}).get("nodes") or []
+    for comment in reversed(comments):
+        kind = _terminal_closeout_kind(str(comment.get("body") or ""), issue)
+        state = {"merged": "MERGED", "closed": "CLOSED"}.get(str(kind))
+        marker = f"linear-terminal:{state}:{comment.get('id')}"
+        if not state or state in emitted_states or marker in known_ids:
+            continue
+        return {
+            "kind": kind,
+            "source": "linear",
+            "author_id": (comment.get("user") or {}).get("id"),
+            "summary": " ".join(str(comment.get("body") or "").split())[:300],
+            "comment_id": comment.get("id"),
+            "known_id": marker,
+        }
+    return None
+
+
+def advance_known_ids(
+    known_ids: set[str],
+    comments: Sequence[dict[str, Any]],
+    comment_events: Sequence[dict[str, Any]],
+    wakes: Sequence[dict[str, Any]],
+    until_wake: bool,
+) -> None:
+    observed = {str(item.get("id")) for item in comments if item.get("id")}
+    if not until_wake or not wakes:
+        known_ids.update(observed)
+        return
+    actionable = {
+        str(event.get("comment_id"))
+        for event in comment_events
+        if event.get("comment_id") and _event_node(event) is not None
+    }
+    known_ids.update(observed - actionable)
+    for event in wakes[0].get("evidence") or []:
+        if event.get("comment_id"):
+            known_ids.add(str(event["comment_id"]))
+        if event.get("known_id"):
+            known_ids.add(str(event["known_id"]))
 
 
 def terminal_pr_state_event(
@@ -1848,19 +1977,26 @@ def cmd_watch(args: argparse.Namespace) -> int:
     viewer_id = args.session_user_id or str(
         (previous["linear"].get("viewer") or {}).get("id") or ""
     )
-    if not viewer_id:
-        raise WaveOpsError("Could not discover the Linear viewer identity; pass --session-user-id")
-    known_ids = {
-        str(item.get("id"))
-        for item in (
-            ((previous["linear"].get("issue") or {}).get("comments") or {}).get("nodes") or []
-        )
-    }
+    comments = ((previous["linear"].get("issue") or {}).get("comments") or {}).get("nodes") or []
+    known_ids_file = getattr(args, "known_ids_file", None)
+    until_wake = bool(getattr(args, "until_wake", False))
+    loaded_ids = load_known_ids(known_ids_file)
+    known_ids = loaded_ids if loaded_ids is not None else {str(item.get("id")) for item in comments}
+    if loaded_ids is None:
+        save_known_ids(known_ids_file, known_ids)
     terminal_states_emitted: set[str] = set()
-    baseline_events: list[dict[str, Any]] = []
+    baseline_comment_events = (
+        comments_to_events(comments, viewer_id, known_ids, previous["linear"].get("issue"))
+        if loaded_ids is not None
+        else []
+    )
+    baseline_events = list(baseline_comment_events)
     terminal_event = terminal_pr_state_event(previous, terminal_states_emitted)
     if terminal_event:
         baseline_events.append(terminal_event)
+    linear_terminal = terminal_linear_state_event(previous, terminal_states_emitted, known_ids)
+    if linear_terminal:
+        baseline_events.append(linear_terminal)
     conflict_event = merge_conflict_event(previous)
     if conflict_event:
         baseline_events.append(conflict_event)
@@ -1871,6 +2007,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if baseline_events:
         poll_id = str(previous.get("observed_at") or "baseline")
         result = replay_events(assign_poll_id(baseline_events, poll_id), viewer_id)
+        advance_known_ids(known_ids, comments, baseline_comment_events, result["wakes"], until_wake)
+        save_known_ids(known_ids_file, known_ids)
         for wake in result["wakes"]:
             emit(wake, pretty=False)
             if wake["wake_node"] == "terminal_merged":
@@ -1879,6 +2017,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 terminal_states_emitted.add("CLOSED")
             elif wake["wake_node"] == "review_absent":
                 review_absent_emitted = True
+            if until_wake:
+                return 0
     iterations = 0
     last_recovery_fingerprint: str | None = None
     active_unhandled: set[str] = set()
@@ -1898,10 +2038,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 comments = ((current["linear"].get("issue") or {}).get("comments") or {}).get(
                     "nodes"
                 ) or []
-                events = comments_to_events(comments, viewer_id, known_ids)
+                issue = current["linear"].get("issue") or {}
+                comment_events = comments_to_events(comments, viewer_id, known_ids, issue)
+                events = list(comment_events)
                 terminal_event = terminal_pr_state_event(current, terminal_states_emitted)
                 if terminal_event:
                     events.append(terminal_event)
+                linear_terminal = terminal_linear_state_event(
+                    current, terminal_states_emitted, known_ids
+                )
+                if linear_terminal:
+                    events.append(linear_terminal)
                 events.extend(snapshot_transition_events(previous, current))
                 absent_event = review_absent_event(current, args.review_absent_seconds)
                 if absent_event and not review_absent_emitted:
@@ -1978,6 +2125,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 ]
                 active_unhandled = current_unhandled
                 result = replay_events(events, viewer_id)
+                advance_known_ids(known_ids, comments, comment_events, result["wakes"], until_wake)
+                save_known_ids(known_ids_file, known_ids)
                 for wake in result["wakes"]:
                     emit(wake, pretty=False)
                     if wake["wake_node"] == "terminal_merged":
@@ -1986,7 +2135,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         terminal_states_emitted.add("CLOSED")
                     elif wake["wake_node"] == "review_absent":
                         review_absent_emitted = True
-                known_ids.update(str(item.get("id")) for item in comments)
+                    if until_wake:
+                        return 0
                 previous = current
                 last_poll_error = None
         except Exception as exc:
@@ -2090,6 +2240,8 @@ def parser() -> argparse.ArgumentParser:
     watch.add_argument("--pr-number", type=int)
     watch.add_argument("--apply", action="store_true")
     watch.add_argument("--session-user-id")
+    watch.add_argument("--known-ids-file")
+    watch.add_argument("--until-wake", action="store_true")
     watch.add_argument("--interval", type=float, default=60)
     watch.add_argument("--iterations", type=int, default=0)
     watch.add_argument("--run-stall-seconds", type=int, default=1800)

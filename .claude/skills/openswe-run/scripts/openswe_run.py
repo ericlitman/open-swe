@@ -198,6 +198,11 @@ def log_path(ticket: str, *, new_run: bool = False) -> Path:
     return path
 
 
+def known_ids_path(ticket: str) -> Path:
+    run_log = log_path(ticket)
+    return run_log.with_name(f"{run_log.stem}-known-comment-ids.json")
+
+
 def dogfood(ticket: str, tag: str, text: str) -> None:
     """Append one evidence line to the run's dogfood log."""
     path = log_path(ticket)
@@ -1173,7 +1178,11 @@ def _spawn_monitor(args: argparse.Namespace, issue_id: str) -> tuple[subprocess.
         args.repo,
         "--interval",
         str(args.interval),
+        "--known-ids-file",
+        str(known_ids_path(args.ticket)),
     ]
+    if not args.follow:
+        command.append("--until-wake")
     if args.pr_number:
         command.extend(["--pr-number", str(args.pr_number)])
     process = subprocess.Popen(
@@ -1241,7 +1250,6 @@ def _recover_langgraph_endpoint(ticket: str, issue: dict, issue_id: str) -> bool
 def cmd_watch(args: argparse.Namespace) -> int:
     """Exit-on-first-wake watch. Healthy monitors are silent; wakes are one JSON line."""
     ensure_env(args.ticket, langgraph=True, github=True)
-    wave = import_wave_module()
     issue = resolve_issue(args.ticket)
     bundle_identifiers(
         args.ticket,
@@ -1250,20 +1258,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
     )
     issue_id = issue["id"]
     timeout_min = watch_timeout_min(args)
-    baseline = linear_snapshot(issue_id)
-    viewer_id = str((baseline["viewer"] or {}).get("id") or "")
-    if not viewer_id:
-        raise RunError("Could not discover the Linear viewer identity for self-suppression")
-    known_ids = {str(comment.get("id")) for comment in baseline["comments"]}
+    watermark = known_ids_path(args.ticket)
     dogfood(
         args.ticket,
         "cmd",
         f"watch started (phase {args.phase}, interval {args.interval}s, timeout {timeout_min}m, "
-        f"baseline {len(known_ids)} comments)",
+        f"watermark {watermark})",
     )
     process, stderr_tail = _spawn_monitor(args, issue_id)
     deadline = time.monotonic() + timeout_min * 60
-    next_heartbeat = time.monotonic() + args.heartbeat_min * 60
     restarts = 0
     buffered = ""
     while True:
@@ -1338,35 +1341,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
             process, stderr_tail = _spawn_monitor(args, issue_id)
             continue
 
-        if time.monotonic() >= next_heartbeat:
-            next_heartbeat = time.monotonic() + args.heartbeat_min * 60
-            snapshot = linear_snapshot(issue_id)
-            events = wave.comments_to_events(snapshot["comments"], viewer_id, known_ids)
-            result = wave.replay_events(events, viewer_id)
-            fresh_wakes = result.get("wakes") or []
-            if fresh_wakes:
-                # The child should have printed these within ~2 poll intervals. If we
-                # see them first, the child is wedged (OSWE-136 signature): kill it,
-                # surface the wake ourselves, and leave the evidence in the log.
-                oldest = min(
-                    str(event.get("poll_id") or "")
-                    for wake in fresh_wakes
-                    for event in wake["evidence"]
-                )
-                dogfood(
-                    args.ticket,
-                    "ISSUE",
-                    f"wrapper heartbeat saw wake-worthy comments (oldest {oldest}) that "
-                    f"wave-monitor did not report within {args.heartbeat_min}m — presumed "
-                    f"hung network read (OSWE-136); killed and surfaced wake from wrapper",
-                )
-                process.terminate()
-                _emit_wake(args.ticket, fresh_wakes[0], "wrapper-reconcile")
-                if not args.follow:
-                    return 0
-                process, stderr_tail = _spawn_monitor(args, issue_id)
-            known_ids.update(str(comment.get("id")) for comment in snapshot["comments"])
-
 
 def cmd_plan(args: argparse.Namespace) -> int:
     ensure_env(args.ticket, langgraph=False, github=False)
@@ -1377,7 +1351,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         primary_issue_id=str(issue["id"]),
     )
     snapshot = linear_snapshot(issue["id"])
-    viewer_id = str((snapshot["viewer"] or {}).get("id") or "")
+    wave = import_wave_module()
     comments = sorted(
         snapshot["comments"],
         key=lambda comment: (str(comment.get("createdAt") or ""), str(comment.get("id") or "")),
@@ -1387,19 +1361,19 @@ def cmd_plan(args: argparse.Namespace) -> int:
     for index, comment in enumerate(comments):
         if dispatch.match(str(comment.get("body") or "")):
             start = index + 1
-    others = [
+    plans = [
         comment
         for comment in comments[start:]
-        if str((comment.get("user") or {}).get("id")) != viewer_id
+        if wave.is_plan_comment(str(comment.get("body") or ""))
     ]
     if args.last is not None:
-        others = others[-args.last :]
-    for comment in others:
+        plans = plans[-args.last :]
+    for comment in plans:
         user = (comment.get("user") or {}).get("name")
         print(f"----- {user} at {comment.get('createdAt')} -----")
         print(comment.get("body") or "")
-    if not others:
-        print("(no non-viewer comments yet)")
+    if not plans:
+        print("(no plan comments yet)")
     return 0
 
 
@@ -1730,7 +1704,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--follow", action="store_true", help="stream wakes instead of exiting")
     watch.set_defaults(func=cmd_watch)
 
-    plan = sub.add_parser("plan", help="print recent non-viewer comments (the posted plan)")
+    plan = sub.add_parser("plan", help="print durable plan comments from the current dispatch")
     plan.add_argument("--ticket", required=True)
     plan.add_argument("--last", type=int)
     plan.set_defaults(func=cmd_plan)
