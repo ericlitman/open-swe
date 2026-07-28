@@ -5,6 +5,16 @@ description: Dispatch one Open SWE ticket or one atomic ticket bundle via the @o
 
 # openswe-run: execute one ticket or atomic bundle
 
+## Loading contract
+
+At invocation, load only this `SKILL.md`. Treat every file under `scripts/*` as a black-box CLI: run it and consume its output, but never read it into context. Both `scripts/openswe_run.py` and the sibling wave engine `../openswe-wave/scripts/openswe_wave.py` are implementation details; reading either is a defect, not diligence.
+
+Load references only at their workflow event:
+
+- Read `references/run-templates.md` only when composing the relevant dispatch, approval, rejection, or other operator comment.
+- Read `../openswe-wave/references/adjudication-checklist.md` only after `plan_posted`, when adjudicating the plan.
+- Read `../openswe-wave/references/recovery-runbook.md` only after a stall, merge conflict, queue stall, or other recovery event.
+
 Single-run sibling of `openswe-wave`. Dispatch → watch → adjudicate plan → watch → report. A bundle remains one run: the first ticket is primary, included tickets share its Linear thread, branch, plan, PR, and monitor.
 Use `openswe-bundle` first when deciding whether tickets belong in one atomic run or separate waves.
 Run state changes go through an `@openswe` Linear comment (the product path — runs stay
