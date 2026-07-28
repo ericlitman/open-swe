@@ -29,7 +29,10 @@ def _issue_data(*, user_email: str | None, user_name: str = "Zhen") -> dict:
 
 
 def _run_process(
-    issue_data: dict, repo_config: dict[str, str]
+    issue_data: dict,
+    repo_config: dict[str, str],
+    *,
+    plan_status: str | None = None,
 ) -> tuple[dict, dict, str | None, object]:
     captured: dict[str, Any] = {}
 
@@ -75,6 +78,12 @@ def _run_process(
         patch.object(
             linear_webhook.common, "resolve_login_from_email_async", side_effect=fake_resolve_login
         ),
+        patch.object(
+            linear_webhook,
+            "get_plan_content",
+            new_callable=AsyncMock,
+            return_value={"status": plan_status} if plan_status else None,
+        ),
         patch.object(linear_webhook.common, "dispatch_agent_run", side_effect=fake_dispatch),
         patch.object(
             linear_webhook.common, "upsert_agent_thread_owner_metadata", side_effect=fake_upsert
@@ -101,6 +110,27 @@ def test_linear_configurable_carries_github_login() -> None:
     assert configurable["source"] == "linear"
     assert configurable["github_login"] == "zhen"
     assert configurable["user_email"] == "zhen@example.com"
+
+
+def test_linear_approved_plan_dispatches_gate_bypass() -> None:
+    configurable, _upsert, _email, _content = _run_process(
+        _issue_data(user_email="zhen@example.com"),
+        {"owner": "langchain-ai", "name": "open-swe"},
+        plan_status="approved",
+    )
+
+    assert configurable["plan_gate_bypass"] is True
+
+
+def test_linear_non_approved_plan_keeps_existing_gate() -> None:
+    for plan_status in (None, "ready", "revising", "cancelled"):
+        configurable, _upsert, _email, _content = _run_process(
+            _issue_data(user_email="zhen@example.com"),
+            {"owner": "langchain-ai", "name": "open-swe"},
+            plan_status=plan_status,
+        )
+
+        assert "plan_gate_bypass" not in configurable
 
 
 def test_linear_upsert_tags_thread_with_login() -> None:

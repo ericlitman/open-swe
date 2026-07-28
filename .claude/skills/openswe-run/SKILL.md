@@ -22,36 +22,30 @@ operator-observable in the dashboard). Never create, resume, or mutate LangGraph
 SDK/API; read-only status queries are what the bundled monitor already does for you.
 
 The exceptions are `approve` and `reject`, which transition the plan record before they
-comment. A comment alone makes the agent act but never transitions the plan, so the product
-computes the run merge-ineligible: the PR is opened as a **draft** and auto-merge is **never
-armed**, and neither documented recovery covers that state. They therefore perform the same
-plan-store transitions the dashboard's approve/reject endpoints perform — `approved` and
-`revising` — and only then post the comment. Order matters: eligibility is resolved at run
-creation and re-checked when the PR is opened, so a later write is too late.
+comment. A comment alone makes the agent act but never transitions the plan, so they perform
+the same plan-store transitions as the dashboard — `approved` and `revising` — and only then
+post the comment. Order matters: the Linear webhook reads the record when dispatching, and PR
+creation re-checks it, so a later write is too late.
 
 Both fail closed. Everything that can refuse the operation — issue lookup, the placeholder
 guard, the adjudication flag — runs *before* the write, because the write is not rolled back;
 and the write itself refuses a thread with no stored plan, or a `shared`/`cancelled` one, as
 the dashboard does. `reject` returns the record to `revising` so a rejection posted after an
-approval cannot leave a rejected plan armed for auto-merge.
+approval cannot leave standing implementation authorization.
 
-Auto-merge depends on team settings the skill does not control, and today **only
-`auto_merge_mode=always` works through this comment path**. The plan-gated mode is a trap in
-both positions:
+Plan-gated automatic merge now works through this comment path when team settings use
+`auto_merge_mode=on_plan_approval` with `require_plan_approval=true`. After `approve` stores
+the `approved` record, the Linear webhook dispatches the comment with
+`plan_gate_bypass=True`; the server therefore resumes implementation instead of forcing
+another plan round. The approved run is merge-eligible, so a default-branch PR opens
+**born-ready** with Mergify reconciliation intent. Mergify, not Open SWE, admits and merges it
+after required checks and Open SWE Review pass. Manual ready-for-review recovery is not part
+of this path.
 
-- `on_plan_approval` with `require_plan_approval` **false** — `_auto_merge_eligible`
-  short-circuits on the second conjunct, so auto-merge can never arm, whatever this skill
-  writes to the plan record.
-- `on_plan_approval` with `require_plan_approval` **true** — the Linear webhook builds its
-  configurable with neither `plan_mode` nor `plan_gate_bypass`, so the server forces every
-  comment-dispatched run back into plan mode. The approval comment makes the agent re-plan
-  instead of implement. Only the dashboard's approve endpoint escapes this, because it
-  dispatches with `plan_gate_bypass=True`.
-
-So the plan record written by `approve`/`reject` is correct and keeps the dashboard truthful,
-but it is not what arms auto-merge today — `always` is. The write becomes load-bearing once
-the webhook path can carry a plan-gate bypass; until then, treat the plan gate as enforced by
-this skill (dispatch instruction plus the `--adjudicated` guard), not by the product.
+With `require_plan_approval=false`, `on_plan_approval` remains intentionally ineligible because
+the product plan gate is disabled. `auto_merge_mode=always` remains the ungated alternative.
+Missing, non-approved, or unavailable plan state receives no webhook bypass and follows the
+existing plan gate.
 
 All commands below are `scripts/openswe-run` relative to this skill directory. Wakes and
 results are single JSON lines; healthy monitoring is silent. Do not poll, tail, or re-check

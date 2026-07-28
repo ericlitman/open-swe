@@ -9,6 +9,7 @@ from typing import Any, cast
 import httpx
 from langchain_core.messages.content import create_text_block
 
+from ..dashboard.plan_store import PLAN_STATUS_APPROVED, get_plan_content
 from ..utils.linear import comment_on_linear_issue
 from . import common
 
@@ -302,6 +303,9 @@ async def process_linear_issue(  # noqa: PLR0912, PLR0915
         "user_email": user_email,
         "source": "linear",
     }
+    plan = await get_plan_content(thread_id)
+    if plan and plan.get("status") == PLAN_STATUS_APPROVED:
+        configurable["plan_gate_bypass"] = True
     if mapped_login:
         configurable["github_login"] = mapped_login
     if image_model_override:

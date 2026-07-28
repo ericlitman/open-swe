@@ -26,6 +26,16 @@ sys.modules[SPEC.name] = wave
 SPEC.loader.exec_module(wave)
 
 
+def test_plan_gated_auto_merge_guidance() -> None:
+    guidance = " ".join((SKILL / "SKILL.md").read_text().split())
+
+    assert "`auto_merge_mode=on_plan_approval`" in guidance
+    assert "`require_plan_approval=true`" in guidance
+    assert "`plan_gate_bypass=True`" in guidance
+    assert "born-ready" in guidance
+    assert "Manual ready-for-review recovery is not part of this path" in guidance
+
+
 def fixture(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES / name).read_text())
 

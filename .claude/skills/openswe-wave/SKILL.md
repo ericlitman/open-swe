@@ -67,6 +67,17 @@ uv run --no-project --with httpx --with langgraph-sdk python \
   --known-ids-file <persistent-path> --until-wake
 ```
 
+## Plan-gated automatic merge
+
+The working Linear-comment configuration is `auto_merge_mode=on_plan_approval` with
+`require_plan_approval=true`. Approval must transition the stored plan record to `approved`
+*before* posting the `@openswe` comment. The webhook reads that authoritative state and
+dispatches with `plan_gate_bypass=True`, so implementation resumes instead of another plan
+round. The resulting eligible default-branch PR opens **born-ready** with Mergify
+reconciliation intent; Mergify owns admission and merging after required checks and Open SWE
+Review pass. Manual ready-for-review recovery is not part of this path. Missing, non-approved,
+or unavailable plan state receives no bypass and follows the existing plan gate.
+
 ## Workflow
 
 1. Use `scripts/anchor-sweep <ref> <ticket-file>` before dispatch. Treat present/moved/missing as mechanical evidence only; inspect semantic drift yourself.
