@@ -32,6 +32,7 @@ _ACCESS_FAILURE_CODE = "github_app_access_missing_or_repo_not_found"
 _BRANCH_FAILURE_CODE = "github_pr_branch_not_visible"
 _PREFLIGHT_FAILURE_CODE = "github_pr_preflight_failed"
 _PR_UPDATE_FAILURE_CODE = "github_pr_update_failed"
+_PR_METADATA_FAILURE_CODE = "github_pr_metadata_update_failed"
 _PR_CREATED_FALSE = False
 _AUTO_MERGE_METADATA_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -177,6 +178,44 @@ def _failure_payload(
         payload["base_branch_visible"] = base_branch_visible
     if head_branch_visible is not None:
         payload["head_branch_visible"] = head_branch_visible
+    _record_open_pr_failure_telemetry(payload)
+    return payload
+
+
+def _metadata_failure_payload(
+    *,
+    owner: str,
+    repo: str,
+    head: str,
+    base: str,
+    token_kind: str,
+    pr: dict[str, Any],
+    created: bool,
+) -> dict[str, Any]:
+    number = pr.get("number")
+    url = pr.get("html_url")
+    payload = {
+        "success": False,
+        "error": (
+            f"Pull request #{number} exists at {url}, but open_pull_request could not record "
+            "its identity in thread metadata."
+        ),
+        "code": _PR_METADATA_FAILURE_CODE,
+        "recoverable_by_agent": False,
+        "owner": owner,
+        "repo": repo,
+        "head": head,
+        "base": base,
+        "token_kind": token_kind,
+        "branch_pushed": True,
+        "pr_created": created,
+        "pr_exists": True,
+        "created": created,
+        "url": url,
+        "number": number,
+        "author": (pr.get("user") or {}).get("login"),
+        "failed_step": "record_pr_metadata",
+    }
     _record_open_pr_failure_telemetry(payload)
     return payload
 
@@ -480,7 +519,7 @@ async def _fetch_pr_details(
     return data if isinstance(data, dict) else {}
 
 
-async def _record_pr_telemetry(
+async def _record_pr_metadata(
     *,
     client: httpx.AsyncClient,
     token: str,
@@ -587,7 +626,7 @@ async def _record_pr_telemetry(
                 exc_info=True,
             )
             return False
-    return seed_auto_merge_metadata and auto_merge_intent
+    return True
 
 
 async def _plan_reference_line(configurable: dict[str, Any]) -> str | None:
@@ -767,21 +806,28 @@ async def _open_pull_request(
         )
         if resp.status_code == 201:
             pr = resp.json()
-            if isinstance(pr, dict):
-                auto_merge_tracked = await _record_pr_telemetry(
-                    client=client,
-                    token=token,
+            metadata_recorded = isinstance(pr, dict) and await _record_pr_metadata(
+                client=client,
+                token=token,
+                owner=owner,
+                repo=repo,
+                head=head,
+                base=base,
+                pr=pr,
+                auto_merge_intent=auto_merge_intent,
+                seed_auto_merge_metadata=True,
+            )
+            if not metadata_recorded:
+                return _metadata_failure_payload(
                     owner=owner,
                     repo=repo,
                     head=head,
                     base=base,
-                    pr=pr,
-                    auto_merge_intent=auto_merge_intent,
-                    seed_auto_merge_metadata=True,
+                    token_kind=kind,
+                    pr=pr if isinstance(pr, dict) else {},
+                    created=True,
                 )
-            else:
-                auto_merge_tracked = False
-            effective_auto_merge = auto_merge_intent and auto_merge_tracked
+            effective_auto_merge = auto_merge_intent
             return {
                 "success": True,
                 "created": True,
@@ -790,7 +836,7 @@ async def _open_pull_request(
                 "author": (pr.get("user") or {}).get("login"),
                 "token_kind": kind,
                 "auto_merge_eligible": effective_auto_merge,
-                "auto_merge_tracked": auto_merge_tracked,
+                "auto_merge_tracked": effective_auto_merge,
             }
 
         # A PR for this head branch may already exist — return it so the agent
@@ -838,7 +884,7 @@ async def _open_pull_request(
                             branch_pushed=True,
                             failed_step="update_existing_pull_request",
                         )
-                await _record_pr_telemetry(
+                metadata_recorded = await _record_pr_metadata(
                     client=client,
                     token=token,
                     owner=owner,
@@ -847,6 +893,16 @@ async def _open_pull_request(
                     base=base,
                     pr=existing,
                 )
+                if not metadata_recorded:
+                    return _metadata_failure_payload(
+                        owner=owner,
+                        repo=repo,
+                        head=head,
+                        base=base,
+                        token_kind=kind,
+                        pr=existing,
+                        created=False,
+                    )
                 return {
                     "success": True,
                     "created": False,

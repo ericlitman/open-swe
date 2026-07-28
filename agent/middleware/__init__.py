@@ -14,6 +14,7 @@ _MIDDLEWARE_MODULES = {
     "PullRequestCreationGuardMiddleware": ".pr_creation_guard",
     "refresh_github_proxy_before_model": ".refresh_github_proxy",
     "SlackAssistantStatusMiddleware": ".refresh_slack_status",
+    "SourceCompletionGuardMiddleware": ".source_completion_guard",
     "RepairOrphanedToolCallsMiddleware": ".repair_orphaned_tool_calls",
     "SandboxCircuitBreakerMiddleware": ".sandbox_circuit_breaker",
     "SanitizeFireworksMessagesMiddleware": ".sanitize_fireworks_messages",
@@ -49,6 +50,7 @@ __all__ = [
     "WorkflowPushGuardMiddleware",
     "SandboxCircuitBreakerMiddleware",
     "SlackAssistantStatusMiddleware",
+    "SourceCompletionGuardMiddleware",
     "check_message_queue_before_model",
     "ensure_no_empty_msg",
     "notify_step_limit_reached",
@@ -75,6 +77,7 @@ if TYPE_CHECKING:
     from .sanitize_thinking_blocks import SanitizeThinkingBlocksMiddleware
     from .sanitize_tool_inputs import SanitizeToolInputsMiddleware
     from .settle_review_check import settle_review_check_on_exit
+    from .source_completion_guard import SourceCompletionGuardMiddleware
     from .subdir_agents import SubdirAgentsReadMiddleware
     from .task_retry import task_on_failure, task_retry_on
     from .timeout_wrapup import TimeoutWrapupMiddleware

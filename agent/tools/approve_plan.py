@@ -176,9 +176,8 @@ def _approved_message(
         message += "\n\nAlso take this reviewer feedback into account:\n\n" + feedback
     if auto_merge_eligible:
         message += (
-            "\n\nThis approved run is eligible for merge-on-clean. Open the PR non-draft "
-            "and, after open_pull_request reports auto_merge_eligible=true, arm only with "
-            "GH_TOKEN=dummy gh pr merge <number-or-url> --auto --squash. Never directly "
-            "merge or use --admin."
+            "\n\nThis approved run is eligible for Mergify-owned merge-on-clean. Open the PR "
+            "non-draft, but do not run gh pr merge or submit Mergify queue commands. Mergify "
+            "owns automatic queue admission and merging. Never directly merge or use --admin."
         )
     return message

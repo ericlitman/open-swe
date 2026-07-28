@@ -197,6 +197,23 @@ async def test_agent_keeps_message_queue_and_step_limit_middleware() -> None:
     present = {type(m).__name__ for m in middleware}
     assert "check_message_queue_before_model" in present
     assert "notify_step_limit_reached" in present
+    assert "SourceCompletionGuardMiddleware" in present
+
+
+@pytest.mark.asyncio
+async def test_agent_passes_github_source_target_to_completion_guard() -> None:
+    captured = await _capture_create_deep_agent_kwargs(
+        configurable={
+            "source": "github",
+            "github_issue": {"number": 17},
+        }
+    )
+    middleware = captured["middleware"]
+    assert isinstance(middleware, list)
+    completion_guard = next(
+        item for item in middleware if type(item).__name__ == "SourceCompletionGuardMiddleware"
+    )
+    assert completion_guard._github_target == ("issue", 17)
 
 
 @pytest.mark.asyncio
