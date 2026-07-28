@@ -20,7 +20,7 @@ import os
 import re
 import uuid
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from langgraph_sdk import get_client
 from langgraph_sdk.client import LangGraphClient
@@ -73,7 +73,7 @@ def _resolve_completion_webhook_url(base: str, secret: str | None) -> str | None
         return None
     if "?" in base:
         return base
-    return f"{base}?token={secret}"
+    return f"{base}?token={quote(secret, safe='')}"
 
 
 COMPLETION_WEBHOOK_URL: str | None = _resolve_completion_webhook_url(

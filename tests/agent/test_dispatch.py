@@ -38,9 +38,12 @@ def test_resolve_localhost_url_degrades_to_none() -> None:
     assert dispatch._resolve_completion_webhook_url("http://localhost/x", "s3cret") is None
 
 
-def test_resolve_absolute_url_appends_token() -> None:
+def test_resolve_absolute_url_appends_encoded_token() -> None:
+    secret = 's3cret& with "quote"'
+
     assert (
-        dispatch._resolve_completion_webhook_url(_ABSOLUTE, "s3cret") == f"{_ABSOLUTE}?token=s3cret"
+        dispatch._resolve_completion_webhook_url(_ABSOLUTE, secret)
+        == f"{_ABSOLUTE}?token=s3cret%26%20with%20%22quote%22"
     )
 
 

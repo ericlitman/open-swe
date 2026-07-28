@@ -14,7 +14,7 @@ import pytest
 import structlog
 from langgraph_api.logging import Formatter as LangGraphFormatter
 
-from agent import logging_redaction
+from agent import dispatch, logging_redaction
 
 
 @contextmanager
@@ -105,6 +105,23 @@ def test_httpx_url_is_redacted_through_logging_machinery() -> None:
         'HTTP Request: POST https://example.test/webhooks/run-complete?token=*** "HTTP/1.1 200 OK"'
         in output
     )
+
+
+def test_encoded_webhook_secret_is_fully_redacted() -> None:
+    secret = 'prefix& cleartext tail "quoted"'
+    url = dispatch._resolve_completion_webhook_url(
+        "https://example.test/webhooks/run-complete", secret
+    )
+    assert url is not None
+    _install()
+
+    with _capture("httpx", logging.Formatter("%(message)s")) as stream:
+        logging.getLogger("httpx").info("POST %s", url)
+
+    output = stream.getvalue()
+    assert "cleartext tail" not in output
+    assert "%26" not in output
+    assert "token=***" in output
 
 
 def test_webhook_structlog_success_and_failure_fields_are_redacted() -> None:
