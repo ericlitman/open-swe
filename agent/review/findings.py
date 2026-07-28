@@ -531,6 +531,25 @@ async def update_finding_surface(
     return captured.get("finding")
 
 
+def open_surfaced_finding_count(findings: list[Finding]) -> int:
+    """Count surfaced findings that still require semantic adjudication."""
+    return sum(
+        1
+        for finding in findings
+        if finding.get("status", "open") == "open"
+        and isinstance((surface := finding.get("surface")), dict)
+        and surface.get("state") in {"surfaced", "resolve_pending"}
+    )
+
+
+def finding_requires_new_head(finding: Finding, head_sha: str) -> bool:
+    """Return whether resolving this surfaced finding needs a newer head."""
+    surface = finding.get("surface")
+    surfaced_sha = surface.get("surfaced_at_sha") if isinstance(surface, dict) else None
+    baseline = finding.get("last_confirmed_sha") or surfaced_sha or finding.get("first_seen_sha")
+    return isinstance(baseline, str) and bool(baseline) and baseline == head_sha
+
+
 def pending_finding_reply_comment_ids(finding: Finding) -> set[int]:
     """Return pending human-reply comment ids for one finding."""
     interactions = finding.get("interactions")
@@ -618,7 +637,7 @@ def _coerce_surface(finding: Finding, finding_id: str) -> FindingSurface:
     else:
         coerced = {"finding_id": finding_id}
     if not coerced.get("state"):
-        if finding.get("github_thread_resolved"):
+        if finding.get("github_thread_resolved") and finding.get("status") != "open":
             coerced["state"] = "resolved"
         elif isinstance(finding.get("github_review_comment_id"), int):
             coerced["state"] = "surfaced"

@@ -425,3 +425,252 @@ def test_verify_run_complete_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert completion.verify_run_complete_token("s3cret") is True
     assert completion.verify_run_complete_token("wrong") is False
     assert completion.verify_run_complete_token(None) is False
+
+
+class _DeferredThreads:
+    def __init__(self, records: dict[str, dict[str, Any]]) -> None:
+        self.records = records
+        self.updates: list[tuple[str, dict[str, Any]]] = []
+
+    async def get(self, thread_id: str) -> dict[str, Any]:
+        return self.records[thread_id]
+
+    async def update(self, *, thread_id: str, metadata: dict[str, Any]) -> None:
+        self.updates.append((thread_id, metadata))
+
+
+class _DeferredRuns:
+    def __init__(self, runs: list[dict[str, Any]]) -> None:
+        self._runs = runs
+
+    async def list(self, thread_id: str, limit: int = 1) -> list[dict[str, Any]]:
+        return self._runs[:limit]
+
+
+class _DeferredClient:
+    def __init__(self, records: dict[str, dict[str, Any]], runs: list[dict[str, Any]]) -> None:
+        self.threads = _DeferredThreads(records)
+        self.runs = _DeferredRuns(runs)
+
+
+def _deferred_client(
+    *, findings: list[dict[str, Any]], latest_status: str, latest_run_id: str = "run-fix"
+) -> tuple[_DeferredClient, str]:
+    from agent.utils.thread_ids import generate_reviewer_thread_id
+
+    reviewer_thread_id = generate_reviewer_thread_id("acme", "widgets", 77)
+    deferred = {
+        "implementation_thread_id": "implementation-thread",
+        "implementation_run_id": "run-fix",
+        "review_check_run_id": 42,
+        "head_sha": "held-head",
+        "pr_number": 77,
+        "conclusion": "success",
+        "title": "No issues found",
+        "summary": "Open SWE reviewed this pull request and found no issues.",
+    }
+    records = {
+        "implementation-thread": {
+            "thread_id": "implementation-thread",
+            "metadata": {
+                "repo": {"owner": "acme", "name": "widgets"},
+                "pr_number": 77,
+            },
+        },
+        reviewer_thread_id: {
+            "thread_id": reviewer_thread_id,
+            "metadata": {
+                "kind": "reviewer",
+                "review_check_run_id": 42,
+                "review_check_deferred_result": deferred,
+                "pr": {"owner": "acme", "name": "widgets", "number": 77},
+                "findings": findings,
+            },
+        },
+    }
+    return _DeferredClient(
+        records, [{"run_id": latest_run_id, "status": latest_status}]
+    ), reviewer_thread_id
+
+
+@pytest.mark.asyncio
+async def test_successful_decline_only_run_releases_deferred_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, reviewer_thread_id = _deferred_client(
+        findings=[{"id": "f_declined", "status": "dismissed", "surface": {"state": "resolved"}}],
+        latest_status="success",
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        completion, "fetch_pull_request_head_sha", AsyncMock(return_value="held-head")
+    )
+    settle = AsyncMock()
+    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "implementation-thread", "run_id": "run-fix", "status": "success"}
+    )
+
+    assert result == {"status": "ok", "reason": "deferred review check settled"}
+    settle.assert_awaited_once_with(
+        thread_id=reviewer_thread_id,
+        owner="acme",
+        repo="widgets",
+        token="token",
+        conclusion="success",
+        title="No issues found",
+        summary="Open SWE reviewed this pull request and found no issues.",
+        expected_check_run_id=42,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unchanged_head_with_open_fix_fails_deferred_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true")
+    client, reviewer_thread_id = _deferred_client(
+        findings=[
+            {
+                "id": "f_fix_now",
+                "status": "open",
+                "surface": {"state": "surfaced", "surfaced_at_sha": "held-head"},
+            }
+        ],
+        latest_status="success",
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        completion, "fetch_pull_request_head_sha", AsyncMock(return_value="held-head")
+    )
+    settle = AsyncMock()
+    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+
+    await completion.handle_run_completion(
+        {"thread_id": "implementation-thread", "run_id": "run-fix", "status": "success"}
+    )
+
+    settle_args = settle.await_args
+    assert settle_args is not None
+    assert settle_args.kwargs["thread_id"] == reviewer_thread_id
+    assert settle_args.kwargs["conclusion"] == "failure"
+    assert settle_args.kwargs["title"] == "Found 1 potential issue"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_run_does_not_release_hold_while_replacement_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _reviewer_thread_id = _deferred_client(
+        findings=[], latest_status="running", latest_run_id="replacement-run"
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    token = AsyncMock(return_value="token")
+    settle = AsyncMock()
+    monkeypatch.setattr(completion, "get_github_app_installation_token", token)
+    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "implementation-thread", "run_id": "run-fix", "status": "interrupted"}
+    )
+
+    assert result["status"] == "ignored"
+    token.assert_not_awaited()
+    settle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_new_head_supersedes_deferred_check_without_settling_current_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, reviewer_thread_id = _deferred_client(findings=[], latest_status="success")
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        completion, "fetch_pull_request_head_sha", AsyncMock(return_value="new-head")
+    )
+    settle = AsyncMock()
+    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "implementation-thread", "run_id": "run-fix", "status": "success"}
+    )
+
+    assert result["status"] == "ok"
+    settle.assert_not_awaited()
+    assert client.threads.updates == []
+
+
+@pytest.mark.asyncio
+async def test_replaced_review_check_does_not_clear_newer_deferred_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, reviewer_thread_id = _deferred_client(findings=[], latest_status="success")
+    client.threads.records[reviewer_thread_id]["metadata"]["review_check_run_id"] = 43
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    token = AsyncMock(return_value="token")
+    settle = AsyncMock()
+    monkeypatch.setattr(completion, "get_github_app_installation_token", token)
+    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "implementation-thread", "run_id": "run-fix", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    token.assert_not_awaited()
+    settle.assert_not_awaited()
+    assert client.threads.updates == []
+
+
+@pytest.mark.asyncio
+async def test_deferred_settlement_failure_does_not_block_failure_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(_slack_metadata())
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(
+        completion,
+        "settle_deferred_review_check",
+        AsyncMock(side_effect=RuntimeError("boom")),
+    )
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    with pytest.raises(RuntimeError, match="Deferred review check settlement failed"):
+        await completion.handle_run_completion(
+            {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+        )
+
+    reply.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_completion_does_not_settle_replacement_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, reviewer_thread_id = _deferred_client(findings=[], latest_status="success")
+    client.threads.records[reviewer_thread_id]["metadata"]["review_check_run_id"] = 99
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    token = AsyncMock(return_value="token")
+    settle = AsyncMock()
+    monkeypatch.setattr(completion, "get_github_app_installation_token", token)
+    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "implementation-thread", "run_id": "run-fix", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    token.assert_not_awaited()
+    settle.assert_not_awaited()
+    assert client.threads.updates == []
