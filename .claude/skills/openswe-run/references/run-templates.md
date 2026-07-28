@@ -17,7 +17,7 @@ Enter plan mode first. Re-anchor all cited paths and symbols against `<ref>`, st
 
 Required scope: <scope>.
 Boundaries: <non-goals>.
-Verification: <focused tests>, `make lint`, and `make typecheck`.
+Verification: focused tests plus the repository's own lint and typecheck gates; name the exact commands in the plan.
 Code standard: smallest root-cause change; no speculative validation or layered defenses; the diff must be acceptable upstream.
 PR body: include the Linear reference and `Closes <TICKET>` as a standalone line. Let normal Open SWE Review and required CI run; do not directly merge or bypass gates.
 ```
@@ -36,7 +36,7 @@ Challenge adjudication:
 Clarifications:
 - <binding implementation clarification>
 
-Run <focused tests>, `make lint`, and `make typecheck`. Open the normal PR with the Linear reference and standalone `Closes <TICKET>`. Let Open SWE Review and required CI run; do not directly merge or bypass gates.
+Run the focused tests plus the repository's own lint and typecheck gates named in the approved plan. Open the normal PR with the Linear reference and standalone `Closes <TICKET>`. Let Open SWE Review and required CI run; do not directly merge or bypass gates.
 ```
 
 ## Reject
