@@ -192,7 +192,15 @@ query WavePrState($owner: String!, $repo: String!, $number: Int!) {
     pullRequest(number: $number) {
       id number url title createdAt state isDraft baseRefName headRefOid mergeStateStatus
       isInMergeQueue autoMergeRequest { enabledAt }
-      statusCheckRollup { state }
+      statusCheckRollup {
+        state
+        contexts(first: 100) {
+          nodes {
+            __typename
+            ... on CheckRun { name }
+          }
+        }
+      }
     }
   }
 }
@@ -205,7 +213,15 @@ query WavePr($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
     pullRequest(number: $number) {
       id number url title createdAt state isDraft baseRefName headRefOid mergeStateStatus
       isInMergeQueue autoMergeRequest { enabledAt }
-      statusCheckRollup { state }
+      statusCheckRollup {
+        state
+        contexts(first: 100) {
+          nodes {
+            __typename
+            ... on CheckRun { name }
+          }
+        }
+      }
       timelineItems(first: 100, after: $cursor, itemTypes: [CONVERT_TO_DRAFT_EVENT]) {
         nodes {
           ... on ConvertToDraftEvent {
@@ -989,7 +1005,14 @@ def review_absent_event(
 ) -> dict[str, Any] | None:
     """Return an observation when an open PR has waited too long for review."""
     pr = snapshot.get("pr") or {}
-    if pr.get("state") != "OPEN" or snapshot.get("review_ids"):
+    check_contexts = ((pr.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes") or []
+    reviewer_engaged = any(
+        isinstance(context, dict)
+        and context.get("__typename") == "CheckRun"
+        and context.get("name") == "Open SWE Review"
+        for context in check_contexts
+    )
+    if pr.get("state") != "OPEN" or snapshot.get("review_ids") or reviewer_engaged:
         return None
     created_at = _timestamp(pr.get("createdAt"))
     observed_at = _timestamp(snapshot.get("observed_at"))
