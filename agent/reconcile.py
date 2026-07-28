@@ -282,6 +282,24 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
                 head_sha = pr.get("headRefOid")
                 if not isinstance(pr_id, str) or not isinstance(head_sha, str):
                     raise RuntimeError("PR id or head SHA unavailable")
+                labels = pr.get("labels")
+                nodes = labels.get("nodes", []) if isinstance(labels, dict) else []
+                held = metadata.get("merge_hold_requested") is True or any(
+                    isinstance(node, dict) and node.get("name") == "hold-merge" for node in nodes
+                )
+                if held:
+                    if pr.get("isDraft") is not True:
+                        await _graphql(github, _CONVERT_TO_DRAFT, {"pullRequestId": pr_id})
+                        counts["held_drafted"] += 1
+                    await _update_phase(
+                        langgraph,
+                        thread_id,
+                        auto_merge_phase="held",
+                        auto_merge_phase_at=now.isoformat(),
+                        auto_merge_head_sha=head_sha,
+                    )
+                    counts["held"] += 1
+                    continue
                 try:
                     checks = await _mergify_checks(github, owner, repo, head_sha)
                 except Exception:
@@ -310,24 +328,6 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
                         auto_merge_head_sha=head_sha,
                     )
                     counts[mergify_state] += 1
-                    continue
-                labels = pr.get("labels")
-                nodes = labels.get("nodes", []) if isinstance(labels, dict) else []
-                held = metadata.get("merge_hold_requested") is True or any(
-                    isinstance(node, dict) and node.get("name") == "hold-merge" for node in nodes
-                )
-                if held:
-                    if pr.get("isDraft") is not True:
-                        await _graphql(github, _CONVERT_TO_DRAFT, {"pullRequestId": pr_id})
-                        counts["held_drafted"] += 1
-                    await _update_phase(
-                        langgraph,
-                        thread_id,
-                        auto_merge_phase="held",
-                        auto_merge_phase_at=now.isoformat(),
-                        auto_merge_head_sha=head_sha,
-                    )
-                    counts["held"] += 1
                     continue
                 await _update_phase(
                     langgraph,

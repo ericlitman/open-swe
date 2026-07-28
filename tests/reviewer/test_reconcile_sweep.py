@@ -342,21 +342,25 @@ async def test_auto_merge_records_merged_pr_without_reading_queue(
     checks.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "checks",
+    [RuntimeError("Mergify unavailable"), _checks(head_sha="old-head")],
+    ids=["outage", "stale-head"],
+)
 @pytest.mark.asyncio
-async def test_auto_merge_hold_returns_exact_head_pr_to_draft(
+async def test_auto_merge_hold_returns_exact_head_pr_to_draft_before_mergify_state(
     monkeypatch: pytest.MonkeyPatch,
+    checks: dict[str, dict[str, Any]] | Exception,
 ) -> None:
     threads = _FakeThreads([[_auto_merge_thread(merge_hold_requested=True)]])
-    queries = _patch_auto_merge(
-        monkeypatch,
-        threads,
-        checks=_checks(queue_status="in_progress", queue_conclusion=None),
-    )
+    queries = _patch_auto_merge(monkeypatch, threads, checks=checks)
 
     counts = await reconcile.reconcile_auto_merge_prs()
 
     assert counts["held"] == 1
     assert counts["held_drafted"] == 1
+    assert counts["backend_unavailable"] == 0
+    assert counts["stale_head"] == 0
     assert _last_phase(threads) == "held"
     assert queries == [reconcile._AUTO_MERGE_QUERY, reconcile._CONVERT_TO_DRAFT]
 
