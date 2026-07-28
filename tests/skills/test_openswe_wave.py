@@ -30,6 +30,91 @@ def fixture(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES / name).read_text())
 
 
+def test_disposable_probe_fixture_retains_control_and_history_cleanliness(
+    tmp_path: Path,
+) -> None:
+    recorded = fixture("oswe-169-disposable-probe.json")
+    automation = recorded["automation"]
+    required = recorded["required_checks"]
+    queue_when = automation["queue_when"]
+    assert automation["source"] == ".mergify.yml"
+    assert automation["suppression"] == "draft"
+    assert queue_when == {"required_checks": "SUCCESS", "draft": False}
+
+    def auto_queued(state: dict[str, Any]) -> bool:
+        checks_match = all(
+            state["checks"][name] == queue_when["required_checks"] for name in required
+        )
+        return checks_match and state["isDraft"] is queue_when["draft"]
+
+    control_before, control_after = recorded["non_draft_control"]
+    assert not auto_queued(control_before)
+    assert auto_queued(control_after)
+    assert control_after["event"] == "required_checks_succeeded"
+    assert control_after["isInMergeQueue"] is True
+
+    probe_open, probe_green, probe_closed = recorded["draft_probe"]
+    assert probe_open["isDraft"] is True
+    assert all(probe_green["checks"][name] == "SUCCESS" for name in required)
+    assert probe_green["mergeable"] == "MERGEABLE"
+    assert probe_green["isDraft"] is True
+    assert not auto_queued(probe_green)
+    assert probe_green["isInMergeQueue"] is False
+    assert probe_green["autoMergeRequest"] is None
+    assert probe_green["merged"] is False
+    assert {state["headRefOid"] for state in recorded["draft_probe"]} == {"probe-head-169"}
+    assert probe_closed["state"] == "CLOSED"
+    assert probe_closed["isDraft"] is True
+    assert probe_closed["isInMergeQueue"] is False
+    assert probe_closed["autoMergeRequest"] is None
+    assert probe_closed["merged"] is False
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+
+    git("config", "user.name", "Probe Test")
+    git("config", "user.email", "probe@example.com")
+    (repo / "tracked").write_text("base\n")
+    git("add", "tracked")
+    git("commit", "-m", "base")
+    git("switch", "-c", "probe")
+    (repo / ".review-gate-probe").write_text("probe\n")
+    git("add", ".review-gate-probe")
+    git("commit", "-m", "probe")
+    probe_sha = git("rev-parse", "HEAD").stdout.strip()
+
+    git("switch", "main")
+    git("branch", "-D", "probe")
+
+    assert git("branch", "--list", "probe").stdout == ""
+    assert not (repo / ".review-gate-probe").exists()
+    assert git("merge-base", "--is-ancestor", probe_sha, "main", check=False).returncode == 1
+    assert set(recorded["operator_output"]) == {
+        "suppression",
+        "merge_state_evidence",
+        "tree_cleanup",
+        "history_cleanup",
+        "deviation",
+    }
+    assert all(recorded["operator_output"].values())
+
+    procedure = (SKILL / "references/disposable-probe-safety.md").read_text()
+    assert "Abort before creating a branch or PR" in procedure
+    assert "ready for review and never arm auto-merge" in procedure
+    assert "Tree cleanliness" in procedure
+    assert "History cleanliness" in procedure
+    assert "close the PR. Record the deviation" in procedure
+    assert "A merged probe fails the close-unmerged requirement permanently" in procedure
+
+
 def _watch_snapshot(
     state: str | None,
     *,

@@ -69,6 +69,7 @@ uv run --no-project --with httpx --with langgraph-sdk python \
 ## Workflow
 
 1. Use `scripts/anchor-sweep <ref> <ticket-file>` before dispatch. Treat present/moved/missing as mechanical evidence only; inspect semantic drift yourself.
+   For a disposable merge-gate probe, complete `references/disposable-probe-safety.md` before creating its branch or PR.
 2. Use the templates in `references/comment-templates.md` for dispatch, approval, spot-audit, closeout, and the OSWE-100 tally.
 3. Apply `references/adjudication-checklist.md` before approving a plan.
 4. Start the quiet monitor after dispatch:

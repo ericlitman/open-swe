@@ -1,0 +1,93 @@
+{
+  "automation": {
+    "source": ".mergify.yml",
+    "queue_when": {
+      "required_checks": "SUCCESS",
+      "draft": false
+    },
+    "suppression": "draft"
+  },
+  "required_checks": [
+    "verify",
+    "Open SWE Review"
+  ],
+  "non_draft_control": [
+    {
+      "event": "opened",
+      "observed_at": "2026-07-28T04:00:00Z",
+      "isDraft": false,
+      "checks": {
+        "verify": "PENDING",
+        "Open SWE Review": "PENDING"
+      },
+      "isInMergeQueue": false
+    },
+    {
+      "event": "required_checks_succeeded",
+      "observed_at": "2026-07-28T04:01:00Z",
+      "isDraft": false,
+      "checks": {
+        "verify": "SUCCESS",
+        "Open SWE Review": "SUCCESS"
+      },
+      "isInMergeQueue": true
+    }
+  ],
+  "draft_probe": [
+    {
+      "event": "opened",
+      "observed_at": "2026-07-28T04:00:00Z",
+      "state": "OPEN",
+      "isDraft": true,
+      "checks": {
+        "verify": "PENDING",
+        "Open SWE Review": "PENDING"
+      },
+      "mergeable": "MERGEABLE",
+      "mergeStateStatus": "BLOCKED",
+      "isInMergeQueue": false,
+      "autoMergeRequest": null,
+      "merged": false,
+      "headRefOid": "probe-head-169"
+    },
+    {
+      "event": "required_checks_succeeded",
+      "observed_at": "2026-07-28T04:01:00Z",
+      "state": "OPEN",
+      "isDraft": true,
+      "checks": {
+        "verify": "SUCCESS",
+        "Open SWE Review": "SUCCESS"
+      },
+      "mergeable": "MERGEABLE",
+      "mergeStateStatus": "BLOCKED",
+      "isInMergeQueue": false,
+      "autoMergeRequest": null,
+      "merged": false,
+      "headRefOid": "probe-head-169"
+    },
+    {
+      "event": "closed_unmerged",
+      "observed_at": "2026-07-28T04:01:01Z",
+      "state": "CLOSED",
+      "isDraft": true,
+      "checks": {
+        "verify": "SUCCESS",
+        "Open SWE Review": "SUCCESS"
+      },
+      "mergeable": "UNKNOWN",
+      "mergeStateStatus": "UNKNOWN",
+      "isInMergeQueue": false,
+      "autoMergeRequest": null,
+      "merged": false,
+      "headRefOid": "probe-head-169"
+    }
+  ],
+  "operator_output": {
+    "suppression": ".mergify.yml -draft predicate; draft reviews verified; draft retained",
+    "merge_state_evidence": "required checks SUCCESS; MERGEABLE; draft is remaining hold; never queued",
+    "tree_cleanup": "probe path and content absent from the default branch",
+    "history_cleanup": "closed unmerged; branch deleted; probe commit absent from default ancestry",
+    "deviation": "none"
+  }
+}
