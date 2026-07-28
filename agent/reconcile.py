@@ -1,4 +1,4 @@
-"""Reconcile stale runs and eligible agent PRs that have not reached the merge queue."""
+"""Reconcile stale runs and Mergify-owned automatic merges."""
 
 from __future__ import annotations
 
@@ -14,42 +14,26 @@ from .utils.thread_ops import langgraph_client
 
 logger = logging.getLogger(__name__)
 _SEARCH_PAGE_SIZE = 100
-_AUTO_MERGE_ALERT_MARKER = "<!-- open-swe-auto-merge-reconcile -->"
+_MERGIFY_APP_SLUG = "mergify"
+_MERGIFY_PROTECTIONS_CHECK = "Mergify Merge Protections"
+_MERGIFY_QUEUE_CHECK = "Mergify Merge Queue"
+_MERGIFY_CHECK_NAMES = {_MERGIFY_PROTECTIONS_CHECK, _MERGIFY_QUEUE_CHECK}
 
 _AUTO_MERGE_QUERY = """
 query AutoMergeReconcile($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     defaultBranchRef { name }
     pullRequest(number: $number) {
-      id url state isDraft baseRefName headRefName headRefOid
-      mergeStateStatus isInMergeQueue
-      autoMergeRequest { enabledAt }
+      id state isDraft baseRefName headRefOid
       labels(first: 100) { nodes { name } }
-      statusCheckRollup { state }
     }
   }
 }
 """
-_ENABLE_AUTO_MERGE = """
-mutation EnableAutoMerge($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) {
-  enablePullRequestAutoMerge(input: {
-    pullRequestId: $pullRequestId
-    mergeMethod: SQUASH
-    expectedHeadOid: $expectedHeadOid
-  }) { pullRequest { id headRefOid autoMergeRequest { enabledAt } } }
-}
-"""
-_DISABLE_AUTO_MERGE = """
-mutation DisableAutoMerge($pullRequestId: ID!) {
-  disablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId }) {
-    pullRequest { id autoMergeRequest { enabledAt } }
-  }
-}
-"""
-_DEQUEUE_PULL_REQUEST = """
-mutation DequeuePullRequest($pullRequestId: ID!) {
-  dequeuePullRequest(input: { id: $pullRequestId }) {
-    pullRequest { id isInMergeQueue }
+_CONVERT_TO_DRAFT = """
+mutation ConvertPullRequestToDraft($pullRequestId: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $pullRequestId }) {
+    pullRequest { id isDraft headRefOid }
   }
 }
 """
@@ -155,33 +139,52 @@ async def _update_phase(client: Any, thread_id: str, **metadata: Any) -> None:
     await client.threads.update(thread_id=thread_id, metadata=metadata)
 
 
-async def _post_alert(
-    client: httpx.AsyncClient, owner: str, repo: str, number: int, reason: str
-) -> None:
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{number}/comments"
-    page = 1
-    while True:
-        response = await github_request(client, "GET", url, params={"per_page": 100, "page": page})
-        response.raise_for_status()
-        comments = response.json()
-        if isinstance(comments, list) and any(
-            _AUTO_MERGE_ALERT_MARKER in str(comment.get("body", ""))
-            for comment in comments
-            if isinstance(comment, dict)
-        ):
-            return
-        if not isinstance(comments, list) or len(comments) < 100:
-            break
-        page += 1
-    body = (
-        "Open SWE could not converge this eligible PR to the merge queue automatically.\n\n"
-        f"Reason: `{reason}`.\n\n"
-        "The reconciler did not ready, directly merge, or bypass any required check. "
-        "Review the PR state, the `hold-merge` label, and repository merge-queue settings.\n\n"
-        f"{_AUTO_MERGE_ALERT_MARKER}"
+async def _mergify_checks(
+    client: httpx.AsyncClient, owner: str, repo: str, head_sha: str
+) -> dict[str, dict[str, Any]]:
+    response = await github_request(
+        client,
+        "GET",
+        f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+        params={"filter": "latest", "per_page": 100},
     )
-    response = await github_request(client, "POST", url, json={"body": body})
     response.raise_for_status()
+    payload = response.json()
+    runs = payload.get("check_runs") if isinstance(payload, dict) else None
+    if not isinstance(runs, list):
+        raise RuntimeError("GitHub check-runs response missing check_runs")
+    checks: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        if not isinstance(run, dict) or run.get("name") not in _MERGIFY_CHECK_NAMES:
+            continue
+        app = run.get("app")
+        if not isinstance(app, dict) or app.get("slug") != _MERGIFY_APP_SLUG:
+            continue
+        checks.setdefault(str(run["name"]), run)
+    return checks
+
+
+def _mergify_state(checks: dict[str, dict[str, Any]], head_sha: str) -> str:
+    protections = checks.get(_MERGIFY_PROTECTIONS_CHECK)
+    queue = checks.get(_MERGIFY_QUEUE_CHECK)
+    if protections is None or queue is None:
+        return "backend_unavailable"
+    if protections.get("head_sha") != head_sha or queue.get("head_sha") != head_sha:
+        return "stale_head"
+    if queue.get("status") != "completed":
+        return "queued"
+    queue_conclusion = queue.get("conclusion")
+    if queue_conclusion == "success":
+        return "queued"
+    if queue_conclusion != "neutral":
+        return "backend_unavailable"
+    if protections.get("status") != "completed":
+        return "awaiting_checks"
+    if protections.get("conclusion") == "success":
+        return "enqueue"
+    if protections.get("conclusion") is None:
+        return "awaiting_checks"
+    return "backend_unavailable"
 
 
 async def _collect_auto_merge_threads(client: Any) -> list[dict[str, Any]]:
@@ -202,19 +205,19 @@ async def _collect_auto_merge_threads(client: Any) -> list[dict[str, Any]]:
     return candidates
 
 
-async def reconcile_auto_merge_prs(
-    *, queue_wait_seconds: int = 300, recovery_wait_seconds: int = 300
-) -> dict[str, int]:
+async def reconcile_auto_merge_prs() -> dict[str, int]:
     langgraph = langgraph_client()
     counts = {
         "threads_checked": 0,
-        "armed": 0,
-        "held_disabled": 0,
-        "held_dequeued": 0,
-        "rearmed": 0,
+        "awaiting_checks": 0,
+        "enqueue": 0,
         "queued": 0,
-        "alerted": 0,
+        "held": 0,
+        "held_drafted": 0,
+        "merged": 0,
         "terminal": 0,
+        "backend_unavailable": 0,
+        "stale_head": 0,
         "errors": 0,
     }
     try:
@@ -244,7 +247,7 @@ async def reconcile_auto_merge_prs(
             token = await get_github_app_installation_token(
                 target_repo=f"{owner}/{repo}",
                 repositories=[repo],
-                permissions={"contents": "write", "pull_requests": "write"},
+                permissions={"checks": "read", "contents": "read", "pull_requests": "write"},
             )
             if not token:
                 raise RuntimeError("GitHub App token unavailable")
@@ -263,140 +266,77 @@ async def reconcile_auto_merge_prs(
                 default_branch = default_ref.get("name") if isinstance(default_ref, dict) else None
                 if not isinstance(default_branch, str) or not default_branch:
                     raise RuntimeError("Default branch unavailable")
-                if pr.get("state") != "OPEN" or pr.get("baseRefName") != default_branch:
+                state = pr.get("state")
+                if state != "OPEN" or pr.get("baseRefName") != default_branch:
+                    phase = "merged" if state == "MERGED" else "terminal"
                     await _update_phase(
                         langgraph,
                         thread_id,
-                        auto_merge_phase="terminal",
+                        auto_merge_phase=phase,
                         auto_merge_phase_at=now.isoformat(),
                         auto_merge_reconcile=False,
                     )
-                    counts["terminal"] += 1
+                    counts[phase] += 1
+                    continue
+                pr_id = pr.get("id")
+                head_sha = pr.get("headRefOid")
+                if not isinstance(pr_id, str) or not isinstance(head_sha, str):
+                    raise RuntimeError("PR id or head SHA unavailable")
+                try:
+                    checks = await _mergify_checks(github, owner, repo, head_sha)
+                except Exception:
+                    logger.exception(
+                        "Auto-merge reconcile: Mergify checks unavailable for %s/%s#%s",
+                        owner,
+                        repo,
+                        number,
+                    )
+                    await _update_phase(
+                        langgraph,
+                        thread_id,
+                        auto_merge_phase="backend_unavailable",
+                        auto_merge_phase_at=now.isoformat(),
+                        auto_merge_head_sha=head_sha,
+                    )
+                    counts["backend_unavailable"] += 1
+                    continue
+                mergify_state = _mergify_state(checks, head_sha)
+                if mergify_state in {"backend_unavailable", "stale_head"}:
+                    await _update_phase(
+                        langgraph,
+                        thread_id,
+                        auto_merge_phase=mergify_state,
+                        auto_merge_phase_at=now.isoformat(),
+                        auto_merge_head_sha=head_sha,
+                    )
+                    counts[mergify_state] += 1
                     continue
                 labels = pr.get("labels")
                 nodes = labels.get("nodes", []) if isinstance(labels, dict) else []
                 held = metadata.get("merge_hold_requested") is True or any(
                     isinstance(node, dict) and node.get("name") == "hold-merge" for node in nodes
                 )
-                armed = pr.get("autoMergeRequest") is not None
-                queued = pr.get("isInMergeQueue") is True
-                green = (pr.get("statusCheckRollup") or {}).get("state") == "SUCCESS"
-                clean = pr.get("mergeStateStatus") == "CLEAN"
-                pr_id = pr.get("id")
-                head_sha = pr.get("headRefOid")
-                phase = metadata.get("auto_merge_phase")
-                phase_at = _parse_created_at(metadata.get("auto_merge_phase_at"))
-                same_head = metadata.get("auto_merge_head_sha") == head_sha
-                recovery_attempted = metadata.get("auto_merge_recovery_attempted") is True
                 if held:
-                    if queued and isinstance(pr_id, str):
-                        await _graphql(github, _DEQUEUE_PULL_REQUEST, {"pullRequestId": pr_id})
-                        counts["held_dequeued"] += 1
-                    if armed and isinstance(pr_id, str):
-                        await _graphql(github, _DISABLE_AUTO_MERGE, {"pullRequestId": pr_id})
-                        counts["held_disabled"] += 1
+                    if pr.get("isDraft") is not True:
+                        await _graphql(github, _CONVERT_TO_DRAFT, {"pullRequestId": pr_id})
+                        counts["held_drafted"] += 1
                     await _update_phase(
                         langgraph,
                         thread_id,
                         auto_merge_phase="held",
                         auto_merge_phase_at=now.isoformat(),
-                        auto_merge_head_sha=head_sha or "",
-                    )
-                    continue
-                if queued:
-                    await _update_phase(
-                        langgraph,
-                        thread_id,
-                        auto_merge_phase="queued",
-                        auto_merge_phase_at=now.isoformat(),
-                        auto_merge_head_sha=head_sha or "",
-                        auto_merge_reconcile=True,
-                    )
-                    counts["queued"] += 1
-                    continue
-                if pr.get("isDraft") is True:
-                    if green:
-                        await _post_alert(github, owner, repo, number, "green_draft")
-                        await _update_phase(
-                            langgraph,
-                            thread_id,
-                            auto_merge_phase="alerted",
-                            auto_merge_phase_at=now.isoformat(),
-                            auto_merge_alert_reason="green_draft",
-                            auto_merge_reconcile=False,
-                        )
-                        counts["alerted"] += 1
-                    continue
-                if (
-                    phase == "recovery"
-                    and recovery_attempted
-                    and same_head
-                    and phase_at is not None
-                ):
-                    if (now - phase_at).total_seconds() >= recovery_wait_seconds:
-                        await _post_alert(github, owner, repo, number, "queue_stall")
-                        await _update_phase(
-                            langgraph,
-                            thread_id,
-                            auto_merge_phase="alerted",
-                            auto_merge_phase_at=now.isoformat(),
-                            auto_merge_alert_reason="queue_stall",
-                            auto_merge_reconcile=False,
-                        )
-                        counts["alerted"] += 1
-                    continue
-                if not armed:
-                    if not isinstance(pr_id, str) or not isinstance(head_sha, str):
-                        raise RuntimeError("PR id or head SHA unavailable")
-                    await _graphql(
-                        github,
-                        _ENABLE_AUTO_MERGE,
-                        {"pullRequestId": pr_id, "expectedHeadOid": head_sha},
-                    )
-                    await _update_phase(
-                        langgraph,
-                        thread_id,
-                        auto_merge_phase="pending",
-                        auto_merge_phase_at=now.isoformat(),
                         auto_merge_head_sha=head_sha,
-                        auto_merge_recovery_attempted=False
-                        if not same_head
-                        else recovery_attempted,
                     )
-                    counts["armed"] += 1
+                    counts["held"] += 1
                     continue
-                if not green or not clean:
-                    continue
-                if phase != "green" or not same_head or phase_at is None:
-                    await _update_phase(
-                        langgraph,
-                        thread_id,
-                        auto_merge_phase="green",
-                        auto_merge_phase_at=now.isoformat(),
-                        auto_merge_head_sha=head_sha or "",
-                        auto_merge_recovery_attempted=(
-                            False if not same_head else recovery_attempted
-                        ),
-                    )
-                    continue
-                if (now - phase_at).total_seconds() < queue_wait_seconds or recovery_attempted:
-                    continue
-                if not isinstance(pr_id, str) or not isinstance(head_sha, str):
-                    raise RuntimeError("PR id or head SHA unavailable")
                 await _update_phase(
                     langgraph,
                     thread_id,
-                    auto_merge_phase="recovery",
+                    auto_merge_phase=mergify_state,
                     auto_merge_phase_at=now.isoformat(),
-                    auto_merge_recovery_attempted=True,
+                    auto_merge_head_sha=head_sha,
                 )
-                await _graphql(github, _DISABLE_AUTO_MERGE, {"pullRequestId": pr_id})
-                await _graphql(
-                    github,
-                    _ENABLE_AUTO_MERGE,
-                    {"pullRequestId": pr_id, "expectedHeadOid": head_sha},
-                )
-                counts["rearmed"] += 1
+                counts[mergify_state] += 1
         except Exception:
             counts["errors"] += 1
             logger.exception("Auto-merge reconcile failed for %s/%s#%s", owner, repo, number)
