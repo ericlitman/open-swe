@@ -503,13 +503,15 @@ def test_construct_system_prompt_never_mode_has_no_arming_instruction() -> None:
     assert "Never use `--admin`" in prompt
 
 
-def test_construct_system_prompt_eligible_mode_owns_draft_and_arms_safely() -> None:
+def test_construct_system_prompt_eligible_mode_delegates_queue_to_mergify() -> None:
     prompt = construct_system_prompt(working_dir="/workspace", auto_merge_eligible=True)
 
     assert "### Auto-Merge Policy" in prompt
     assert "`draft=false`" in prompt
-    assert "do not later convert the PR back to draft" in prompt
-    assert "GH_TOKEN=dummy gh pr merge <number-or-url> --auto --squash" in prompt
+    assert "Mergify owns automatic queue admission and merging" in prompt
+    assert "Do not run `gh pr merge`" in prompt
+    assert "GH_TOKEN=dummy gh pr merge <number-or-url> --auto --squash" not in prompt
     assert "`hold merge`" in prompt
+    assert "returning the PR to draft" in prompt
     assert "`hold-merge` label" in prompt
-    assert "never use `--admin`" in prompt
+    assert "Never directly merge or use `--admin`" in prompt
