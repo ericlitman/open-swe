@@ -307,6 +307,32 @@ def test_failed_poll_does_not_advance_known_ids_file(
     assert json.loads(watermark.read_text()) == ["ack"]
 
 
+@pytest.mark.parametrize("author_id", ["mobilyze", "eric", "open-swe"])
+def test_completed_continuation_stays_quiet_after_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, author_id: str
+) -> None:
+    watermark = tmp_path / "known.json"
+    watermark.write_text('["continuation"]\n')
+    continuation = {
+        "id": "continuation",
+        "createdAt": "3",
+        "body": "Supervisor completed the fix for BEAR-50. Continue implementation.",
+        "user": {"id": author_id},
+    }
+    snapshot = _watch_snapshot(
+        None, observed_at="4", comments=[continuation], issue_state_type="completed"
+    )
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: deepcopy(snapshot))
+    monkeypatch.setattr(wave, "monitor_recovery", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(wave, "emit", lambda payload, **_kwargs: emitted.append(payload))
+
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark), iterations=1)) == 0
+    assert emitted == []
+    assert json.loads(watermark.read_text()) == ["continuation"]
+
+
 def test_terminal_linear_closeout_watermark_emits_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

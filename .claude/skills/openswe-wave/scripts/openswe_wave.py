@@ -989,7 +989,6 @@ def _terminal_closeout_kind(body: str, issue: dict[str, Any] | None) -> str | No
             "verification is complete",
             "verified complete",
             "verified complete.",
-            "completed ",
             "supervisor closeout verification",
         )
     )
