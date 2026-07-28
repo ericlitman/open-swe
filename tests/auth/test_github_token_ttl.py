@@ -355,3 +355,62 @@ async def test_publish_review_invalidates_cached_token_on_401(
     assert "401" in result["error"]
     assert invalidated["calls"] == 1
     assert invalidated.get("thread_id") == "thread-xyz"
+
+
+@pytest.mark.asyncio
+async def test_pr_context_boundaries_ignore_quoted_mentions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comments = [
+        {
+            "id": 1,
+            "body": "@openswe first invocation",
+            "created_at": "2026-01-01T00:00:00Z",
+            "user": {"login": "operator"},
+        },
+        {
+            "id": 2,
+            "body": "context after first invocation",
+            "created_at": "2026-01-01T00:01:00Z",
+            "user": {"login": "reviewer"},
+        },
+        {
+            "id": 3,
+            "body": "Please discuss @openswe syntax",
+            "created_at": "2026-01-01T00:02:00Z",
+            "user": {"login": "reviewer"},
+        },
+        {
+            "id": 4,
+            "body": "Example: `@openswe`",
+            "created_at": "2026-01-01T00:03:00Z",
+            "user": {"login": "reviewer"},
+        },
+        {
+            "id": 5,
+            "body": "@open-swe second invocation",
+            "created_at": "2026-01-01T00:04:00Z",
+            "user": {"login": "operator"},
+        },
+    ]
+
+    async def fake_fetch_paginated(client: object, url: str, headers: object) -> list[dict]:
+        if "/issues/" in url:
+            return comments
+        return []
+
+    class FakeAsyncClient:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(github_comments, "_fetch_paginated", fake_fetch_paginated)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeAsyncClient())
+
+    result = await github_comments.fetch_pr_comments_since_last_tag(
+        {"owner": "owner", "name": "repo"}, 42, token="token"
+    )
+
+    assert [comment["comment_id"] for comment in result] == [2, 3, 4, 5]

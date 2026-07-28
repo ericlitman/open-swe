@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from .comment_mentions import classify_comment_mention
 from .github_token import GitHubAuthError
 from .http import DEFAULT_HTTP_TIMEOUT
 
@@ -349,7 +350,8 @@ async def fetch_pr_comments_since_last_tag(
     tag_indices = [
         i
         for i, comment in enumerate(all_comments)
-        if any(tag in (comment.get("body") or "").lower() for tag in OPEN_SWE_TAGS)
+        if classify_comment_mention(comment.get("body") or "", OPEN_SWE_TAGS).disposition
+        == "accepted"
     ]
 
     if not tag_indices:

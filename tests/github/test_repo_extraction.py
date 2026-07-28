@@ -84,8 +84,8 @@ class TestExtractChannelDescriptionText:
         }
 
 
-class TestLinearWebhookRepoOverride:
-    """Test that the Linear webhook handler checks comment body for repo config first."""
+class TestLinearWebhookRepoRouting:
+    """Test the Linear webhook directive-or-thread routing contract."""
 
     @pytest.fixture()
     def _base_payload(self) -> dict:
@@ -94,7 +94,7 @@ class TestLinearWebhookRepoOverride:
             "action": "create",
             "data": {
                 "id": "comment-123",
-                "body": "@openswe please fix this repo:custom-org/custom-repo",
+                "body": "@openswe repo:custom-org/custom-repo please fix this",
                 "issue": {
                     "id": "issue-456",
                     "title": "Test issue",
@@ -144,7 +144,7 @@ class TestLinearWebhookRepoOverride:
             assert repo_config == {"owner": "custom-org", "name": "custom-repo"}
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_team_mapping_when_no_repo_in_comment(self) -> None:
+    async def test_missing_directive_and_thread_repo_does_not_use_team_mapping(self) -> None:
         from agent.webhooks.linear_routes import linear_webhook
 
         payload = {
@@ -160,32 +160,17 @@ class TestLinearWebhookRepoOverride:
                 "user": {"id": "user-1", "name": "Test User", "email": "test@test.com"},
             },
         }
+        post_failure = AsyncMock()
 
         with (
             patch("agent.webhooks.common.verify_linear_signature", return_value=True),
-            patch(
-                "agent.webhooks.common.fetch_linear_issue_details",
-                new_callable=AsyncMock,
-                return_value={
-                    "id": "issue-456",
-                    "title": "Test issue",
-                    "identifier": "TEST-1",
-                    "url": "https://linear.app/test/issue/TEST-1",
-                    "team": {"id": "t1", "name": "Open SWE", "key": "OS"},
-                    "project": None,
-                    "comments": {"nodes": []},
-                },
-            ),
-            patch("agent.webhooks.common._is_repo_allowed", return_value=True),
             patch(
                 "agent.webhooks.linear.get_linear_thread_repo_config",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
-            patch(
-                "agent.webhooks.linear.persist_linear_thread_repo_config",
-                new_callable=AsyncMock,
-            ),
+            patch("agent.webhooks.common.get_repo_config_from_team_mapping") as team_mapping,
+            patch("agent.webhooks.linear.post_linear_routing_failure", post_failure),
         ):
             mock_request = AsyncMock()
             mock_request.body.return_value = json.dumps(payload).encode()
@@ -194,9 +179,15 @@ class TestLinearWebhookRepoOverride:
             bg_tasks = MagicMock()
             result = await linear_webhook(mock_request, bg_tasks)
 
-            assert result["status"] == "accepted"
-            assert "langchain-ai/open-swe" in result["message"]
-
-            call_args = bg_tasks.add_task.call_args
-            repo_config = call_args[0][2]
-            assert repo_config == {"owner": "langchain-ai", "name": "open-swe"}
+        assert result == {
+            "status": "ignored",
+            "reason": "No repository directive or thread metadata",
+        }
+        team_mapping.assert_not_called()
+        bg_tasks.add_task.assert_not_called()
+        post_failure.assert_awaited_once_with(
+            "issue-456",
+            "comment-123",
+            "Couldn't determine the target repository. Specify it as `repo owner/name` "
+            "immediately after the agent mention.",
+        )
