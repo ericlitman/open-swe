@@ -35,11 +35,16 @@ def _watch_snapshot(
     *,
     observed_at: str,
     comments: list[dict[str, Any]] | None = None,
+    issue_state_type: str = "started",
 ) -> dict[str, Any]:
     return {
         "linear": {
             "viewer": {"id": "session"},
-            "issue": {"comments": {"nodes": comments or []}},
+            "issue": {
+                "identifier": "BEAR-50",
+                "state": {"type": issue_state_type, "name": issue_state_type.title()},
+                "comments": {"nodes": comments or []},
+            },
         },
         "langgraph": {"thread": {"metadata": {}}, "runs": []},
         "pr": {"state": state} if state else {},
@@ -64,6 +69,8 @@ def _watch_args(**overrides: Any) -> SimpleNamespace:
         "iterations": 1,
         "run_stall_seconds": 1800,
         "review_absent_seconds": 900,
+        "known_ids_file": None,
+        "until_wake": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -77,7 +84,7 @@ def test_wave_two_replay_reduces_wakes_and_suppresses_self() -> None:
     assert result["raw_events"] == 15
     assert result["wake_count"] == 5
     assert result["wake_count"] <= 6
-    assert result["self_authored_suppressed"] == 2
+    assert result["self_authored_suppressed"] == 0
     assert [item["wake_node"] for item in result["wakes"]] == [
         "plan_posted",
         "terminal_run_error",
@@ -121,7 +128,7 @@ def test_bear_41_healthy_quiet_comments_produce_zero_wakes() -> None:
     )
     result = wave.replay_events(events, recorded["session_user_id"])
 
-    assert [event["kind"] for event in events] == ["progress", "progress", "run_blocked"]
+    assert [event["kind"] for event in events] == ["progress", "progress", "operator_action"]
     assert result["wake_count"] == 0
     assert result["self_authored_suppressed"] == 1
     assert result["non_actionable_ignored"] == 2
@@ -162,6 +169,170 @@ def test_incomplete_blocker_language_stays_progress(body: str) -> None:
 
     assert events[0]["kind"] == "progress"
     assert wave.replay_events(events, "operator")["wake_count"] == 0
+
+
+def test_bear_50_recorded_sequence_replays_deterministically() -> None:
+    recorded = fixture("bear-50-comment-sequence.json")
+
+    events = wave.comments_to_events(
+        recorded["comments"], "service-viewer", set(recorded["known_ids"]), recorded["issue"]
+    )
+    result = wave.replay_events(events, "service-viewer")
+
+    assert [event["kind"] for event in events] == [
+        "plan_posted",
+        "run_blocked",
+        "operator_action",
+        "progress",
+        "merged",
+    ]
+    assert [wake["wake_node"] for wake in result["wakes"]] == [
+        "plan_posted",
+        "run_blocked",
+        "terminal_merged",
+    ]
+    assert result["self_authored_suppressed"] == 1
+    assert result["non_actionable_ignored"] == 1
+
+
+@pytest.mark.parametrize("author_id", ["mobilyze", "eric", "open-swe"])
+def test_bear_50_comment_types_are_identity_safe(author_id: str) -> None:
+    issue = {"identifier": "BEAR-50", "state": {"type": "completed"}}
+    comments = [
+        {
+            "id": "plan",
+            "createdAt": "1",
+            "body": "## Plan: Safe monitor",
+            "user": {"id": author_id},
+        },
+        {
+            "id": "blocker",
+            "createdAt": "2",
+            "body": "BEAR-50 is blocked: the request failed with 403. I made no mutation and opened no disposable PR.",
+            "user": {"id": author_id},
+        },
+        {
+            "id": "review",
+            "createdAt": "2.5",
+            "body": "Open SWE review complete: 2 findings",
+            "user": {"id": author_id},
+        },
+        {
+            "id": "continue",
+            "createdAt": "3",
+            "body": "@openswe Supervisor completed the authorized mutation. Continue implementation.",
+            "user": {"id": author_id},
+        },
+        {
+            "id": "closeout",
+            "createdAt": "4",
+            "body": "BEAR-50 verification is complete. Mergify merged PR #42.",
+            "user": {"id": author_id},
+        },
+    ]
+
+    events = wave.comments_to_events(comments, author_id, set(), issue)
+    result = wave.replay_events(events, author_id)
+
+    assert [event["kind"] for event in events] == [
+        "plan_posted",
+        "run_blocked",
+        "review_findings",
+        "operator_action",
+        "merged",
+    ]
+    assert [wake["wake_node"] for wake in result["wakes"]] == [
+        "plan_posted",
+        "run_blocked",
+        "review_findings_posted",
+        "terminal_merged",
+    ]
+    assert result["self_authored_suppressed"] == 1
+
+
+def test_known_ids_file_recovers_comment_after_restart_and_until_wake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    watermark = tmp_path / "known.json"
+    ack = {"id": "ack", "createdAt": "1", "body": "On it!", "user": {"id": "eric"}}
+    plan = {
+        "id": "plan",
+        "createdAt": "2",
+        "body": "## Plan: Recovered",
+        "user": {"id": "eric"},
+    }
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(wave, "monitor_recovery", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(wave, "emit", lambda payload, **_kwargs: emitted.append(payload))
+
+    first = iter(
+        [
+            _watch_snapshot(None, observed_at="1", comments=[ack]),
+            _watch_snapshot(None, observed_at="2", comments=[ack]),
+        ]
+    )
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: next(first))
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark))) == 0
+    assert json.loads(watermark.read_text()) == ["ack"]
+
+    second = iter([_watch_snapshot(None, observed_at="3", comments=[ack, plan])])
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: next(second))
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark), until_wake=True)) == 0
+    assert [item["wake_node"] for item in emitted] == ["plan_posted"]
+    assert json.loads(watermark.read_text()) == ["ack", "plan"]
+
+
+def test_failed_poll_does_not_advance_known_ids_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    watermark = tmp_path / "known.json"
+    ack = {"id": "ack", "createdAt": "1", "body": "On it!", "user": {"id": "eric"}}
+    snapshots: list[dict[str, Any] | Exception] = [
+        _watch_snapshot(None, observed_at="1", comments=[ack]),
+        wave.WaveOpsError("transient"),
+    ]
+
+    def live_snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        snapshot = snapshots.pop(0)
+        if isinstance(snapshot, Exception):
+            raise snapshot
+        return snapshot
+
+    monkeypatch.setattr(wave, "live_snapshot", live_snapshot)
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(wave, "emit", lambda *_args, **_kwargs: None)
+
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark))) == 0
+    assert json.loads(watermark.read_text()) == ["ack"]
+
+
+def test_terminal_linear_closeout_watermark_emits_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    watermark = tmp_path / "known.json"
+    watermark.write_text('["closeout"]\n')
+    closeout = {
+        "id": "closeout",
+        "createdAt": "4",
+        "body": "BEAR-50 verification is complete. Mergify merged PR #42.",
+        "user": {"id": "open-swe"},
+    }
+    snapshot = _watch_snapshot(
+        None, observed_at="4", comments=[closeout], issue_state_type="completed"
+    )
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: deepcopy(snapshot))
+    monkeypatch.setattr(wave, "emit", lambda payload, **_kwargs: emitted.append(payload))
+
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark), until_wake=True)) == 0
+    assert [item["wake_node"] for item in emitted] == ["terminal_merged"]
+    assert "linear-terminal:MERGED:closeout" in json.loads(watermark.read_text())
+
+    emitted.clear()
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark), iterations=1)) == 0
+    assert emitted == []
 
 
 def test_replay_coalesces_actionable_state_dump() -> None:

@@ -1,0 +1,58 @@
+{
+  "source": "BEAR-50 Linear comment sequence, 2026-07-27",
+  "issue": {
+    "identifier": "BEAR-50",
+    "state": {
+      "type": "completed",
+      "name": "Done"
+    }
+  },
+  "known_ids": [],
+  "comments": [
+    {
+      "id": "8de0ecd7-4bca-4a23-b701-a4bfa6c78fb6",
+      "createdAt": "2026-07-27T01:56:01.693Z",
+      "body": "@Mobilyze Agents\n\n## Plan: Require Open SWE Review before ThreadBear merges\n\n### Goal\nMake ThreadBear's main merge gate require a successful current-head Open SWE Review check.",
+      "user": {
+        "id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+        "name": "Eric Litman"
+      }
+    },
+    {
+      "id": "757b272a-f4fa-4393-94e4-38fb57e0b469",
+      "createdAt": "2026-07-27T02:03:57.427Z",
+      "body": "@Mobilyze Agents BEAR-50 is blocked at the ratified fail-closed dependency: the available product GitHub token still returns 403 Resource not accessible by integration, so I cannot safely capture or mutate the complete rule. I made no mutation and opened no disposable PR.",
+      "user": {
+        "id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+        "name": "Eric Litman"
+      }
+    },
+    {
+      "id": "e5a464e2-301f-4377-a5ea-de4429f6053a",
+      "createdAt": "2026-07-27T12:53:32.213Z",
+      "body": "@openswe Supervisor completed the explicitly authorized one-time repository-admin mutation for BEAR-50. Continue implementation from the approved plan and run the disposable-PR verification now.",
+      "user": {
+        "id": "0f2475b5-868c-46d3-a9ac-a343e360396a",
+        "name": "Mobilyze Agents"
+      }
+    },
+    {
+      "id": "20a3b6df-f4a6-4d2a-949e-769526321dbd",
+      "createdAt": "2026-07-27T12:53:34.680Z",
+      "body": "On it!",
+      "user": {
+        "id": "dc637f5e-8932-4c0d-bcbf-933f4092525c",
+        "name": "Open SWE"
+      }
+    },
+    {
+      "id": "e7a85a43-6a1d-4e39-b93f-183de1986da8",
+      "createdAt": "2026-07-27T13:06:06.886Z",
+      "body": "@Mobilyze Agents BEAR-50 verification is complete. The unchanged Mergify ruleset merged PR #42 after verify and Open SWE Review succeeded on the current head.",
+      "user": {
+        "id": "dc637f5e-8932-4c0d-bcbf-933f4092525c",
+        "name": "Open SWE"
+      }
+    }
+  ]
+}
