@@ -1,4 +1,4 @@
-.PHONY: all format format-check lint typecheck test tests integration_tests help run dev production production-check
+.PHONY: all format format-check lint typecheck test tests integration_tests help run dev production production-image production-check
 
 # Default target executed when no arguments are given to make.
 all: help
@@ -8,12 +8,23 @@ all: help
 ######################
 
 PRODUCTION_PORT ?= 2024
+COMPOSE ?= docker-compose
 
 dev:
 	uv run langgraph dev
 
-production:
-	COMPOSE_PROJECT_NAME=open-swe-control-plane uv run langgraph up --port $(PRODUCTION_PORT)
+# `langgraph up` is deliberately not used: langgraph-cli 0.4.30 paired with
+# api 0.11.1 tags an image containing no project code and no entrypoint
+# (CMD ["python3"]), then exits 0 while the api service silently no-ops.
+# Building the CLI-generated Dockerfile with plain `docker build` produces a
+# correct image; deploy/compose.yaml runs it.
+production-image:
+	uv run langgraph dockerfile -c langgraph.json deploy/api.Dockerfile
+	docker build -f deploy/api.Dockerfile -t open-swe-control-plane-api:local .
+
+production: production-image
+	OPEN_SWE_API_PORT=$(PRODUCTION_PORT) OPEN_SWE_ENV_FILE=$(abspath .env) \
+		$(COMPOSE) --project-name open-swe-control-plane -f deploy/compose.yaml up
 
 production-check:
 	uv run langgraph validate -c langgraph.json
@@ -74,7 +85,8 @@ typecheck:
 help:
 	@echo '----'
 	@echo 'dev                          - run LangGraph dev server'
-	@echo 'production                   - run persistence-backed Agent Server (default :2024)'
+	@echo 'production                   - build image + run persistence-backed Agent Server via compose'
+	@echo 'production-image             - render Dockerfile and docker-build the API image'
 	@echo 'production-check             - validate and render production configuration'
 	@echo 'run                          - run webhook server'
 	@echo 'install                      - install dependencies (incl. dev extras)'
