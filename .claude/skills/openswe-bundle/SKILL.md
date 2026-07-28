@@ -107,8 +107,8 @@ Re-run the composition procedure after each merge that changes a later ticket’
 Hand the decided unit to `openswe-run` with these exact shapes:
 
 ```bash
-openswe-run start --ticket <ID>
-openswe-run start --ticket <PRIMARY> --include-ticket <ID> --include-ticket <ID>
+openswe-run start --ticket <ID> --repo <owner/repo>
+openswe-run start --ticket <PRIMARY> --include-ticket <ID> --include-ticket <ID> --repo <owner/repo>
 ```
 
 The installed skill exposes these through its `scripts/openswe-run` executable; `--include-ticket` is repeatable.
