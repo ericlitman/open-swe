@@ -361,6 +361,35 @@ def test_terminal_linear_closeout_watermark_emits_once(
     assert emitted == []
 
 
+def test_terminal_linear_state_ignores_prior_mutation_ack_after_closeout_seen() -> None:
+    snapshot = _watch_snapshot(
+        None,
+        observed_at="4",
+        comments=[
+            {
+                "id": "continue",
+                "createdAt": "3",
+                "body": (
+                    "@openswe Supervisor completed BEAR-50 for BEAR-50. "
+                    "Continue implementation."
+                ),
+                "user": {"id": "open-swe"},
+            },
+            {
+                "id": "closeout",
+                "createdAt": "4",
+                "body": "BEAR-50 verification is complete. Mergify merged PR #42.",
+                "user": {"id": "open-swe"},
+            },
+        ],
+        issue_state_type="completed",
+    )
+
+    assert wave.terminal_linear_state_event(
+        snapshot, set(), {"linear-terminal:MERGED:closeout"}
+    ) is None
+
+
 def test_replay_coalesces_actionable_state_dump() -> None:
     events = [
         {"poll_id": "same", "kind": "review_findings", "summary": "finding"},
