@@ -197,6 +197,7 @@ async def test_agent_keeps_message_queue_and_step_limit_middleware() -> None:
     present = {type(m).__name__ for m in middleware}
     assert "check_message_queue_before_model" in present
     assert "notify_step_limit_reached" in present
+    assert "SourceCompletionGuardMiddleware" in present
 
 
 @pytest.mark.asyncio
