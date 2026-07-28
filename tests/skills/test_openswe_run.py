@@ -1900,7 +1900,9 @@ def test_bundle_reject_force_cannot_bypass_placeholders_before_transition(
     monkeypatch.setattr(
         run,
         "set_plan_status",
-        lambda *args, **kwargs: pytest.fail("placeholder refusal must happen before plan transition"),
+        lambda *args, **kwargs: pytest.fail(
+            "placeholder refusal must happen before plan transition"
+        ),
     )
     run.log_path("OSWE-1", new_run=True)
     run.write_bundle_manifest(
