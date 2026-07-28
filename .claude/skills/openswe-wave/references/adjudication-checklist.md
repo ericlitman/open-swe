@@ -8,6 +8,7 @@
 - Separate deployed/runtime claims that cannot be checked into Unverified claims.
 - Reconcile predecessor tickets and recently merged work before preserving old scope.
 - Confirm the requested mechanism is not already owned by product code or an existing operator tool.
+- For a disposable merge-gate probe, require the preflight, suppression, and separate tree/history proof in `disposable-probe-safety.md`.
 
 ## Plan review
 
