@@ -211,6 +211,9 @@ scripts/openswe-run log --ticket OSWE-123 --issue "what happened, with the exact
 - Dispatch, approval, and watch must run under the **same** `LINEAR_API_KEY` identity —
   self-suppression of your own comments is keyed to that viewer; mixing keys turns your own
   approvals into wake noise.
+- Linear exposes no read API for the workspace app grant, so `env` cannot preflight a stripped
+  `app:mentionable`; posting commands self-diagnose that failure and print the full-scope mint
+  recovery.
 - The live monitor needs `httpx` + `langgraph_sdk`; system python3 lacks them. The wrapper
   resolves an interpreter automatically (control-plane venv, then `uv`); override with
   `OPENSWE_RUN_PYTHON`.

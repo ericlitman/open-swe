@@ -49,6 +49,16 @@ GH_ENV_ERROR = (
     "GH_TOKEN is not set and `gh auth token` produced nothing. "
     "Set it with: export GH_TOKEN=$(gh auth token)  # or a PAT with repo scope"
 )
+LINEAR_MENTION_SCOPE_ERROR = (
+    "Linear workspace app grant is stripped of app:mentionable (OSWE-152 mechanism). "
+    "Run this full-scope client-credentials mint, discard the token, then retry this "
+    "command as-is:\n"
+    "curl -fsS https://api.linear.app/oauth/token "
+    "--data-urlencode grant_type=client_credentials "
+    '--data-urlencode client_id="$LINEAR_CLIENT_ID" '
+    '--data-urlencode client_secret="$LINEAR_CLIENT_SECRET" '
+    "--data-urlencode scope=read,write,app:assignable,app:mentionable >/dev/null"
+)
 WAKE_TIMEOUT_EXIT = 3
 CHILD_FAILURE_EXIT = 4
 HANDOFF_TIMEOUT_SECONDS = 60.0
@@ -166,6 +176,11 @@ def dogfood(ticket: str, tag: str, text: str) -> None:
 # --------------------------------------------------------------------------- linear (urllib)
 
 
+def _is_linear_mention_scope_error(errors: object) -> bool:
+    text = json.dumps(errors)
+    return "App user not valid" in text and "lack the required scope" in text
+
+
 def linear_gql(query: str, variables: dict) -> dict:
     key = os.environ.get("LINEAR_API_KEY")
     if not key:
@@ -182,6 +197,8 @@ def linear_gql(query: str, variables: dict) -> dict:
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RunError(f"Linear request failed: {exc}") from exc
     if data.get("errors"):
+        if _is_linear_mention_scope_error(data["errors"]):
+            raise RunError(LINEAR_MENTION_SCOPE_ERROR)
         raise RunError(f"Linear GraphQL returned errors: {data['errors']}")
     return data.get("data") or {}
 

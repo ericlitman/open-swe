@@ -27,6 +27,68 @@ sys.modules[SPEC.name] = run
 SPEC.loader.exec_module(run)
 
 
+class _LinearResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
+
+
+def test_linear_gql_maps_mention_scope_failure_to_full_scope_mint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = [
+        {
+            "message": "App user not valid",
+            "extensions": {
+                "userPresentableMessage": "One or more app users lack the required scope."
+            },
+        }
+    ]
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.setattr(
+        run.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: _LinearResponse({"errors": errors}),
+    )
+
+    with pytest.raises(run.RunError) as raised:
+        run.linear_gql("mutation { commentCreate }", {})
+
+    message = str(raised.value)
+    assert message == run.LINEAR_MENTION_SCOPE_ERROR
+    assert "workspace app grant is stripped of app:mentionable" in message
+    assert "read,write,app:assignable,app:mentionable" in message
+    assert 'client_id="$LINEAR_CLIENT_ID"' in message
+    assert 'client_secret="$LINEAR_CLIENT_SECRET"' in message
+    assert "retry this command as-is" in message
+    assert "export LINEAR_API_KEY" not in message
+
+
+def test_linear_gql_preserves_unrelated_graphql_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = [{"message": "Issue not found"}]
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.setattr(
+        run.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: _LinearResponse({"errors": errors}),
+    )
+
+    with pytest.raises(run.RunError) as raised:
+        run.linear_gql("query { issue }", {})
+
+    assert str(raised.value) == f"Linear GraphQL returned errors: {errors}"
+
+
 def test_entry_point_is_executable_and_self_describes() -> None:
     result = subprocess.run(
         [str(SCRIPT_PATH), "--help"], text=True, capture_output=True, check=False
