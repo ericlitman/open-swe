@@ -37,13 +37,16 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPTS_DIR.parent
 DEFAULT_STABLE_ROOT = str(Path.home() / "projects" / "open-swe")
 LINEAR_URL = "https://api.linear.app/graphql"
-LOCAL_LANGGRAPH_URL = "http://127.0.0.1:2029"
+LOCAL_LANGGRAPH_ENDPOINTS = (
+    ("http://127.0.0.1:2029", "studio2-tunnel:2029"),
+    ("http://127.0.0.1:12029", "studio2-tunnel:12029"),
+)
+LOCAL_LANGGRAPH_URL = LOCAL_LANGGRAPH_ENDPOINTS[0][0]
 CONTROL_PLANE_PYTHON = "/opt/mobilyze/open-swe-control-plane/current/.venv/bin/python"
 LINEAR_ENV_ERROR = "LINEAR_API_KEY is not set. Set it with: export LINEAR_API_KEY=..."
 LANGGRAPH_ENV_ERROR = (
-    "LANGGRAPH_URL is not set and the local control plane did not answer. "
-    "Set it with: export LANGGRAPH_URL=http://127.0.0.1:2029 "
-    "(off studio2, tunnel first: ssh -N -L 2029:127.0.0.1:2029 studio2)"
+    "No healthy LangGraph endpoint was found. Set LANGGRAPH_URL to a healthy endpoint, "
+    "or start a supported Studio2 tunnel on local port 2029 or 12029."
 )
 GH_ENV_ERROR = (
     "GH_TOKEN is not set and `gh auth token` produced nothing. "
@@ -418,14 +421,31 @@ def post_comment(issue_id: str, body: str) -> None:
 # --------------------------------------------------------------------------- environment
 
 
-def probe_local_langgraph() -> bool:
+def probe_langgraph(url: str) -> bool:
     for _ in range(2):
         try:
-            with urllib.request.urlopen(f"{LOCAL_LANGGRAPH_URL}/ok", timeout=3) as response:
+            with urllib.request.urlopen(f"{url.rstrip('/')}/ok", timeout=3) as response:
                 return bool(json.loads(response.read()).get("ok"))
         except Exception:
             pass
     return False
+
+
+def resolve_langgraph_endpoint(*, exclude: set[str] | None = None) -> tuple[str, str] | None:
+    excluded = exclude or set()
+    candidates: list[tuple[str, str]] = []
+    configured = os.environ.get("LANGGRAPH_URL")
+    if configured:
+        candidates.append((configured.rstrip("/"), "environment"))
+    candidates.extend(LOCAL_LANGGRAPH_ENDPOINTS)
+    seen: set[str] = set()
+    for url, provenance in candidates:
+        if url in seen or url in excluded:
+            continue
+        seen.add(url)
+        if probe_langgraph(url):
+            return url, provenance
+    return None
 
 
 def gh_auth_token() -> str:
@@ -489,12 +509,17 @@ def ensure_env(ticket: str, *, langgraph: bool, github: bool) -> list[str]:
     notes: list[str] = []
     if not os.environ.get("LINEAR_API_KEY"):
         raise RunError(LINEAR_ENV_ERROR)
-    if langgraph and not os.environ.get("LANGGRAPH_URL"):
-        if probe_local_langgraph():
-            os.environ["LANGGRAPH_URL"] = LOCAL_LANGGRAPH_URL
-            notes.append(f"auto-set LANGGRAPH_URL={LOCAL_LANGGRAPH_URL} (local /ok probe passed)")
-        else:
+    if langgraph:
+        configured = os.environ.get("LANGGRAPH_URL")
+        configured_url = configured.rstrip("/") if configured else None
+        endpoint = resolve_langgraph_endpoint()
+        if endpoint is None:
             raise RunError(LANGGRAPH_ENV_ERROR)
+        url, provenance = endpoint
+        os.environ["LANGGRAPH_URL"] = url
+        if url != configured_url:
+            action = "failed over" if configured else "auto-set"
+            notes.append(f"{action} LANGGRAPH_URL={url} ({provenance}; /ok probe passed)")
     if github and not os.environ.get("GH_TOKEN"):
         token = gh_auth_token()
         if token:
@@ -1031,10 +1056,11 @@ def _post_with_handoff(
 
 
 def cmd_env(args: argparse.Namespace) -> int:
+    endpoint = resolve_langgraph_endpoint()
     report = {
         "linear_api_key": bool(os.environ.get("LINEAR_API_KEY")),
-        "langgraph_url": os.environ.get("LANGGRAPH_URL")
-        or (LOCAL_LANGGRAPH_URL if probe_local_langgraph() else None),
+        "langgraph_url": endpoint[0] if endpoint else None,
+        "langgraph_url_provenance": endpoint[1] if endpoint else None,
         "gh_token": bool(os.environ.get("GH_TOKEN")) or bool(gh_auth_token()),
         "stable_root": str(stable_root()),
         "handoffs": str(ensure_handoffs()),
@@ -1180,6 +1206,47 @@ def watch_timeout_min(args: argparse.Namespace) -> float:
     return args.timeout_min if args.timeout_min is not None else PHASE_TIMEOUT_MINUTES[args.phase]
 
 
+def _recover_langgraph_endpoint(ticket: str, issue: dict, issue_id: str) -> bool | None:
+    failed_url = os.environ["LANGGRAPH_URL"]
+    if probe_langgraph(failed_url):
+        return None
+    replacement = resolve_langgraph_endpoint(exclude={failed_url})
+    if replacement is None:
+        wake = {
+            "wake_node": "endpoint_unavailable",
+            "summary": (
+                f"LangGraph endpoint {failed_url} failed; no supported healthy "
+                "replacement was found"
+            ),
+            "evidence": {
+                "failed_endpoint": failed_url,
+                "replacement_endpoint": None,
+                "issue_id": issue_id,
+                "identifier": issue["identifier"],
+            },
+        }
+        _emit_wake(ticket, wake, "wrapper-endpoint-check")
+        return False
+    replacement_url, provenance = replacement
+    os.environ["LANGGRAPH_URL"] = replacement_url
+    wake = {
+        "wake_node": "endpoint_failover",
+        "summary": (
+            f"LangGraph endpoint {failed_url} failed; continuing on "
+            f"{replacement_url} ({provenance})"
+        ),
+        "evidence": {
+            "failed_endpoint": failed_url,
+            "replacement_endpoint": replacement_url,
+            "replacement_provenance": provenance,
+            "issue_id": issue_id,
+            "identifier": issue["identifier"],
+        },
+    }
+    _emit_wake(ticket, wake, "wrapper-endpoint-check")
+    return True
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     """Exit-on-first-wake watch. Healthy monitors are silent; wakes are one JSON line."""
     ensure_env(args.ticket, langgraph=True, github=True)
@@ -1228,6 +1295,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(wake, dict) and wake.get("wake_node"):
+                    summary = str(wake.get("summary") or "")
+                    if (
+                        wake["wake_node"] == "unhandled_condition"
+                        and summary.startswith("wave monitor poll failed:")
+                        and "LANGGRAPH_URL request" in summary
+                    ):
+                        recovered = _recover_langgraph_endpoint(args.ticket, issue, issue_id)
+                        if recovered is not None:
+                            process.terminate()
+                            if not recovered:
+                                return CHILD_FAILURE_EXIT
+                            process, stderr_tail = _spawn_monitor(args, issue_id)
+                            continue
                     _emit_wake(args.ticket, wake, "wave-monitor")
                     if not args.follow:
                         process.terminate()
@@ -1235,6 +1315,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
         if process.poll() is not None:
             tail = "".join(list(stderr_tail)[-8:]).strip()
+            recovered = _recover_langgraph_endpoint(args.ticket, issue, issue_id)
+            if recovered is False:
+                return CHILD_FAILURE_EXIT
+            if recovered is True:
+                process, stderr_tail = _spawn_monitor(args, issue_id)
+                continue
             dogfood(
                 args.ticket,
                 "error",

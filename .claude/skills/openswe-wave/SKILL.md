@@ -5,6 +5,18 @@ description: Operate an Open SWE delivery wave with full-weight plan adjudicatio
 
 # Open SWE wave operations
 
+## Loading contract
+
+At invocation, load only this `SKILL.md`. Treat every file under `scripts/*` as a black-box CLI: run it and consume its output, but never read it into context. `scripts/openswe_wave.py` is an implementation detail; reading it is a defect, not diligence.
+
+Load references only at their workflow event:
+
+- Read `references/comment-templates.md` only when composing the relevant dispatch, approval or rejection, spot-audit, closeout, or tally comment.
+- Read `references/adjudication-checklist.md` only when a plan is ready for review.
+- Read `references/recovery-runbook.md` only after a stall, merge conflict, queue stall, or other recovery event.
+
+Running `scripts/anchor-sweep` over the canonical ticket before dispatch remains required verification, not loading; run the CLI without reading its implementation.
+
 Keep plan adjudication and spot-audits at full operator weight. Use these files only to remove mechanical polling, status relay, and deterministic recovery work.
 Use `openswe-bundle` first when composing a triaged batch into atomic bundles and sequenced wave siblings.
 
@@ -58,6 +70,7 @@ uv run --no-project --with httpx --with langgraph-sdk python \
 ## Workflow
 
 1. Use `scripts/anchor-sweep <ref> <ticket-file>` before dispatch. Treat present/moved/missing as mechanical evidence only; inspect semantic drift yourself.
+   For a disposable merge-gate probe, complete `references/disposable-probe-safety.md` before creating its branch or PR.
 2. Use the templates in `references/comment-templates.md` for dispatch, approval, spot-audit, closeout, and the OSWE-100 tally.
 3. Apply `references/adjudication-checklist.md` before approving a plan.
 4. Start the quiet monitor after dispatch:
