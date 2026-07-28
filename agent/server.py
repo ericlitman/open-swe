@@ -1200,6 +1200,12 @@ async def get_agent(config: RunnableConfig) -> Pregel:
 
     source_value = configurable.get("source")
     source = source_value if isinstance(source_value, str) else "dashboard"
+    github_target: tuple[str, int] | None = None
+    github_issue = configurable.get("github_issue")
+    if isinstance(github_issue, dict) and isinstance(github_issue.get("number"), int):
+        github_target = ("issue", github_issue["number"])
+    elif isinstance(configurable.get("pr_number"), int):
+        github_target = ("pr", configurable["pr_number"])
     user_email = configurable.get("user_email")
     user_email = user_email if isinstance(user_email, str) else ""
 
@@ -1388,7 +1394,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:
                 ),
                 ToolArtifactMiddleware(),
                 PullRequestCreationGuardMiddleware(),
-                SourceCompletionGuardMiddleware(thread_id=thread_id, source=source),
+                SourceCompletionGuardMiddleware(
+                    thread_id=thread_id,
+                    source=source,
+                    github_target=github_target,
+                ),
                 refresh_github_proxy_before_model,
                 check_message_queue_before_model,
                 SlackAssistantStatusMiddleware(),

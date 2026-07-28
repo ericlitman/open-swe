@@ -44,13 +44,14 @@ async def _call(
     name: str,
     payload: dict[str, Any],
     *,
+    args: dict[str, Any] | None = None,
     error: bool = False,
 ) -> None:
     async def handler(_request: ToolCallRequest) -> ToolMessage:
         return _result(name, payload, error=error)
 
     _ = await middleware.awrap_tool_call(
-        cast(ToolCallRequest, cast(object, _Request(name))), handler
+        cast(ToolCallRequest, cast(object, _Request(name, args))), handler
     )
 
 
@@ -143,3 +144,55 @@ async def test_failed_linear_reply_after_pr_is_recorded(
     _ = await middleware.aafter_agent(cast(AgentState, cast(object, {"messages": []})), MagicMock())
 
     assert len(client.threads.updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_unrelated_github_comment_does_not_satisfy_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client()
+    monkeypatch.setattr(guard, "get_client", lambda: client)
+    middleware = guard.SourceCompletionGuardMiddleware(
+        thread_id="thread-1", source="github", github_target=("issue", 17)
+    )
+    await _call(
+        middleware,
+        "open_pull_request",
+        {"success": True, "number": 62, "url": "https://github.com/o/r/pull/62"},
+    )
+    await _call(
+        middleware,
+        "execute",
+        {},
+        args={"command": "GH_TOKEN=dummy gh pr comment 62 --body done"},
+    )
+
+    _ = await middleware.aafter_agent(cast(AgentState, cast(object, {"messages": []})), MagicMock())
+
+    assert len(client.threads.updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_originating_github_comment_satisfies_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client()
+    monkeypatch.setattr(guard, "get_client", lambda: client)
+    middleware = guard.SourceCompletionGuardMiddleware(
+        thread_id="thread-1", source="github", github_target=("issue", 17)
+    )
+    await _call(
+        middleware,
+        "open_pull_request",
+        {"success": True, "number": 62, "url": "https://github.com/o/r/pull/62"},
+    )
+    await _call(
+        middleware,
+        "execute",
+        {},
+        args={"command": "GH_TOKEN=dummy gh issue comment 17 --body done"},
+    )
+
+    _ = await middleware.aafter_agent(cast(AgentState, cast(object, {"messages": []})), MagicMock())
+
+    assert client.threads.updates == []

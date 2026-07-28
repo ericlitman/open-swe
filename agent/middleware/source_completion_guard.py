@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -14,7 +15,7 @@ from langgraph.types import Command
 from langgraph_sdk import get_client
 
 logger = logging.getLogger(__name__)
-_GITHUB_COMMENT_COMMAND = re.compile(r"(?:^|\s)gh\s+(?:issue|pr)\s+comment(?:\s|$)")
+_GITHUB_COMMENT_URL = re.compile(r"/(issues|pull)/(\d+)(?:$|[/?#])")
 _SOURCES_WITH_COMPLETION_REPLY = {"github", "github_issue", "linear", "slack"}
 
 
@@ -30,6 +31,26 @@ def _tool_args(request: ToolCallRequest) -> dict[str, Any]:
     tool_call = getattr(request, "tool_call", None)
     args = tool_call.get("args") if isinstance(tool_call, Mapping) else None
     return dict(args) if isinstance(args, Mapping) else {}
+
+
+def _github_comment_target(command: str) -> tuple[str, int] | None:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    for index, token in enumerate(tokens[:-3]):
+        if token != "gh" or tokens[index + 1] not in {"issue", "pr"}:
+            continue
+        if tokens[index + 2] != "comment":
+            continue
+        target = tokens[index + 3]
+        if target.isdigit():
+            return tokens[index + 1], int(target)
+        match = _GITHUB_COMMENT_URL.search(target)
+        if match is not None:
+            kind = "issue" if match.group(1) == "issues" else "pr"
+            return kind, int(match.group(2))
+    return None
 
 
 def _payload(result: ToolMessage | Command[Any]) -> dict[str, Any]:
@@ -57,10 +78,17 @@ def _successful(result: ToolMessage | Command[Any]) -> bool:
 class SourceCompletionGuardMiddleware(AgentMiddleware):
     state_schema = AgentState
 
-    def __init__(self, *, thread_id: str, source: str) -> None:
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        source: str,
+        github_target: tuple[str, int] | None = None,
+    ) -> None:
         super().__init__()
         self._thread_id = thread_id
         self._source = source
+        self._github_target = github_target
         self._pr: dict[str, Any] | None = None
         self._replied = False
 
@@ -85,7 +113,11 @@ class SourceCompletionGuardMiddleware(AgentMiddleware):
             return name == "slack_thread_reply"
         if self._source in {"github", "github_issue"} and name == "execute":
             command = _tool_args(request).get("command")
-            return isinstance(command, str) and bool(_GITHUB_COMMENT_COMMAND.search(command))
+            return (
+                isinstance(command, str)
+                and self._github_target is not None
+                and _github_comment_target(command) == self._github_target
+            )
         return False
 
     async def awrap_tool_call(
