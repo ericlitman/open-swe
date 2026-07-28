@@ -1,4 +1,4 @@
-.PHONY: all format format-check lint typecheck test tests integration_tests help run dev
+.PHONY: all format format-check lint typecheck test tests integration_tests help run dev production production-check
 
 # Default target executed when no arguments are given to make.
 all: help
@@ -7,8 +7,19 @@ all: help
 # DEVELOPMENT
 ######################
 
+PRODUCTION_PORT ?= 2024
+
 dev:
 	uv run langgraph dev
+
+production:
+	COMPOSE_PROJECT_NAME=open-swe-control-plane uv run langgraph up --port $(PRODUCTION_PORT)
+
+production-check:
+	uv run langgraph validate -c langgraph.json
+	@output=$$(mktemp); \
+		uv run langgraph dockerfile -c langgraph.json $$output; \
+		rm -f $$output
 
 run:
 	uv run uvicorn agent.webapp:app --reload --port 8000
@@ -63,6 +74,8 @@ typecheck:
 help:
 	@echo '----'
 	@echo 'dev                          - run LangGraph dev server'
+	@echo 'production                   - run persistence-backed Agent Server (default :2024)'
+	@echo 'production-check             - validate and render production configuration'
 	@echo 'run                          - run webhook server'
 	@echo 'install                      - install dependencies (incl. dev extras)'
 	@echo 'format                       - run code formatters'

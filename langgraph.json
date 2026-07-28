@@ -20,7 +20,7 @@
     "ttl": {
       "strategy": "delete",
       "sweep_interval_minutes": 60,
-      "default_ttl": 43200
+      "default_ttl": 1440
     }
   },
   "env": ".env"
