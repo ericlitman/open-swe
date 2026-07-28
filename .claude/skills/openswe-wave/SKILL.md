@@ -15,7 +15,7 @@ Load references only at their workflow event:
 - Read `references/adjudication-checklist.md` only when a plan is ready for review.
 - Read `references/recovery-runbook.md` only after a stall, merge conflict, queue stall, or other recovery event.
 
-Running `scripts/anchor-sweep` over the canonical ticket before dispatch remains required verification, not loading; run the CLI without reading its implementation.
+Running `scripts/anchor-sweep` over the canonical ticket before dispatch is verification, not loading, and is required for out-of-repo/host-state tickets, tickets declaring normative sources, disposable probes, and bundles; for ordinary in-repo tickets the plan gate's re-anchor owns premise verification (OSWE-103 tally, 2026-07-28). Run the CLI without reading its implementation.
 
 Keep plan adjudication and spot-audits at full operator weight. Use these files only to remove mechanical polling, status relay, and deterministic recovery work.
 Use `openswe-bundle` first when composing a triaged batch into atomic bundles and sequenced wave siblings.
@@ -80,7 +80,7 @@ or unavailable plan state receives no bypass and follows the existing plan gate.
 
 ## Workflow
 
-1. Use `scripts/anchor-sweep <ref> <ticket-file>` before dispatch. Treat present/moved/missing as mechanical evidence only; inspect semantic drift yourself.
+1. Use `scripts/anchor-sweep <ref> <ticket-file>` before dispatch for out-of-repo/host-state tickets, tickets declaring normative sources, disposable probes, and bundles; ordinary in-repo tickets rely on the plan gate's re-anchor (OSWE-103). Treat present/moved/missing as mechanical evidence only; inspect semantic drift yourself.
    For a disposable merge-gate probe, complete `references/disposable-probe-safety.md` before creating its branch or PR.
 2. Use the templates in `references/comment-templates.md` for dispatch, approval, spot-audit, closeout, and the OSWE-100 tally.
 3. Apply `references/adjudication-checklist.md` before approving a plan.

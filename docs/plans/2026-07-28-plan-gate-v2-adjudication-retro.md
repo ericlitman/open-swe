@@ -167,8 +167,10 @@ continues at full checklist weight.**
    only noticed by a human reading the plan. Rubber-stamping stays prohibited
    (OSWE-140 scope correction stands).
 
-The operative change lands in the wave adjudication checklist ("Before dispatch"
-section) alongside this retro.
+The operative change lands alongside this retro in the wave skill's operator
+surfaces: the adjudication checklist's "Before dispatch" section and the two
+`SKILL.md` sites (loading contract, workflow step 1) that previously mandated
+anchor-sweep before every dispatch.
 
 ## Follow-ups
 
