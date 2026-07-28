@@ -5,7 +5,6 @@ import hmac
 import json
 import logging
 import os
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, quote
@@ -50,6 +49,10 @@ from ..review.findings import (
 )
 from ..review.publish import fetch_pr_review_threads, post_review_started_comment  # noqa: F401
 from ..review.reconcile import reconcile_findings_with_review_threads  # noqa: F401
+from ..utils.comment_mentions import (
+    classify_comment_mention,
+    extract_adjacent_repo_directive,
+)
 from ..utils.comments import get_recent_comments  # noqa: F401
 from ..utils.dashboard_links import dashboard_thread_url  # noqa: F401
 from ..utils.github_app import (
@@ -113,7 +116,7 @@ from ..utils.slack_feedback import (
     process_slack_reaction_added,
     process_slack_reaction_removed,
 )
-from ..utils.thread_ids import generate_thread_id_from_slack_thread
+from ..utils.thread_ids import generate_reviewer_thread_id, generate_thread_id_from_slack_thread
 from ..utils.thread_ops import queue_message_for_thread  # noqa: F401
 
 __all__ = [
@@ -175,6 +178,7 @@ __all__ = [
     "_upsert_slack_thread_repo_metadata",
     "append_finding_interaction",
     "build_pr_prompt",
+    "classify_comment_mention",
     "complete_review_check_run",
     "create_review_check_run",
     "dashboard_thread_url",
@@ -183,6 +187,7 @@ __all__ = [
     "default_vision_model_pair",
     "dispatch_agent_run",
     "email_for_login",
+    "extract_adjacent_repo_directive",
     "extract_image_urls",
     "extract_pr_context",
     "extract_repo_from_text",
@@ -428,11 +433,6 @@ def generate_thread_id_from_github_issue(issue_id: str) -> str:
         f"{hash_bytes[:8]}-{hash_bytes[8:12]}-{hash_bytes[12:16]}-"
         f"{hash_bytes[16:20]}-{hash_bytes[20:32]}"
     )
-
-
-def generate_reviewer_thread_id(owner: str, repo: str, pr_number: int) -> str:
-    stable_key = f"{owner}/{repo}/pr/{pr_number}/reviewer"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
 
 
 def _extract_repo_config_from_thread(thread: ThreadLike) -> dict[str, str] | None:

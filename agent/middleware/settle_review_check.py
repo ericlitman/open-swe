@@ -45,7 +45,11 @@ async def settle_review_check_on_exit(
 
     try:
         metadata = await get_thread_metadata(thread_id)
-        if not isinstance(metadata.get("review_check_run_id"), int):
+        check_run_id = metadata.get("review_check_run_id")
+        if not isinstance(check_run_id, int):
+            return None
+        deferred = metadata.get("review_check_deferred_result")
+        if isinstance(deferred, dict) and deferred.get("review_check_run_id") == check_run_id:
             return None
         token = get_github_token()
         if not token:
