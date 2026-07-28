@@ -182,3 +182,47 @@ anchor-sweep before every dispatch.
 - OSWE-91 (wave 5 routing flip) remains undispatched; its plan run will be the
   first test of the narrowed procedure on a deployment-heavy ticket — it falls in
   the remains-required tier.
+
+## Addendum — validity caveats and decision status (2026-07-28, post-merge)
+
+Recorded after operator review of this retro on the OSWE-103 thread. This
+section is append-only; the body above is unchanged. It corrects how the body
+should be read and changes the decision's status.
+
+**Roles.** "Manual adjudication," "operator," and "adjudicator" above mean the
+orchestrating Claude session, not a human. That session performs most ticket
+writing, the pre-dispatch check, plan review, and the post-implementation
+spot-audit (auditing the diff against the approved plan before the independent
+reviewer and CI settle — a stage the body's framing underplays). The human
+operator appears for host-only actions and as final authority. The pipeline
+therefore has the same session class at four of six stages, evaluating a gate
+whose inputs it prepared.
+
+**What the tally did not measure.** The "Manual catch" column counts only
+catches made at plan review. Everything the session caught *before* dispatch
+became an invisible ticket edit — corrected descriptions, staleness notes,
+pre-dispatch audits — and was never scored as a catch. The measured tickets
+were also unusually clean at authoring: most were written by sessions reading
+the code minutes earlier. "Zero decisive in-repo catches" therefore partly
+reflects pre-dispatch curation doing its job, not proof that the layer was
+redundant. There is additionally a self-grading limitation: the same session
+class adjudicated the plans and scored those adjudications here; the only
+fully independent judges in the loop are the reviewer graph, CI, and the human
+operator.
+
+**What still stands.** The host-state boundary is structural, not a curation
+artifact: all four decisive plan-review catches and the single refuted
+challenge premise concern facts the sandbox cannot observe. And the 53
+challenged premises are a genuine sample of curation failure — each reached
+the gate only because the session's pre-dispatch pass missed it or the code
+moved after triage — so "the gate reliably catches in-repo staleness that
+slips past curation" is supported (52/53 handled correctly, none fully false).
+
+**Decision status: downgraded from conclusion to monitored hypothesis.** The
+narrowed before-dispatch rule stays in force for the next batch, which
+supplies the missing sample (less-curated tickets reaching the gate). During
+that batch, every pre-dispatch ticket correction and every in-repo defect
+first caught at plan review, spot-audit, code review, or CI is recorded as a
+data row; the re-tally and keep-or-revert ruling are tracked as OSWE-200.
+Revert restores the prior always-verify wording in the adjudication checklist
+and both wave `SKILL.md` sites.
