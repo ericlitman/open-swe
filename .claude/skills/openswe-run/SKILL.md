@@ -6,6 +6,7 @@ description: Dispatch one Open SWE ticket or one atomic ticket bundle via the @o
 # openswe-run: execute one ticket or atomic bundle
 
 Single-run sibling of `openswe-wave`. Dispatch → watch → adjudicate plan → watch → report. A bundle remains one run: the first ticket is primary, included tickets share its Linear thread, branch, plan, PR, and monitor.
+Use `openswe-bundle` first when deciding whether tickets belong in one atomic run or separate waves.
 Run state changes go through an `@openswe` Linear comment (the product path — runs stay
 operator-observable in the dashboard). Never create, resume, or mutate LangGraph runs via the
 SDK/API; read-only status queries are what the bundled monitor already does for you.
@@ -55,7 +56,7 @@ the harnesses discover those renamed directories as additional skills. `ln -sfn`
 **not** replace an existing real directory, so deletion must happen first:
 
 ```bash
-for name in openswe-run openswe-wave; do
+for name in openswe-run openswe-wave openswe-bundle; do
   dest=~/.claude/skills/$name
   rm -rf -- "$dest" "$dest".pre-checkout* "$dest".previous.*
   ln -s <checkout>/.claude/skills/$name "$dest"
@@ -64,7 +65,8 @@ done
 
 (and the same into `${CODEX_HOME:-$HOME/.codex}/skills`). On managed operator hosts,
 use `studio2-ops/bin/install-release-skills`, which performs this deletion-only
-migration and verifies all four links. The scripts resolve their
+migration and verifies the run and wave symlink pairs. Install the bundle pair manually
+until the managed-installer follow-up lands. The scripts resolve their
 wave dependencies from the sibling skill in the checkout, so no vendoring or copying
 step exists. Upgrade with `git -C <checkout> pull`; provenance is
 `git -C <checkout> rev-parse HEAD`; drift is `git -C <checkout> status`.
