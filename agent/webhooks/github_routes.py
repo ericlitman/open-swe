@@ -8,6 +8,16 @@ from . import github as service
 router = APIRouter()
 
 
+def _github_mention_ignore_reason(disposition: str, *, subject: str) -> str:
+    reasons = {
+        "no_mention": f"{subject} does not mention @openswe or @open-swe",
+        "mid_line": f"{subject} mention is not at start of line",
+        "inline_code": f"{subject} mention is inside inline code",
+        "fenced_code": f"{subject} mention is inside a fenced code block",
+    }
+    return reasons[disposition]
+
+
 @router.post("/webhooks/github")
 async def github_webhook(
     request: common.Request, background_tasks: common.BackgroundTasks
@@ -100,10 +110,17 @@ async def github_webhook(
                 common.logger.info("Ignoring GitHub issue edit without title/body changes")
                 return {"status": "ignored", "reason": "Issue edit did not change title or body"}
 
-        issue_text = f"{issue.get('title', '')}\n\n{issue.get('body', '')}".lower()
-        if not any(tag in issue_text for tag in common.OPEN_SWE_TAGS):
-            common.logger.info("Ignoring issue that does not mention @openswe or @open-swe")
-            return {"status": "ignored", "reason": "Issue does not mention @openswe or @open-swe"}
+        title_mention = common.classify_comment_mention(
+            issue.get("title", ""), common.OPEN_SWE_TAGS
+        )
+        body_mention = common.classify_comment_mention(
+            issue.get("body", "") or "", common.OPEN_SWE_TAGS
+        )
+        if "accepted" not in {title_mention.disposition, body_mention.disposition}:
+            mention = title_mention if title_mention.disposition != "no_mention" else body_mention
+            reason = _github_mention_ignore_reason(mention.disposition, subject="Issue")
+            common.logger.info("Ignoring GitHub issue: %s", reason)
+            return {"status": "ignored", "reason": reason}
 
         gate_rejection = await common._enforce_public_repo_org_gate(payload, event_type)
         if gate_rejection is not None:
@@ -135,13 +152,16 @@ async def github_webhook(
         background_tasks.add_task(service.process_github_review_finding_reply, payload)
         return {"status": "accepted", "message": "Processing review finding reply"}
 
-    if not any(tag in comment_body.lower() for tag in common.OPEN_SWE_TAGS):
+    mention = common.classify_comment_mention(comment_body, common.OPEN_SWE_TAGS)
+    if mention.disposition != "accepted":
+        reason = _github_mention_ignore_reason(mention.disposition, subject="Comment")
         common.logger.debug(
-            "Ignoring GitHub %s%s that does not mention @openswe or @open-swe",
+            "Ignoring GitHub %s%s: %s",
             event_type,
             f" action={action}" if action else "",
+            reason,
         )
-        return {"status": "ignored", "reason": "Comment does not mention @openswe or @open-swe"}
+        return {"status": "ignored", "reason": reason}
 
     gate_rejection = await common._enforce_public_repo_org_gate(payload, event_type)
     if gate_rejection is not None:
