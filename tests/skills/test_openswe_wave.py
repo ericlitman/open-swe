@@ -309,6 +309,26 @@ def test_review_absent_uses_window_and_draft_recovery_hint() -> None:
         "observed_at": "2026-07-24T12:06:00Z",
     }
 
+    snapshot["pr"]["statusCheckRollup"] = {
+        "contexts": {
+            "nodes": [
+                {"__typename": "CheckRun", "name": "Open SWE Review", "status": "IN_PROGRESS"}
+            ]
+        }
+    }
+    assert wave.review_absent_event(snapshot, 900) is None
+
+    snapshot["pr"]["statusCheckRollup"] = {
+        "contexts": {
+            "nodes": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "Open SWE Review",
+                    "status": "COMPLETED",
+                }
+            ]
+        }
+    }
     assert wave.review_absent_event(snapshot, 901) is None
     event = wave.review_absent_event(snapshot, 900)
 
@@ -364,7 +384,21 @@ def test_github_snapshot_paginates_complete_actor_timeline(
         calls.append(variables)
         cursor = variables.get("cursor")
         if "WavePrState" in query:
-            connection = {"autoMergeRequest": {"enabledAt": "now"}, "mergeStateStatus": "CLEAN"}
+            connection = {
+                "autoMergeRequest": {"enabledAt": "now"},
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": {
+                    "contexts": {
+                        "nodes": [
+                            {
+                                "__typename": "CheckRun",
+                                "name": "Open SWE Review",
+                                "status": "IN_PROGRESS",
+                            }
+                        ]
+                    }
+                },
+            }
         elif "WaveLabels" in query:
             connection = {"labels": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
         elif "WaveReviewThreads" in query:
@@ -411,6 +445,9 @@ def test_github_snapshot_paginates_complete_actor_timeline(
     assert pr["timeline_complete"] is True
     assert len(pr["timelineItems"]["nodes"]) == 2
     assert pr["autoMergeRequest"] == {"enabledAt": "now"}
+    assert pr["statusCheckRollup"]["contexts"]["nodes"] == [
+        {"__typename": "CheckRun", "name": "Open SWE Review", "status": "IN_PROGRESS"}
+    ]
 
 
 def test_github_snapshot_retries_torn_review_threads_from_start(
