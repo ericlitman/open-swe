@@ -887,9 +887,11 @@ def cmd_start(args: argparse.Namespace) -> int:
             boundaries=(
                 args.boundaries or f"no changes beyond {issue['identifier']}'s stated scope"
             ).removesuffix("."),
-            verify=(args.verify or "focused tests, `make lint`, and `make typecheck`").removesuffix(
-                "."
-            ),
+            verify=(
+                args.verify
+                or "focused tests plus the repository's own lint and typecheck gates; "
+                "name the exact commands in the plan"
+            ).removesuffix("."),
         )
     guard_body_hygiene(body)
     guard_placeholders(args.ticket, body, args.force)
