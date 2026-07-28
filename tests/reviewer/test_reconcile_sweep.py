@@ -173,7 +173,6 @@ def _auto_merge_thread(**metadata: Any) -> dict[str, Any]:
         "auto_merge_phase": "pending",
         "auto_merge_phase_at": datetime.now(UTC).isoformat(),
         "auto_merge_head_sha": "",
-        "auto_merge_recovery_attempted": False,
     }
     base.update(metadata)
     return {"thread_id": "agent-thread", "metadata": base}
@@ -185,16 +184,52 @@ def _pr_data(**overrides: Any) -> dict[str, Any]:
         "state": "OPEN",
         "isDraft": False,
         "baseRefName": "main",
-        "headRefName": "open-swe/change",
         "headRefOid": "abc123",
-        "mergeStateStatus": "CLEAN",
-        "isInMergeQueue": False,
-        "autoMergeRequest": {"enabledAt": "now"},
         "labels": {"nodes": []},
-        "statusCheckRollup": {"state": "SUCCESS"},
     }
     pr.update(overrides)
     return {"repository": {"defaultBranchRef": {"name": "main"}, "pullRequest": pr}}
+
+
+def _check(
+    name: str,
+    *,
+    head_sha: str = "abc123",
+    status: str = "completed",
+    conclusion: str | None = "success",
+    app: str = "mergify",
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "head_sha": head_sha,
+        "status": status,
+        "conclusion": conclusion,
+        "app": {"slug": app},
+    }
+
+
+def _checks(
+    *,
+    head_sha: str = "abc123",
+    protections_status: str = "completed",
+    protections_conclusion: str | None = "success",
+    queue_status: str = "completed",
+    queue_conclusion: str | None = "neutral",
+) -> dict[str, dict[str, Any]]:
+    return {
+        reconcile._MERGIFY_PROTECTIONS_CHECK: _check(
+            reconcile._MERGIFY_PROTECTIONS_CHECK,
+            head_sha=head_sha,
+            status=protections_status,
+            conclusion=protections_conclusion,
+        ),
+        reconcile._MERGIFY_QUEUE_CHECK: _check(
+            reconcile._MERGIFY_QUEUE_CHECK,
+            head_sha=head_sha,
+            status=queue_status,
+            conclusion=queue_conclusion,
+        ),
+    }
 
 
 @asynccontextmanager
@@ -202,77 +237,17 @@ async def _fake_github_client(**_kwargs: Any):
     yield object()
 
 
-@pytest.mark.asyncio
-async def test_auto_merge_stall_cycles_disable_then_rearm_once(
+async def _coro(value: Any) -> Any:
+    return value
+
+
+def _patch_auto_merge(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    old = (datetime.now(UTC) - timedelta(minutes=6)).isoformat()
-    threads = _FakeThreads(
-        [
-            [
-                _auto_merge_thread(
-                    auto_merge_phase="green",
-                    auto_merge_phase_at=old,
-                    auto_merge_head_sha="abc123",
-                )
-            ]
-        ]
-    )
-    client = _FakeClient(threads, _FakeRuns({}))
-    _patch(monkeypatch, client)
-    monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
-    queries: list[str] = []
-
-    async def fake_graphql(_client: Any, query: str, _variables: dict[str, Any]):
-        queries.append(query)
-        return _pr_data() if len(queries) == 1 else {}
-
-    monkeypatch.setattr(reconcile, "_graphql", fake_graphql)
-
-    counts = await reconcile.reconcile_auto_merge_prs()
-
-    assert counts["rearmed"] == 1
-    assert queries[1] == reconcile._DISABLE_AUTO_MERGE
-    assert queries[2] == reconcile._ENABLE_AUTO_MERGE
-    updates = [call.kwargs["metadata"] for call in threads.update.await_args_list]
-    assert updates[0]["auto_merge_recovery_attempted"] is True
-
-
-@pytest.mark.asyncio
-async def test_auto_merge_green_draft_alerts_without_readying(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    threads = _FakeThreads([[_auto_merge_thread()]])
-    client = _FakeClient(threads, _FakeRuns({}))
-    _patch(monkeypatch, client)
-    monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
-    monkeypatch.setattr(
-        reconcile,
-        "_graphql",
-        lambda *_a, **_kw: _coro(_pr_data(isDraft=True, autoMergeRequest=None)),
-    )
-    alert = AsyncMock(return_value=None)
-    monkeypatch.setattr(reconcile, "_post_alert", alert)
-
-    counts = await reconcile.reconcile_auto_merge_prs()
-
-    assert counts["alerted"] == 1
-    alert.assert_awaited_once()
-    assert threads.update.await_args is not None
-    assert threads.update.await_args.kwargs["metadata"]["auto_merge_reconcile"] is False
-
-
-@pytest.mark.asyncio
-async def test_auto_merge_hold_disables_and_never_rearms(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    threads = _FakeThreads([[_auto_merge_thread()]])
+    threads: _FakeThreads,
+    *,
+    pr: dict[str, Any] | None = None,
+    checks: dict[str, dict[str, Any]] | Exception | None = None,
+) -> list[str]:
     _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
     monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
     monkeypatch.setattr(
@@ -282,18 +257,177 @@ async def test_auto_merge_hold_disables_and_never_rearms(
 
     async def fake_graphql(_client: Any, query: str, _variables: dict[str, Any]):
         queries.append(query)
-        return _pr_data(labels={"nodes": [{"name": "hold-merge"}]}) if len(queries) == 1 else {}
+        return pr or _pr_data()
+
+    async def fake_checks(*_args: Any, **_kwargs: Any) -> dict[str, dict[str, Any]]:
+        if isinstance(checks, Exception):
+            raise checks
+        return checks or _checks()
 
     monkeypatch.setattr(reconcile, "_graphql", fake_graphql)
+    monkeypatch.setattr(reconcile, "_mergify_checks", fake_checks)
+    return queries
+
+
+def _last_phase(threads: _FakeThreads) -> str:
+    await_args = threads.update.await_args
+    assert await_args is not None
+    return await_args.kwargs["metadata"]["auto_merge_phase"]
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_observes_mergify_enqueue_on_exact_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _FakeThreads([[_auto_merge_thread()]])
+    queries = _patch_auto_merge(monkeypatch, threads)
 
     counts = await reconcile.reconcile_auto_merge_prs()
 
-    assert counts["held_disabled"] == 1
-    assert queries == [reconcile._AUTO_MERGE_QUERY, reconcile._DISABLE_AUTO_MERGE]
+    assert counts["enqueue"] == 1
+    assert _last_phase(threads) == "enqueue"
+    assert queries == [reconcile._AUTO_MERGE_QUERY]
 
 
-async def _coro(value: Any) -> Any:
-    return value
+@pytest.mark.asyncio
+async def test_auto_merge_awaits_mergify_checks_on_exact_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _FakeThreads([[_auto_merge_thread()]])
+    _patch_auto_merge(
+        monkeypatch,
+        threads,
+        checks=_checks(protections_status="in_progress", protections_conclusion=None),
+    )
+
+    counts = await reconcile.reconcile_auto_merge_prs()
+
+    assert counts["awaiting_checks"] == 1
+    assert _last_phase(threads) == "awaiting_checks"
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_observes_mergify_queue_on_exact_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _FakeThreads([[_auto_merge_thread()]])
+    _patch_auto_merge(
+        monkeypatch,
+        threads,
+        checks=_checks(queue_status="in_progress", queue_conclusion=None),
+    )
+
+    counts = await reconcile.reconcile_auto_merge_prs()
+
+    assert counts["queued"] == 1
+    assert _last_phase(threads) == "queued"
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_records_merged_pr_without_reading_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _FakeThreads([[_auto_merge_thread()]])
+    checks = AsyncMock()
+    _patch_auto_merge(monkeypatch, threads, pr=_pr_data(state="MERGED"))
+    monkeypatch.setattr(reconcile, "_mergify_checks", checks)
+
+    counts = await reconcile.reconcile_auto_merge_prs()
+
+    assert counts["merged"] == 1
+    assert _last_phase(threads) == "merged"
+    await_args = threads.update.await_args
+    assert await_args is not None
+    assert await_args.kwargs["metadata"]["auto_merge_reconcile"] is False
+    checks.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [RuntimeError("Mergify unavailable"), _checks(head_sha="old-head")],
+    ids=["outage", "stale-head"],
+)
+@pytest.mark.asyncio
+async def test_auto_merge_hold_returns_exact_head_pr_to_draft_before_mergify_state(
+    monkeypatch: pytest.MonkeyPatch,
+    checks: dict[str, dict[str, Any]] | Exception,
+) -> None:
+    threads = _FakeThreads([[_auto_merge_thread(merge_hold_requested=True)]])
+    queries = _patch_auto_merge(monkeypatch, threads, checks=checks)
+
+    counts = await reconcile.reconcile_auto_merge_prs()
+
+    assert counts["held"] == 1
+    assert counts["held_drafted"] == 1
+    assert counts["backend_unavailable"] == 0
+    assert counts["stale_head"] == 0
+    assert _last_phase(threads) == "held"
+    assert queries == [reconcile._AUTO_MERGE_QUERY, reconcile._CONVERT_TO_DRAFT]
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_stale_mergify_head_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _FakeThreads([[_auto_merge_thread()]])
+    queries = _patch_auto_merge(monkeypatch, threads, checks=_checks(head_sha="old-head"))
+
+    counts = await reconcile.reconcile_auto_merge_prs()
+
+    assert counts["stale_head"] == 1
+    assert _last_phase(threads) == "stale_head"
+    assert queries == [reconcile._AUTO_MERGE_QUERY]
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_mergify_outage_fails_closed_and_recovers_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _FakeThreads([[_auto_merge_thread()]])
+    queries = _patch_auto_merge(monkeypatch, threads, checks=RuntimeError("Mergify unavailable"))
+
+    counts = await reconcile.reconcile_auto_merge_prs()
+
+    assert counts["backend_unavailable"] == 1
+    assert _last_phase(threads) == "backend_unavailable"
+    assert queries == [reconcile._AUTO_MERGE_QUERY]
+    await_args = threads.update.await_args
+    assert await_args is not None
+    assert "auto_merge_reconcile" not in await_args.kwargs["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_mergify_checks_require_mergify_app_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "check_runs": [
+                    _check(reconcile._MERGIFY_PROTECTIONS_CHECK, app="other-app"),
+                    _check(reconcile._MERGIFY_QUEUE_CHECK),
+                ]
+            }
+
+    monkeypatch.setattr(reconcile, "github_request", lambda *_a, **_kw: _coro(Response()))
+
+    client: Any = object()
+    checks = await reconcile._mergify_checks(client, "acme", "widget", "abc123")
+
+    assert reconcile._MERGIFY_PROTECTIONS_CHECK not in checks
+    assert reconcile._mergify_state(checks, "abc123") == "backend_unavailable"
+
+
+def test_auto_merge_reconciler_has_no_native_queue_state_or_mutations() -> None:
+    source = reconcile._AUTO_MERGE_QUERY + reconcile._CONVERT_TO_DRAFT
+
+    assert "isInMergeQueue" not in source
+    assert "enablePullRequestAutoMerge" not in source
+    assert "disablePullRequestAutoMerge" not in source
+    assert "dequeuePullRequest" not in source
 
 
 @pytest.mark.asyncio
@@ -313,116 +447,3 @@ async def test_scheduler_reconcile_runs_both_sweeps(monkeypatch: pytest.MonkeyPa
     }
     stale.assert_awaited_once()
     auto_merge.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_auto_merge_persisted_hold_disables_without_label(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    threads = _FakeThreads([[_auto_merge_thread(merge_hold_requested=True)]])
-    _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
-    monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
-    queries: list[str] = []
-
-    async def fake_graphql(_client: Any, query: str, _variables: dict[str, Any]):
-        queries.append(query)
-        return _pr_data() if len(queries) == 1 else {}
-
-    monkeypatch.setattr(reconcile, "_graphql", fake_graphql)
-
-    counts = await reconcile.reconcile_auto_merge_prs()
-
-    assert counts["held_disabled"] == 1
-    assert queries == [reconcile._AUTO_MERGE_QUERY, reconcile._DISABLE_AUTO_MERGE]
-
-
-@pytest.mark.asyncio
-async def test_auto_merge_failed_rearm_becomes_alertable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    old = (datetime.now(UTC) - timedelta(minutes=6)).isoformat()
-    threads = _FakeThreads(
-        [
-            [
-                _auto_merge_thread(
-                    auto_merge_phase="recovery",
-                    auto_merge_phase_at=old,
-                    auto_merge_head_sha="abc123",
-                    auto_merge_recovery_attempted=True,
-                )
-            ]
-        ]
-    )
-    _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
-    monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
-    monkeypatch.setattr(
-        reconcile,
-        "_graphql",
-        lambda *_a, **_kw: _coro(_pr_data(autoMergeRequest=None)),
-    )
-    alert = AsyncMock(return_value=None)
-    monkeypatch.setattr(reconcile, "_post_alert", alert)
-
-    counts = await reconcile.reconcile_auto_merge_prs()
-
-    assert counts["alerted"] == 1
-    assert counts["armed"] == 0
-    alert.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_auto_merge_hold_dequeues_queued_pr(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    threads = _FakeThreads([[_auto_merge_thread(merge_hold_requested=True)]])
-    _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
-    monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
-    queries: list[str] = []
-
-    async def fake_graphql(_client: Any, query: str, _variables: dict[str, Any]):
-        queries.append(query)
-        return _pr_data(isInMergeQueue=True) if len(queries) == 1 else {}
-
-    monkeypatch.setattr(reconcile, "_graphql", fake_graphql)
-
-    counts = await reconcile.reconcile_auto_merge_prs()
-
-    assert counts["held_dequeued"] == 1
-    assert counts["held_disabled"] == 1
-    assert queries == [
-        reconcile._AUTO_MERGE_QUERY,
-        reconcile._DEQUEUE_PULL_REQUEST,
-        reconcile._DISABLE_AUTO_MERGE,
-    ]
-
-
-@pytest.mark.asyncio
-async def test_auto_merge_queue_entry_keeps_reconciliation_active(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    threads = _FakeThreads([[_auto_merge_thread()]])
-    _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
-    monkeypatch.setattr(reconcile, "github_client", _fake_github_client)
-    monkeypatch.setattr(
-        reconcile, "get_github_app_installation_token", lambda **_kw: _coro("token")
-    )
-    monkeypatch.setattr(
-        reconcile,
-        "_graphql",
-        lambda *_a, **_kw: _coro(_pr_data(isInMergeQueue=True)),
-    )
-
-    counts = await reconcile.reconcile_auto_merge_prs()
-
-    assert counts["queued"] == 1
-    assert threads.update.await_args is not None
-    assert threads.update.await_args.kwargs["metadata"]["auto_merge_reconcile"] is True
