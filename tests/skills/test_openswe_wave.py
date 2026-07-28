@@ -1120,6 +1120,7 @@ def test_watch_emits_terminal_merged_once_for_explicit_already_merged_pr(
 
     assert result == 0
     assert [item["wake_node"] for item in emitted] == ["terminal_merged"]
+    assert emitted[0]["summary"] == "PR #53 merged"
 
 
 def test_watch_discovers_already_merged_pr_from_thread_metadata(

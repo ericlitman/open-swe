@@ -714,6 +714,42 @@ def test_midnight_run_uses_one_log_and_report_includes_all_evidence(
     assert "after midnight" in output
 
 
+def test_failed_start_retry_reuses_log_and_report_keeps_issues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+
+    path = run.log_path("ABC-1", new_run=True)
+    run.dogfood("ABC-1", "ISSUE", "failed start root cause: missing [cmd] dispatched marker")
+
+    assert run.log_path("ABC-1", new_run=True) == path
+
+    run.dogfood("ABC-1", "cmd", "dispatched ABC-1 to owner/name (https://linear/ABC-1)")
+    run.dogfood("ABC-1", "ISSUE", "successful retry follow-up")
+
+    assert run.cmd_report(argparse.Namespace(ticket="ABC-1")) == 0
+    output = capsys.readouterr().out
+    assert "dogfood issues (2):" in output
+    assert "failed start root cause" in output
+    assert "successful retry follow-up" in output
+
+
+def test_start_after_confirmed_dispatch_rotates_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+
+    first = run.log_path("ABC-1", new_run=True)
+    run.dogfood("ABC-1", "cmd", "dispatched ABC-1 to owner/name (https://linear/ABC-1)")
+
+    second = run.log_path("ABC-1", new_run=True)
+
+    assert second != first
+    assert sorted((tmp_path / "handoffs").glob("ABC-1-*-run.md")) == [first, second]
+
+
 def test_non_start_log_establishes_a_timestamped_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -758,6 +794,88 @@ def test_report_discovers_a_legacy_dated_log(
     output = capsys.readouterr().out
     assert f"log: {legacy}" in output
     assert "legacy evidence" in output
+
+
+def test_report_prints_merged_pr_url_and_sha(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    handoffs = run.ensure_handoffs()
+    path = handoffs / "ABC-1-20260727T000100000000Z-run.md"
+    path.write_text(
+        "- 2026-07-27T00:01:00Z [cmd] dispatched ABC-1 to owner/name (https://linear/ABC-1)\n"
+        "- 2026-07-27T00:03:00Z [wake] terminal_merged via wave-monitor: PR #42 merged\n"
+    )
+    monkeypatch.setattr(run, "ensure_handoffs", lambda: handoffs)
+    calls: list[list[str]] = []
+
+    def gh(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "url": "https://github.com/owner/name/pull/42",
+                    "mergeCommit": {"oid": "abc123"},
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(run.subprocess, "run", gh)
+
+    assert run.cmd_report(argparse.Namespace(ticket="ABC-1")) == 0
+
+    output = capsys.readouterr().out
+    assert "terminal state: terminal_merged" in output
+    assert "PR: https://github.com/owner/name/pull/42" in output
+    assert "merge SHA: abc123" in output
+    assert calls == [
+        [
+            "gh",
+            "pr",
+            "view",
+            "42",
+            "--repo",
+            "owner/name",
+            "--json",
+            "url,mergeCommit",
+        ]
+    ]
+
+
+def test_report_merged_lookup_failure_falls_back_without_hiding_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    handoffs = run.ensure_handoffs()
+    path = handoffs / "ABC-1-20260727T000100000000Z-run.md"
+    path.write_text(
+        "- 2026-07-27T00:01:00Z [cmd] dispatched ABC-1 to owner/name (https://linear/ABC-1)\n"
+        "- 2026-07-27T00:02:00Z [wake] pr_opened via wave-monitor: PR #42 opened ready\n"
+        "- 2026-07-27T00:03:00Z [wake] terminal_merged via wave-monitor: PR merged\n"
+        "- 2026-07-27T00:04:00Z [ISSUE] retained evidence\n"
+    )
+    monkeypatch.setattr(run, "ensure_handoffs", lambda: handoffs)
+
+    def unavailable_gh(command: list[str], **kwargs: Any) -> None:
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(run.subprocess, "run", unavailable_gh)
+
+    assert run.cmd_report(argparse.Namespace(ticket="ABC-1")) == 0
+
+    output = capsys.readouterr().out
+    assert "terminal state: terminal_merged" in output
+    assert "PR: owner/name#42" in output
+    assert "merge SHA:" not in output
+    assert "retained evidence" in output
+    assert "Reminder: end the run" in output
 
 
 def test_report_refuses_to_create_a_missing_log(
