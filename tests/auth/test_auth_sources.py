@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 
-from agent.utils import auth, github_token
+from agent.utils import auth, github_app, github_token
 
 
 @pytest.fixture(autouse=True)
@@ -137,27 +138,63 @@ def test_repo_less_schedule_token_mint_fails_closed(
         )
 
 
-def test_resolve_github_token_fails_closed_when_installation_token_unavailable(
+def test_transferred_repo_error_with_app_id_and_key_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_app_token(**kwargs: object) -> tuple[None, None]:
-        assert kwargs == {"target_repo": "acme/widgets", "repositories": ["widgets"]}
-        return None, None
+    class MissingInstallationResponse:
+        def raise_for_status(self) -> None:
+            pass
 
-    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fake_app_token)
+        def json(self) -> dict[str, object]:
+            return {}
 
-    with pytest.raises(RuntimeError, match="GitHub App installation token unavailable"):
+    class MissingInstallationClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> MissingInstallationClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, url: str, **_kwargs: object) -> MissingInstallationResponse:
+            assert url == "https://api.github.com/repos/mobilyze-llc/open-swe/installation"
+            return MissingInstallationResponse()
+
+        async def post(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("missing installation must not mint a token")
+
+    monkeypatch.setenv("GITHUB_APP_ID", "1")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "key")
+    monkeypatch.delenv("GITHUB_APP_INSTALLATION_ID", raising=False)
+    monkeypatch.setattr(github_app, "GITHUB_APP_ID", os.environ["GITHUB_APP_ID"])
+    monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", os.environ["GITHUB_APP_PRIVATE_KEY"])
+    monkeypatch.setattr(
+        github_app, "GITHUB_APP_INSTALLATION_ID", os.environ.get("GITHUB_APP_INSTALLATION_ID", "")
+    )
+    monkeypatch.setattr(github_app, "_generate_app_jwt", lambda: "jwt")
+    monkeypatch.setattr(github_app.httpx, "AsyncClient", MissingInstallationClient)
+    monkeypatch.delenv(github_app.GITHUB_APP_TARGET_REPO_ENV, raising=False)
+
+    with pytest.raises(RuntimeError) as exc_info:
         asyncio.run(
             auth.resolve_github_token(
                 {
                     "configurable": {
                         "source": "dashboard",
-                        "repo": {"owner": "acme", "name": "widgets"},
+                        "repo": {"owner": "mobilyze-llc", "name": "open-swe"},
                     }
                 },
                 "thread-1",
             )
         )
+
+    message = str(exc_info.value)
+    assert "mobilyze-llc/open-swe" in message
+    assert "No GitHub App installation covers repository" in message
+    assert "canonical owner" in message
+    assert "GITHUB_APP_INSTALLATION_ID" not in message
 
 
 def test_resolve_github_token_requires_configurable_state() -> None:

@@ -57,9 +57,10 @@ async def _resolve_bot_installation_token(
         target_repo=f"{owner}/{repository}", repositories=[repository]
     )
     if not token:
+        target_repo = f"{owner}/{repository}"
         raise RuntimeError(
-            "GitHub App installation token unavailable. Set GITHUB_APP_ID, "
-            "GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID."
+            f"No GitHub App installation covers repository {target_repo}. "
+            "Check whether it was renamed or transferred and use its canonical owner."
         )
     logger.info("Using GitHub App installation token for thread %s", thread_id)
     await invalidate_cached_github_token(thread_id)
