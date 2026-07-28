@@ -1222,11 +1222,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             )
         )
     ]
-    pr_wakes = [
-        match
-        for line in wakes
-        if (match := re.search(r"\[wake\] pr_opened\b.*\bPR #(\d+)\b", line))
-    ]
+    pr_wakes = [match for line in wakes if (match := re.search(r"\bPR #(\d+)\b", line))]
     terminal_wakes = [
         match for line in wakes if (match := re.search(r"\[wake\] (terminal_[a-z_]+)\b", line))
     ]

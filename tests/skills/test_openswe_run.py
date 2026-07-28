@@ -693,8 +693,7 @@ def test_report_prints_merged_pr_url_and_sha(
     path = handoffs / "ABC-1-20260727T000100000000Z-run.md"
     path.write_text(
         "- 2026-07-27T00:01:00Z [cmd] dispatched ABC-1 to owner/name (https://linear/ABC-1)\n"
-        "- 2026-07-27T00:02:00Z [wake] pr_opened via wave-monitor: PR #42 opened ready\n"
-        "- 2026-07-27T00:03:00Z [wake] terminal_merged via wave-monitor: PR merged\n"
+        "- 2026-07-27T00:03:00Z [wake] terminal_merged via wave-monitor: PR #42 merged\n"
     )
     monkeypatch.setattr(run, "ensure_handoffs", lambda: handoffs)
     calls: list[list[str]] = []

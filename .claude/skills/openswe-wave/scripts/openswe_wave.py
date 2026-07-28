@@ -949,9 +949,11 @@ def terminal_pr_state_event(
     """Return a terminal PR observation unless its wake was already emitted."""
     pr = snapshot.get("pr") or {}
     state = str(pr.get("state") or "")
+    number = snapshot.get("pr_number") or pr.get("number")
+    label = f"PR #{number}" if number else "PR"
     events = {
-        "MERGED": {"kind": "merged", "source": "github", "summary": "PR merged"},
-        "CLOSED": {"kind": "closed", "source": "github", "summary": "PR closed"},
+        "MERGED": {"kind": "merged", "source": "github", "summary": f"{label} merged"},
+        "CLOSED": {"kind": "closed", "source": "github", "summary": f"{label} closed"},
     }
     event = events.get(state)
     if event is None or state in emitted_states:
