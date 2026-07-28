@@ -1,11 +1,11 @@
 ---
 name: openswe-run
-description: Dispatch one Open SWE ticket via the @openswe Linear-comment path, watch it to a terminal state with minimal orchestration tokens, adjudicate the plan gate at checklist weight, and keep a dogfood log of process/substrate/ergonomics issues. Use for single-ticket execution; use openswe-wave for multi-ticket wave operations.
+description: Dispatch one Open SWE ticket or one atomic ticket bundle via the @openswe Linear-comment path, watch it to a terminal state with minimal orchestration tokens, adjudicate the plan gate at checklist weight, and keep a dogfood log of process/substrate/ergonomics issues. Use openswe-wave for independent multi-ticket wave operations.
 ---
 
-# openswe-run: execute one ticket
+# openswe-run: execute one ticket or atomic bundle
 
-Single-run sibling of `openswe-wave`. Dispatch → watch → adjudicate plan → watch → report.
+Single-run sibling of `openswe-wave`. Dispatch → watch → adjudicate plan → watch → report. A bundle remains one run: the first ticket is primary, included tickets share its Linear thread, branch, plan, PR, and monitor.
 Run state changes go through an `@openswe` Linear comment (the product path — runs stay
 operator-observable in the dashboard). Never create, resume, or mutate LangGraph runs via the
 SDK/API; read-only status queries are what the bundled monitor already does for you.
@@ -95,6 +95,14 @@ handoff in run `019fa5e3-a7f3-7ff2-8e81-499daaf04464`; routine pre-mints are the
 scripts/openswe-run start --ticket OSWE-123 --repo owner/repo --ref main
 ```
 
+For one atomic bundle, repeat `--include-ticket`; all names are resolved through Linear before dispatch, canonicalized, and checked for aliases or primary repetition:
+
+```bash
+scripts/openswe-run start --ticket OSWE-123 --include-ticket OSWE-124 --include-ticket OSWE-125 --repo owner/repo --ref main
+```
+
+The primary is the only comment/thread target. The bundle dispatch names every member, requires the agent to read and reconcile all members before one combined plan, keeps one thread-stable branch, and requires exactly one PR with a standalone `Closes <ID>` line for every member. A normalized bundle manifest is stored only in the primary dogfood log; included tickets receive no dispatch comment, thread, or product metadata. `plan`, `approve`, `reject`, `watch`, and `report` recover that manifest. A malformed manifest fails closed; absence means a legacy single-ticket run. `--force` can override each member's terminal-state guard, with one log entry per terminal member, but cannot bypass bundle placeholder, directive, duplicate, or membership checks.
+
 Posts the standard dispatch comment (template embedded; see `references/run-templates.md`).
 Add `--scope/--boundaries/--verify` when the ticket needs sharper rails, or `--body-file` for
 a fully custom body. `--dry-run` prints the body without posting. Bodies with unfilled
@@ -139,7 +147,9 @@ On `plan_posted`:
 2. **Now** (not earlier) read `../openswe-wave/references/adjudication-checklist.md` and apply every item
    against the ticket and the plan.
 3. Write the approval body from the Approval template in `references/run-templates.md`,
-   recording your challenge rulings and clarifications, then:
+   recording your challenge rulings and clarifications. For a bundle, use the Bundle approval
+   reference text and name every canonical member; approval fails before the plan transition if
+   any member is absent. Then:
 
    ```bash
    scripts/openswe-run approve --ticket OSWE-123 --body-file approval.md --adjudicated
@@ -190,7 +200,7 @@ On `terminal_*`:
 scripts/openswe-run report --ticket OSWE-123
 ```
 
-Hand back: terminal state, PR URL, merge SHA if merged, and the dogfood issues list.
+Hand back: terminal state, PR URL, merge SHA if merged, and the dogfood issues list. For a bundle, `report` performs one live `gh pr view` read for URL/state/body/merge SHA, resolves every member live from Linear, prints each standalone closing-line and terminal-state result, and returns nonzero with explicit `INCOMPLETE` for missing/failed PR evidence, a nonterminal PR, a missing closing line, an unresolved member, or a Linear state type other than `completed`/`canceled`.
 **End every run by summarizing encountered issues in chat output** — say "none recorded"
 explicitly if the log has no `[ISSUE]` lines.
 

@@ -15,6 +15,7 @@
 - Questions capture operator intent rather than silently deciding it.
 - Unverified claims are honest external dependencies, not narrated successful checks.
 - Every acceptance criterion maps to a deliverable and a focused verification step.
+- For a bundle, re-anchor and reconcile the combined scope across every member before approving one atomic plan.
 - The plan names concrete verification commands that exist in the target repository.
 - New state, config, dependencies, or subsystems name the simpler rejected alternative.
 - Challenge unnecessary complexity, machinery layered on machinery, out-of-contract edge-case defenses, and validation of impossible states; prefer the root-cause fix that makes those layers moot.
