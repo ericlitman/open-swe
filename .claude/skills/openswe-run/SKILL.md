@@ -199,7 +199,9 @@ explicitly if the log has no `[ISSUE]` lines.
 Every command appends evidence to `<stable-root>/handoffs/<TICKET>-<date>-run.md`
 (stable root defaults to `~/projects/open-swe`, override with
 `OPENSWE_STABLE_ROOT`; in a Git checkout, the directory is added to the checkout-local
-exclude file without changing tracked files). When you hit friction — confusing output, a hang, a
+exclude file without changing tracked files). A retried `start` reuses the latest fragment until
+that fragment contains the confirmed `[cmd] dispatched` marker; a later start after confirmed
+dispatch creates a new logical-run fragment. When you hit friction — confusing output, a hang, a
 wrong doc, an awkward command — record it the moment it happens:
 
 ```bash

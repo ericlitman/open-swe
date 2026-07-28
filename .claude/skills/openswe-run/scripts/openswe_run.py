@@ -139,8 +139,14 @@ def ensure_handoffs() -> Path:
 def log_path(ticket: str, *, new_run: bool = False) -> Path:
     handoffs = ensure_handoffs()
     candidates = sorted(handoffs.glob(f"{ticket.upper()}-*-run.md"))
-    if candidates and not new_run:
-        return candidates[-1]
+    if candidates:
+        latest = candidates[-1]
+        dispatched = any(
+            re.match(r"^- \S+ \[cmd\] dispatched ", line)
+            for line in latest.read_text().splitlines()
+        )
+        if not new_run or not dispatched:
+            return latest
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     path = handoffs / f"{ticket.upper()}-{stamp}-run.md"
     if not path.exists():
@@ -1207,7 +1213,62 @@ def cmd_report(args: argparse.Namespace) -> int:
     entries = [line for line in path.read_text().splitlines() if line.startswith("- ")]
     issues = [line for line in entries if "[ISSUE]" in line]
     wakes = [line for line in entries if "[wake]" in line]
+    dispatches = [
+        match
+        for line in entries
+        if (
+            match := re.search(
+                r"\[cmd\] dispatched \S+ to ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) ", line
+            )
+        )
+    ]
+    pr_wakes = [
+        match
+        for line in wakes
+        if (match := re.search(r"\[wake\] pr_opened\b.*\bPR #(\d+)\b", line))
+    ]
+    terminal_wakes = [
+        match for line in wakes if (match := re.search(r"\[wake\] (terminal_[a-z_]+)\b", line))
+    ]
+    repo = dispatches[-1].group(1) if dispatches else None
+    pr_number = int(pr_wakes[-1].group(1)) if pr_wakes else None
+    terminal_state = terminal_wakes[-1].group(1) if terminal_wakes else None
+    pr_reference = f"{repo}#{pr_number}" if repo and pr_number else None
+    pr_url = None
+    merge_sha = None
+    if terminal_state == "terminal_merged" and pr_reference:
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "url,mergeCommit",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            result = None
+        if result is not None and result.returncode == 0:
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                payload = {}
+            pr_url = payload.get("url")
+            merge_commit = payload.get("mergeCommit") or {}
+            merge_sha = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
     print(f"log: {path}")
+    print(f"terminal state: {terminal_state or '(none recorded)'}")
+    if pr_url or pr_reference:
+        print(f"PR: {pr_url or pr_reference}")
+    if merge_sha:
+        print(f"merge SHA: {merge_sha}")
     print(f"wakes ({len(wakes)}):")
     for line in wakes:
         print(f"  {line}")
