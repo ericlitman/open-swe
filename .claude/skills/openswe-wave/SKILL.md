@@ -82,6 +82,8 @@ The first sample suppresses historical transitions; persistent terminal, conflic
 
 `pr_opened` and `review_complete` stay quiet when GitHub reports auto-merge already armed. Historical PR creation and completed reviews stay quiet on restart, while an already-conflicted PR and an open PR with neither a published Open SWE review nor an in-progress or queued current-head `Open SWE Review` check after `--review-absent-seconds` (default 900) wake immediately. Draft review-absence summaries include the ready-for-review recovery hint. Acknowledgements, normal progress, successful recoveries, queue entry/position changes, and comments authored by the Linear viewer identity stay quiet. Pass `--session-user-id` only when viewer discovery is unavailable.
 
+**Sharp edge:** the `Open SWE Auto-fix` check conclusion is always neutral by design; the outcome lives in the check's `output.title`, shown as its title in review-related wake summaries.
+
 5. Follow `references/recovery-runbook.md`. The watch command begins before PR creation and discovers the PR from LangGraph metadata. It defaults to recovery dry-run output; after reviewing the recorded-state exercises, restart it with `--apply` to enable acting recovery.
 6. Use `scripts/trace-digest <thread>` for status, token, error, recent-activity, and prompt-size rollups.
 7. Complete the spot-audit and closeout templates. Confirm the tracker transition rather than assuming it.

@@ -219,4 +219,6 @@ scripts/openswe-run log --ticket OSWE-123 --issue "what happened, with the exact
 - The live monitor needs `httpx` + `langgraph_sdk`; system python3 lacks them. The wrapper
   resolves an interpreter automatically (control-plane venv, then `uv`); override with
   `OPENSWE_RUN_PYTHON`.
+- The `Open SWE Auto-fix` check conclusion is always neutral by design; the outcome lives in
+  the check's `output.title`, shown as its title in review-related wake summaries.
 - Exit codes: 0 wake/ok · 2 usage or environment · 3 watch timeout · 4 monitor kept dying.

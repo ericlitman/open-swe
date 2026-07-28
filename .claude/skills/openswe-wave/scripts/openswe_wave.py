@@ -197,7 +197,7 @@ query WavePrState($owner: String!, $repo: String!, $number: Int!) {
         contexts(first: 100) {
           nodes {
             __typename
-            ... on CheckRun { name status }
+            ... on CheckRun { name status title }
           }
         }
       }
@@ -218,7 +218,7 @@ query WavePr($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         contexts(first: 100) {
           nodes {
             __typename
-            ... on CheckRun { name status }
+            ... on CheckRun { name status title }
           }
         }
       }
@@ -987,6 +987,23 @@ def _pr_readiness(pr: dict[str, Any]) -> str:
     return "draft" if pr.get("isDraft") is True else "ready"
 
 
+def _with_autofix_title(summary: str, snapshot: dict[str, Any]) -> str:
+    """Append the current-head Auto-fix outcome title when GitHub exposes one."""
+    pr = snapshot.get("pr") or {}
+    check_contexts = ((pr.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes") or []
+    for context in check_contexts:
+        if (
+            not isinstance(context, dict)
+            or context.get("__typename") != "CheckRun"
+            or context.get("name") != "Open SWE Auto-fix"
+        ):
+            continue
+        title = context.get("title")
+        if isinstance(title, str) and title:
+            return f"{summary}; Open SWE Auto-fix: {title}"
+    return summary
+
+
 def merge_conflict_event(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """Return an actionable merge-conflict observation."""
     pr = snapshot.get("pr") or {}
@@ -1027,7 +1044,11 @@ def review_absent_event(
     summary = f"PR #{number} has no Open SWE review after {window}"
     if pr.get("isDraft") is True:
         summary += "; draft PR may have skipped auto-review — mark it ready for review"
-    return {"kind": "review_absent", "source": "github", "summary": summary}
+    return {
+        "kind": "review_absent",
+        "source": "github",
+        "summary": _with_autofix_title(summary, snapshot),
+    }
 
 
 def snapshot_transition_events(
@@ -1065,7 +1086,9 @@ def snapshot_transition_events(
             {
                 "kind": "review_complete",
                 "source": "github",
-                "summary": f"Open SWE review complete: {count} {noun}",
+                "summary": _with_autofix_title(
+                    f"Open SWE review complete: {count} {noun}", current
+                ),
                 "review_ids": added_reviews,
             }
         )
@@ -1074,7 +1097,9 @@ def snapshot_transition_events(
             {
                 "kind": "review_findings",
                 "source": "github",
-                "summary": f"new unresolved review threads: {', '.join(added_threads)}",
+                "summary": _with_autofix_title(
+                    f"new unresolved review threads: {', '.join(added_threads)}", current
+                ),
             }
         )
     old_merge_state = (previous.get("pr") or {}).get("mergeStateStatus")
