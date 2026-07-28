@@ -442,6 +442,10 @@ def test_wave_symbols_the_script_calls_still_exist() -> None:
     [
         "@openswe repo owner/name — Execute ABC-1 only. See <https://example.com>.",
         "@openswe plain body with no placeholders",
+        "@openswe Use `help <cmd>` for command-specific help.",
+        "@openswe Use:\n```text\nhelp <cmd>\n```",
+        "@openswe Use:\n```text\nhelp <cmd>\n````",
+        "@openswe Use:\n~~~text\nhelp <cmd>\n~~~~",
     ],
 )
 def test_placeholder_guard_allows_filled_bodies(body: str) -> None:
@@ -451,6 +455,36 @@ def test_placeholder_guard_allows_filled_bodies(body: str) -> None:
 def test_placeholder_guard_rejects_unfilled_bodies() -> None:
     with pytest.raises(run.RunError, match="placeholder"):
         run.guard_placeholders("ABC-1", "@openswe Execute <TICKET> only.", False)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@openswe Use `help <cmd>",
+        r"@openswe Use \`help <cmd>\`",
+        "@openswe Use `help <cmd>``",
+        "@openswe Use:\n```text\nhelp <cmd>",
+        "@openswe Use:\n````text\nhelp <cmd>\n```",
+    ],
+)
+def test_placeholder_guard_rejects_placeholders_outside_complete_code(body: str) -> None:
+    with pytest.raises(run.RunError, match="placeholder"):
+        run.guard_placeholders("ABC-1", body, False)
+
+
+def test_placeholder_guard_force_allows_and_logs_unfilled_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        run,
+        "dogfood",
+        lambda ticket, tag, message: events.append((ticket, tag, message)),
+    )
+
+    run.guard_placeholders("ABC-1", "@openswe Execute <TICKET> only.", True)
+
+    assert events == [("ABC-1", "note", "--force posted body with placeholders: <TICKET>")]
 
 
 def test_dispatch_template_leaves_no_placeholder_its_own_guard_would_reject() -> None:
