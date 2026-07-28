@@ -1,8 +1,10 @@
 # openswe-run comment templates
 
 Replace every angle-bracket placeholder and delete unused optional lines. `openswe-run`
-refuses bodies with unfilled placeholders unless `--force` is passed. Dispatch and Approval
-are verbatim-compatible with the openswe-wave templates — do not drift them independently.
+refuses bodies with unfilled placeholders in prose. Contents of complete inline backtick spans
+and fenced code blocks are ignored; `--force` remains available for intentional bare placeholders.
+Dispatch and Approval are verbatim-compatible with the openswe-wave templates — do not drift them
+independently.
 
 ## Dispatch
 

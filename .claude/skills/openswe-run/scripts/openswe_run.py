@@ -58,6 +58,11 @@ PHASE_TIMEOUT_MINUTES = {"plan": 30.0, "delivery": 90.0}
 # Matches unfilled template placeholders like <TICKET> or <owner/repo>; the
 # ':' exclusion spares autolinks like <https://...>.
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z][^>:\n]*>")
+FENCED_CODE_RE = re.compile(
+    r"^ {0,3}(?P<fence>`{3,})(?!`)[^`\n]*\n.*?^ {0,3}(?P=fence)(?!`)[ \t]*(?:\n|$)",
+    re.DOTALL | re.MULTILINE,
+)
+INLINE_CODE_RE = re.compile(r"(?<![\\`])(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)", re.DOTALL)
 # Remove the mention workaround when OSWE-144 closes.
 DIRECTIVE_MENTION_RE = re.compile(r"@openswe\b", re.IGNORECASE)
 # Remove the repository-directive workaround when OSWE-166 closes.
@@ -586,7 +591,8 @@ def guard_body_hygiene(body: str) -> None:
 
 
 def guard_placeholders(ticket: str, body: str, force: bool) -> None:
-    leftovers = sorted(set(PLACEHOLDER_RE.findall(body)))
+    body_without_code = INLINE_CODE_RE.sub("", FENCED_CODE_RE.sub("", body))
+    leftovers = sorted(set(PLACEHOLDER_RE.findall(body_without_code)))
     if leftovers and not force:
         raise RunError(
             f"Body still contains unfilled template placeholders: {', '.join(leftovers)}. "
