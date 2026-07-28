@@ -2,8 +2,7 @@
 
 ## Before dispatch
 
-- Pin the current target ref and run `scripts/anchor-sweep` over the canonical ticket text.
-- Open every cited path and symbol; moved anchors require semantic re-verification.
+- Full anchor verification — pin the current target ref, run `scripts/anchor-sweep` over the canonical ticket text, and open every cited path and symbol (moved anchors require semantic re-verification) — is required only for out-of-repo/host-state tickets, tickets declaring normative sources, disposable probes, and bundles. For ordinary in-repo tickets the plan gate's re-anchor owns premise verification; stale premises surface as Challenges (OSWE-103 tally, 2026-07-28).
 - Any source declared normative (for example, adopt verbatim, match exactly, or byte-identical) must resolve from the target repository at the pinned ref; otherwise inline the exact content in the ticket or dispatch and identify the substitution explicitly.
 - Verify live-state claims with read-only GitHub, Linear, or LangGraph queries.
 - Separate deployed/runtime claims that cannot be checked into Unverified claims.
