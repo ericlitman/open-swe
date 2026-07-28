@@ -49,6 +49,10 @@ from ..review.findings import (
 )
 from ..review.publish import fetch_pr_review_threads, post_review_started_comment  # noqa: F401
 from ..review.reconcile import reconcile_findings_with_review_threads  # noqa: F401
+from ..utils.comment_mentions import (
+    classify_comment_mention,
+    extract_adjacent_repo_directive,
+)
 from ..utils.comments import get_recent_comments  # noqa: F401
 from ..utils.dashboard_links import dashboard_thread_url  # noqa: F401
 from ..utils.github_app import (
@@ -174,6 +178,7 @@ __all__ = [
     "_upsert_slack_thread_repo_metadata",
     "append_finding_interaction",
     "build_pr_prompt",
+    "classify_comment_mention",
     "complete_review_check_run",
     "create_review_check_run",
     "dashboard_thread_url",
@@ -182,6 +187,7 @@ __all__ = [
     "default_vision_model_pair",
     "dispatch_agent_run",
     "email_for_login",
+    "extract_adjacent_repo_directive",
     "extract_image_urls",
     "extract_pr_context",
     "extract_repo_from_text",

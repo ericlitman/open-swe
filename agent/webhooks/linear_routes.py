@@ -62,29 +62,29 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         if comment_body.startswith(prefix):
             common.logger.debug("Ignoring webhook: comment is our own bot message")
             return {"status": "ignored", "reason": "Comment is our own bot message"}
-    if "@openswe" not in comment_body.lower():
-        common.logger.debug("Ignoring webhook: comment doesn't mention @openswe")
-        return {"status": "ignored", "reason": "Comment doesn't mention @openswe"}
+    mention = common.classify_comment_mention(comment_body, ("@openswe",))
+    mention_ignore_reasons = {
+        "no_mention": "Comment doesn't mention @openswe",
+        "mid_line": "@openswe mention is not at start of line",
+        "inline_code": "@openswe mention is inside inline code",
+        "fenced_code": "@openswe mention is inside a fenced code block",
+    }
+    if mention.disposition != "accepted":
+        reason = mention_ignore_reasons[mention.disposition]
+        common.logger.debug("Ignoring webhook: %s", reason)
+        return {"status": "ignored", "reason": reason}
 
     issue = data.get("issue", {})
     if not issue:
         common.logger.debug("Ignoring webhook: no issue data in comment")
         return {"status": "ignored", "reason": "No issue data in comment"}
 
-    # Fetch full issue details to get project info (webhook doesn't include it)
     issue_id = issue.get("id", "")
-    full_issue = await common.fetch_linear_issue_details(issue_id)
-    if not full_issue:
-        common.logger.warning("Failed to fetch full issue details, using webhook data")
-        full_issue = issue
-
-    repo_config = common.extract_repo_from_text(
-        comment_body, default_owner=common.DEFAULT_REPO_OWNER
-    )
+    repo_config = common.extract_adjacent_repo_directive(comment_body, mention)
 
     if repo_config:
         common.logger.debug(
-            "Using repo from comment body: %s/%s",
+            "Using repo from adjacent comment directive: %s/%s",
             repo_config["owner"],
             repo_config["name"],
         )
@@ -96,58 +96,18 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
                 issue_id,
                 data.get("id", ""),
                 "Couldn't safely read a repository from the existing thread. Retry or specify it "
-                "as `repo owner/name`.",
+                "as `repo owner/name` immediately after the agent mention.",
             )
             return {"status": "ignored", "reason": "Failed to access thread repository metadata"}
-
-    if not repo_config:
-        comment_user_email = (data.get("user") or {}).get("email")
-        try:
-            profile_repo = await common.get_profile_default_repo(
-                await common.resolve_login_from_email_async(comment_user_email)
-            )
-        except Exception:  # noqa: BLE001
-            common.logger.exception("Failed to apply dashboard default_repo for Linear user")
-            profile_repo = None
-        if profile_repo:
-            common.logger.info(
-                "Applying dashboard default_repo for Linear user %s: %s/%s",
-                comment_user_email,
-                profile_repo["owner"],
-                profile_repo["name"],
-            )
-            repo_config = profile_repo
-
-    if not repo_config:
-        team = full_issue.get("team", {})
-        team_name = team.get("name", "") if team else ""
-        project = full_issue.get("project")
-        project_name = project.get("name", "") if project else ""
-
-        team_identifier = team_name.strip() if team_name else ""
-        project_key = project_name.strip() if project_name else ""
-
-        repo_config = common.get_repo_config_from_team_mapping(team_identifier, project_key)
-
-        common.logger.debug(
-            "Team/project lookup result",
-            extra={
-                "team_name": team_identifier,
-                "project_name": project_key,
-                "repo_config": repo_config,
-            },
-        )
-
-    if not repo_config:
-        repo_config = await common.get_team_default_repo()
 
     if not repo_config:
         await service.post_linear_routing_failure(
             issue_id,
             data.get("id", ""),
-            "Couldn't determine the target repository. Specify it as `repo owner/name`.",
+            "Couldn't determine the target repository. Specify it as `repo owner/name` "
+            "immediately after the agent mention.",
         )
-        return {"status": "ignored", "reason": "No default repository configured"}
+        return {"status": "ignored", "reason": "No repository directive or thread metadata"}
 
     if not common._is_repo_allowed(repo_config):
         common.logger.warning(
@@ -159,7 +119,7 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
             issue_id,
             data.get("id", ""),
             f"The target repository `{repo_config['owner']}/{repo_config['name']}` is not enabled. "
-            "Specify an allowed repository as `repo owner/name`.",
+            "Specify an allowed repository as `repo owner/name` immediately after the agent mention.",
         )
         return {"status": "ignored", "reason": "Repository not in allowlist"}
 
