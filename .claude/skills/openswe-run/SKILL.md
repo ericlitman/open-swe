@@ -87,9 +87,11 @@ step exists. Upgrade with `git -C <checkout> pull`; provenance is
 scripts/openswe-run env
 ```
 
-`rc 0` = ready. Anything missing prints a copy-pasteable `export` fix. `LANGGRAPH_URL` is
-auto-set on studio2 and `GH_TOKEN` is auto-derived from `gh auth token` when possible; both
-auto-derivations are recorded in the dogfood log.
+`rc 0` = ready. Anything missing prints a copy-pasteable `export` fix. The report includes
+`langgraph_url_provenance`. A healthy explicit `LANGGRAPH_URL` wins; otherwise discovery checks
+the supported Studio2 tunnels deterministically on local port 2029, then 12029. `GH_TOKEN` is
+auto-derived from `gh auth token` when possible. Environment auto-derivations are recorded in
+the dogfood log.
 
 The pre-mint sharp edge may be retired only after both the control plane runs a release
 containing the OSWE-152 fix (merge `024efcf`) and a guarded-prefix mention probe succeeds after
@@ -141,8 +143,10 @@ watch-start logs and `watch_timeout` evidence.
 
 Wake nodes: `plan_posted`, `pr_opened`, `review_findings_posted`, `review_complete`,
 `run_blocked`, `review_absent`, `merge_conflict`, `terminal_merged`, `terminal_closed`,
-`terminal_run_error`, `unhandled_condition`, plus wrapper-level
-`watch_timeout` (rc 3).
+`terminal_run_error`, `unhandled_condition`, plus wrapper-level `endpoint_failover`,
+`endpoint_unavailable`, and `watch_timeout` (rc 3). A successful endpoint failover is the one
+exception to exit-on-wake: it is printed immediately, and the same watch continues on the
+replacement endpoint. `endpoint_unavailable` exits fail-closed without retrying the dead endpoint.
 `--pr-number N` is optional; when omitted, the monitor discovers the PR from LangGraph thread metadata so PR recovery checks engage as soon as it exists.
 Known monitor sharp edges are inherited, not re-fixed here: OSWE-135 (torn reviewThreads
 read → spurious `unhandled_condition`; benign, re-watch) and OSWE-136 (hung network read;
