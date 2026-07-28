@@ -27,6 +27,68 @@ sys.modules[SPEC.name] = run
 SPEC.loader.exec_module(run)
 
 
+class _LinearResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
+
+
+def test_linear_gql_maps_mention_scope_failure_to_full_scope_mint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = [
+        {
+            "message": "App user not valid",
+            "extensions": {
+                "userPresentableMessage": "One or more app users lack the required scope."
+            },
+        }
+    ]
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.setattr(
+        run.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: _LinearResponse({"errors": errors}),
+    )
+
+    with pytest.raises(run.RunError) as raised:
+        run.linear_gql("mutation { commentCreate }", {})
+
+    message = str(raised.value)
+    assert message == run.LINEAR_MENTION_SCOPE_ERROR
+    assert "workspace app grant is stripped of app:mentionable" in message
+    assert "read,write,app:assignable,app:mentionable" in message
+    assert 'client_id="$LINEAR_CLIENT_ID"' in message
+    assert 'client_secret="$LINEAR_CLIENT_SECRET"' in message
+    assert "retry this command as-is" in message
+    assert "export LINEAR_API_KEY" not in message
+
+
+def test_linear_gql_preserves_unrelated_graphql_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = [{"message": "Issue not found"}]
+    monkeypatch.setenv("LINEAR_API_KEY", "linear")
+    monkeypatch.setattr(
+        run.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: _LinearResponse({"errors": errors}),
+    )
+
+    with pytest.raises(run.RunError) as raised:
+        run.linear_gql("query { issue }", {})
+
+    assert str(raised.value) == f"Linear GraphQL returned errors: {errors}"
+
+
 def test_entry_point_is_executable_and_self_describes() -> None:
     result = subprocess.run(
         [str(SCRIPT_PATH), "--help"], text=True, capture_output=True, check=False
@@ -380,6 +442,10 @@ def test_wave_symbols_the_script_calls_still_exist() -> None:
     [
         "@openswe repo owner/name — Execute ABC-1 only. See <https://example.com>.",
         "@openswe plain body with no placeholders",
+        "@openswe Use `help <cmd>` for command-specific help.",
+        "@openswe Use:\n```text\nhelp <cmd>\n```",
+        "@openswe Use:\n```text\nhelp <cmd>\n````",
+        "@openswe Use:\n~~~text\nhelp <cmd>\n~~~~",
     ],
 )
 def test_placeholder_guard_allows_filled_bodies(body: str) -> None:
@@ -389,6 +455,36 @@ def test_placeholder_guard_allows_filled_bodies(body: str) -> None:
 def test_placeholder_guard_rejects_unfilled_bodies() -> None:
     with pytest.raises(run.RunError, match="placeholder"):
         run.guard_placeholders("ABC-1", "@openswe Execute <TICKET> only.", False)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@openswe Use `help <cmd>",
+        r"@openswe Use \`help <cmd>\`",
+        "@openswe Use `help <cmd>``",
+        "@openswe Use:\n```text\nhelp <cmd>",
+        "@openswe Use:\n````text\nhelp <cmd>\n```",
+    ],
+)
+def test_placeholder_guard_rejects_placeholders_outside_complete_code(body: str) -> None:
+    with pytest.raises(run.RunError, match="placeholder"):
+        run.guard_placeholders("ABC-1", body, False)
+
+
+def test_placeholder_guard_force_allows_and_logs_unfilled_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        run,
+        "dogfood",
+        lambda ticket, tag, message: events.append((ticket, tag, message)),
+    )
+
+    run.guard_placeholders("ABC-1", "@openswe Execute <TICKET> only.", True)
+
+    assert events == [("ABC-1", "note", "--force posted body with placeholders: <TICKET>")]
 
 
 def test_dispatch_template_leaves_no_placeholder_its_own_guard_would_reject() -> None:
@@ -404,23 +500,40 @@ def test_dispatch_template_leaves_no_placeholder_its_own_guard_would_reject() ->
     run.guard_placeholders("ABC-1", body, False)
 
 
-def test_dispatch_template_matches_reference_docs() -> None:
-    def dispatch_body(path: Path) -> str:
-        section = path.read_text().split("## Dispatch\n", 1)[1]
-        fenced = section.split("```markdown\n", 1)[1]
-        return fenced.split("\n```", 1)[0] + "\n"
+def _template_body(path: Path, heading: str) -> str:
+    section = path.read_text().split(f"## {heading}\n", 1)[1]
+    fenced = section.split("```markdown\n", 1)[1]
+    return fenced.split("\n```", 1)[0] + "\n"
 
+
+def test_dispatch_template_matches_reference_docs() -> None:
     expected = run.DISPATCH_TEMPLATE.format(
         repo="<owner/repo>",
         ticket="<TICKET>",
         ref="<ref>",
         scope="<scope>",
         boundaries="<non-goals>",
-        verify="<focused tests>, `make lint`, and `make typecheck`",
+        verify=(
+            "focused tests plus the repository's own lint and typecheck gates; "
+            "name the exact commands in the plan"
+        ),
     )
 
-    assert dispatch_body(SKILL / "references/run-templates.md") == expected
-    assert dispatch_body(WAVE_SKILL / "references/comment-templates.md") == expected
+    assert _template_body(SKILL / "references/run-templates.md", "Dispatch") == expected
+    assert _template_body(WAVE_SKILL / "references/comment-templates.md", "Dispatch") == expected
+
+
+def test_approval_reference_templates_keep_repo_neutral_verification_in_sync() -> None:
+    run_approval = _template_body(SKILL / "references/run-templates.md", "Approval")
+    wave_approval = _template_body(WAVE_SKILL / "references/comment-templates.md", "Approval")
+
+    assert run_approval == wave_approval
+    assert (
+        "Run the focused tests plus the repository's own lint and typecheck gates named in "
+        "the approved plan."
+    ) in run_approval
+    assert "`make lint`" not in run_approval
+    assert "`make typecheck`" not in run_approval
 
 
 def _comment(
@@ -1294,11 +1407,25 @@ def test_start_force_cannot_bypass_body_hygiene(
         run.cmd_start(_start_args(body_file="body.md", force=True))
 
 
-@pytest.mark.parametrize("terminal_period", ["", "."])
-def test_start_dry_run_normalizes_punctuation_without_posting(
+@pytest.mark.parametrize(
+    ("terminal_period", "verify", "expected_verification"),
+    [
+        ("", "`go test ./...`, `go vet ./...`", "`go test ./...`, `go vet ./...`"),
+        (".", "`go test ./...`, `go vet ./...`.", "`go test ./...`, `go vet ./...`"),
+        (
+            "",
+            None,
+            "focused tests plus the repository's own lint and typecheck gates; "
+            "name the exact commands in the plan",
+        ),
+    ],
+)
+def test_start_dry_run_assembles_verification_and_normalizes_punctuation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     terminal_period: str,
+    verify: str | None,
+    expected_verification: str,
 ) -> None:
     calls: list[dict] = []
     monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: calls.append(kwargs))
@@ -1335,7 +1462,7 @@ def test_start_dry_run_normalizes_punctuation_without_posting(
         ref="main",
         scope=f"do the thing{terminal_period}",
         boundaries=f"nothing else{terminal_period}",
-        verify=f"focused tests{terminal_period}",
+        verify=verify,
         body_file=None,
         dry_run=True,
         force=False,
@@ -1346,7 +1473,10 @@ def test_start_dry_run_normalizes_punctuation_without_posting(
     assert payload["issue_state"] == {"type": "completed", "name": "Done"}
     assert "Required scope: do the thing.\n" in payload["body"]
     assert "Boundaries: nothing else.\n" in payload["body"]
-    assert "Verification: focused tests.\n" in payload["body"]
+    assert f"Verification: {expected_verification}.\n" in payload["body"]
+    if verify is None:
+        assert "`make lint`" not in payload["body"]
+        assert "`make typecheck`" not in payload["body"]
     assert calls == [{"langgraph": False, "github": False}]
 
 

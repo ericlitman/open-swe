@@ -49,6 +49,16 @@ GH_ENV_ERROR = (
     "GH_TOKEN is not set and `gh auth token` produced nothing. "
     "Set it with: export GH_TOKEN=$(gh auth token)  # or a PAT with repo scope"
 )
+LINEAR_MENTION_SCOPE_ERROR = (
+    "Linear workspace app grant is stripped of app:mentionable (OSWE-152 mechanism). "
+    "Run this full-scope client-credentials mint, discard the token, then retry this "
+    "command as-is:\n"
+    "curl -fsS https://api.linear.app/oauth/token "
+    "--data-urlencode grant_type=client_credentials "
+    '--data-urlencode client_id="$LINEAR_CLIENT_ID" '
+    '--data-urlencode client_secret="$LINEAR_CLIENT_SECRET" '
+    "--data-urlencode scope=read,write,app:assignable,app:mentionable >/dev/null"
+)
 WAKE_TIMEOUT_EXIT = 3
 CHILD_FAILURE_EXIT = 4
 HANDOFF_TIMEOUT_SECONDS = 60.0
@@ -58,6 +68,14 @@ PHASE_TIMEOUT_MINUTES = {"plan": 30.0, "delivery": 90.0}
 # Matches unfilled template placeholders like <TICKET> or <owner/repo>; the
 # ':' exclusion spares autolinks like <https://...>.
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z][^>:\n]*>")
+FENCED_CODE_RE = re.compile(
+    r"^ {0,3}(?:"
+    r"(?P<backticks>`{3,})(?!`)[^`\n]*\n.*?^ {0,3}(?P=backticks)`*(?!`)[ \t]*(?:\n|$)"
+    r"|(?P<tildes>~{3,})(?!~)[^\n]*\n.*?^ {0,3}(?P=tildes)~*(?!~)[ \t]*(?:\n|$)"
+    r")",
+    re.DOTALL | re.MULTILINE,
+)
+INLINE_CODE_RE = re.compile(r"(?<![\\`])(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)", re.DOTALL)
 # Remove the mention workaround when OSWE-144 closes.
 DIRECTIVE_MENTION_RE = re.compile(r"@openswe\b", re.IGNORECASE)
 # Remove the repository-directive workaround when OSWE-166 closes.
@@ -172,6 +190,11 @@ def dogfood(ticket: str, tag: str, text: str) -> None:
 # --------------------------------------------------------------------------- linear (urllib)
 
 
+def _is_linear_mention_scope_error(errors: object) -> bool:
+    text = json.dumps(errors)
+    return "App user not valid" in text and "lack the required scope" in text
+
+
 def linear_gql(query: str, variables: dict) -> dict:
     key = os.environ.get("LINEAR_API_KEY")
     if not key:
@@ -188,6 +211,8 @@ def linear_gql(query: str, variables: dict) -> dict:
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RunError(f"Linear request failed: {exc}") from exc
     if data.get("errors"):
+        if _is_linear_mention_scope_error(data["errors"]):
+            raise RunError(LINEAR_MENTION_SCOPE_ERROR)
         raise RunError(f"Linear GraphQL returned errors: {data['errors']}")
     return data.get("data") or {}
 
@@ -592,7 +617,8 @@ def guard_body_hygiene(body: str) -> None:
 
 
 def guard_placeholders(ticket: str, body: str, force: bool) -> None:
-    leftovers = sorted(set(PLACEHOLDER_RE.findall(body)))
+    body_without_code = INLINE_CODE_RE.sub("", FENCED_CODE_RE.sub("", body))
+    leftovers = sorted(set(PLACEHOLDER_RE.findall(body_without_code)))
     if leftovers and not force:
         raise RunError(
             f"Body still contains unfilled template placeholders: {', '.join(leftovers)}. "
@@ -876,9 +902,11 @@ def cmd_start(args: argparse.Namespace) -> int:
             boundaries=(
                 args.boundaries or f"no changes beyond {issue['identifier']}'s stated scope"
             ).removesuffix("."),
-            verify=(args.verify or "focused tests, `make lint`, and `make typecheck`").removesuffix(
-                "."
-            ),
+            verify=(
+                args.verify
+                or "focused tests plus the repository's own lint and typecheck gates; "
+                "name the exact commands in the plan"
+            ).removesuffix("."),
         )
     guard_body_hygiene(body)
     guard_placeholders(args.ticket, body, args.force)
