@@ -10,6 +10,12 @@ import pytest
 import agent.tools.open_pull_request  # noqa: F401
 
 opr = sys.modules["agent.tools.open_pull_request"]
+_REAL_RECORD_PR_METADATA = opr._record_pr_metadata
+
+
+@pytest.fixture(autouse=True)
+def _record_metadata_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(opr, "_record_pr_metadata", AsyncMock(return_value=True))
 
 
 class _FakeResponse:
@@ -648,7 +654,7 @@ def test_auto_merge_eligible_forces_non_draft_and_reports_tracking(
     )
     _stub_token(monkeypatch)
     monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
-    monkeypatch.setattr(opr, "_record_pr_telemetry", lambda **_kw: _coro(True))
+    monkeypatch.setattr(opr, "_record_pr_metadata", lambda **_kw: _coro(True))
     client = _FakeClient(
         post=_FakeResponse(
             201,
@@ -678,7 +684,7 @@ def test_auto_merge_hold_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None
     )
     _stub_token(monkeypatch)
     monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
-    monkeypatch.setattr(opr, "_record_pr_telemetry", lambda **_kw: _coro(True))
+    monkeypatch.setattr(opr, "_record_pr_metadata", lambda **_kw: _coro(True))
     client = _FakeClient(
         post=_FakeResponse(201, {"html_url": "https://x/pull/1", "number": 1, "user": {}})
     )
@@ -729,7 +735,7 @@ def test_auto_merge_non_default_base_remains_draft(monkeypatch: pytest.MonkeyPat
     )
     _stub_token(monkeypatch)
     monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
-    monkeypatch.setattr(opr, "_record_pr_telemetry", lambda **_kw: _coro(False))
+    monkeypatch.setattr(opr, "_record_pr_metadata", lambda **_kw: _coro(True))
     client = _RoutingClient(
         post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
         get_routes={
@@ -779,3 +785,136 @@ async def test_state_approval_cannot_override_unknown_hold_lookup(
     )
 
     assert eligible is False
+
+
+class _MetadataThreads:
+    def __init__(self) -> None:
+        self.updates: list[dict[str, Any]] = []
+
+    async def update(self, *, thread_id: str, metadata: dict[str, Any]) -> None:
+        self.updates.append({"thread_id": thread_id, "metadata": metadata})
+
+
+class _MetadataClient:
+    def __init__(self) -> None:
+        self.threads = _MetadataThreads()
+
+
+@pytest.mark.asyncio
+async def test_record_pr_metadata_persists_pr_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config(monkeypatch, {"thread_id": "thread-1", "github_login": "octocat"})
+    sdk = _MetadataClient()
+    monkeypatch.setattr(opr, "get_client", lambda: sdk)
+    monkeypatch.setattr(opr, "record_agent_pr_usage", AsyncMock())
+    client = _FakeClient(
+        post=_FakeResponse(201),
+        get=_FakeResponse(
+            200,
+            {
+                "html_url": "https://github.com/langchain-ai/open-swe/pull/17",
+                "number": 17,
+                "state": "open",
+                "draft": True,
+                "title": "fix: metadata",
+            },
+        ),
+    )
+
+    recorded = await _REAL_RECORD_PR_METADATA(
+        client=client,
+        token="token",
+        owner="langchain-ai",
+        repo="open-swe",
+        head="open-swe/metadata",
+        base="main",
+        pr={"number": 17, "html_url": "https://github.com/langchain-ai/open-swe/pull/17"},
+    )
+
+    assert recorded is True
+    assert sdk.threads.updates == [
+        {
+            "thread_id": "thread-1",
+            "metadata": {
+                "agent_kind": "agent",
+                "pr_url": "https://github.com/langchain-ai/open-swe/pull/17",
+                "pr_number": 17,
+                "pr_state": "draft",
+                "pr_title": "fix: metadata",
+                "branch_name": "open-swe/metadata",
+                "base_branch": "main",
+                "diff_stats": {"files": 0, "additions": 0, "deletions": 0},
+            },
+        }
+    ]
+
+
+def test_new_pr_metadata_failure_is_partial_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config(monkeypatch, {"source": "linear", "thread_id": "thread-1"})
+    _stub_token(monkeypatch)
+    monkeypatch.setattr(opr, "_record_pr_metadata", AsyncMock(return_value=False))
+    client = _FakeClient(
+        post=_FakeResponse(
+            201,
+            {"html_url": "https://x/pull/17", "number": 17, "user": {"login": "bot"}},
+        )
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open()
+
+    assert result["success"] is False
+    assert result["code"] == "github_pr_metadata_update_failed"
+    assert result["pr_created"] is True
+    assert result["pr_exists"] is True
+    assert result["number"] == 17
+    assert result["url"] == "https://x/pull/17"
+
+
+def test_existing_pr_on_422_records_thread_metadata_before_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config(monkeypatch, {"source": "linear", "thread_id": "thread-1"})
+    _stub_token(monkeypatch)
+    record_metadata = AsyncMock(return_value=True)
+    monkeypatch.setattr(opr, "_record_pr_metadata", record_metadata)
+    existing = {"html_url": "https://x/pull/62", "number": 62, "user": {"login": "bot"}}
+    client = _FakeClient(
+        post=_FakeResponse(422, text="A pull request already exists"),
+        get=_FakeResponse(200, [existing]),
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open()
+
+    assert result["success"] is True
+    assert result["created"] is False
+    assert result["number"] == 62
+    record_metadata.assert_awaited_once()
+    await_args = record_metadata.await_args
+    assert await_args is not None
+    assert await_args.kwargs["pr"] == existing
+
+
+def test_existing_pr_on_422_metadata_failure_is_partial_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config(monkeypatch, {"source": "linear", "thread_id": "thread-1"})
+    _stub_token(monkeypatch)
+    monkeypatch.setattr(opr, "_record_pr_metadata", AsyncMock(return_value=False))
+    existing = {"html_url": "https://x/pull/62", "number": 62, "user": {"login": "bot"}}
+    client = _FakeClient(
+        post=_FakeResponse(422, text="A pull request already exists"),
+        get=_FakeResponse(200, [existing]),
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open()
+
+    assert result["success"] is False
+    assert result["code"] == "github_pr_metadata_update_failed"
+    assert result["pr_created"] is False
+    assert result["pr_exists"] is True
+    assert result["number"] == 62
+    assert result["url"] == "https://x/pull/62"
