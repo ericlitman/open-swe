@@ -340,17 +340,31 @@ async def _settle_or_defer_review_check(
         state,
         implementation_thread_id,
         implementation_run_id,
-        _run_status,
+        run_status,
     ) = await _implementation_run_state(owner=owner, repo=repo, branch_name=branch_name)
     if conclusion != "success" or state == "inactive":
+        final_conclusion = conclusion
+        final_title = title
+        final_summary = summary
+        if (
+            conclusion == "success"
+            and implementation_thread_id is not None
+            and run_status in {"error", "timeout", "interrupted"}
+        ):
+            final_conclusion = "failure"
+            final_title = "Implementation work did not complete"
+            final_summary = (
+                "The PR-linked Open SWE run ended without landing a new commit. "
+                "Re-run the requested work before merging."
+            )
         await settle_review_check_run(
             thread_id=thread_id,
             owner=owner,
             repo=repo,
             token=token,
-            conclusion=conclusion,
-            title=title,
-            summary=summary,
+            conclusion=final_conclusion,
+            title=final_title,
+            summary=final_summary,
             head_sha=head_sha,
             create_if_missing=True,
         )

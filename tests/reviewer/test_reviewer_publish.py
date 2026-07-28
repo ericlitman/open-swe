@@ -2636,3 +2636,55 @@ async def test_implementation_thread_runtime_error_is_not_treated_as_inactive() 
         state = await _implementation_run_state(owner="o", repo="r", branch_name="branch")
 
     assert state == ("unknown", None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_status", ["error", "timeout", "interrupted"])
+async def test_terminal_failed_implementation_run_fails_successful_review(
+    run_status: str,
+) -> None:
+    from agent.tools.publish_review import _settle_or_defer_review_check
+
+    settle = AsyncMock()
+    with (
+        patch(
+            "agent.tools.publish_review._implementation_run_state",
+            AsyncMock(
+                return_value=(
+                    "inactive",
+                    "implementation-thread",
+                    "run-fix-now",
+                    run_status,
+                )
+            ),
+        ),
+        patch("agent.tools.publish_review.settle_review_check_run", settle),
+    ):
+        deferred = await _settle_or_defer_review_check(
+            thread_id="reviewer-thread",
+            owner="o",
+            repo="r",
+            pr_number=99,
+            branch_name="open-swe/fix-now",
+            token="token",
+            conclusion="success",
+            title="No issues found",
+            summary="Open SWE reviewed this pull request and found no issues.",
+            head_sha="unchanged-head",
+        )
+
+    assert deferred is False
+    settle.assert_awaited_once_with(
+        thread_id="reviewer-thread",
+        owner="o",
+        repo="r",
+        token="token",
+        conclusion="failure",
+        title="Implementation work did not complete",
+        summary=(
+            "The PR-linked Open SWE run ended without landing a new commit. "
+            "Re-run the requested work before merging."
+        ),
+        head_sha="unchanged-head",
+        create_if_missing=True,
+    )
