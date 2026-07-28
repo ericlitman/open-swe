@@ -281,12 +281,11 @@ AUTO_MERGE_SECTION = """---
 
 ### Auto-Merge Policy
 
-This run is eligible for merge-on-clean. For every new PR you open:
-- Call `open_pull_request` with `draft=false`; do not later convert the PR back to draft.
-- After the tool returns success with `auto_merge_eligible=true`, arm merge-when-ready with `GH_TOKEN=dummy gh pr merge <number-or-url> --auto --squash`.
-- This only requests auto-merge; branch protection, Open SWE Review, CI, and the merge queue still gate the merge.
-- If the dispatch or plan approval says `hold merge`, do not arm. The durable post-open pause switch is the `hold-merge` label.
-- Never run `gh pr merge` without both `--auto` and `--squash`, and never use `--admin`.
+This run is eligible for Mergify-owned merge-on-clean. For every new PR you open:
+- Call `open_pull_request` with `draft=false` so Mergify can admit it after required checks and Open SWE Review pass.
+- Do not run `gh pr merge` or submit Mergify queue commands; Mergify owns automatic queue admission and merging.
+- If the dispatch or plan approval says `hold merge`, keep the PR draft. The durable post-open pause switch is the `hold-merge` label, which reconciliation enforces by returning the PR to draft.
+- Never directly merge or use `--admin`.
 """
 
 

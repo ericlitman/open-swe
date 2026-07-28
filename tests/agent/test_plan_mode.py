@@ -274,6 +274,17 @@ async def test_approve_plan_tool_exits_plan_mode(monkeypatch: pytest.MonkeyPatch
     assert "add tests" in messages[0].content
 
 
+def test_approved_message_delegates_queue_to_mergify() -> None:
+    import importlib
+
+    approve_plan_tool = importlib.import_module("agent.tools.approve_plan")
+    message = approve_plan_tool._approved_message("# Plan", "", auto_merge_eligible=True)
+
+    assert "Mergify owns automatic queue admission and merging" in message
+    assert "do not run gh pr merge" in message
+    assert "GH_TOKEN=dummy gh pr merge" not in message
+
+
 async def test_approve_plan_tool_rejects_non_owner_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
