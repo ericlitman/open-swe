@@ -39,7 +39,19 @@
       "pr": {
         "state": "OPEN",
         "autoMergeRequest": null,
-        "mergeStateStatus": "CLEAN"
+        "mergeStateStatus": "CLEAN",
+        "statusCheckRollup": {
+          "contexts": {
+            "nodes": [
+              {
+                "__typename": "CheckRun",
+                "name": "Open SWE Auto-fix",
+                "status": "COMPLETED",
+                "title": "Auto-fix cycle 1 dispatched"
+              }
+            ]
+          }
+        }
       },
       "pr_number": 1,
       "unresolved_review_thread_ids": [],

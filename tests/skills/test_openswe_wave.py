@@ -254,7 +254,9 @@ def test_recorded_unarmed_pr_open_and_zero_finding_review_each_wake_once() -> No
     review_result = wave.replay_events(wave.assign_poll_id(review_events, "review"), "operator")
 
     assert [wake["wake_node"] for wake in review_result["wakes"]] == ["review_complete"]
-    assert "0 findings" in review_result["wakes"][0]["summary"]
+    assert review_result["wakes"][0]["summary"] == (
+        "Open SWE review complete: 0 findings; Open SWE Auto-fix: Auto-fix cycle 1 dispatched"
+    )
 
 
 def test_recorded_auto_merge_armed_pr_preserves_quiet_zero_finding_behavior() -> None:
@@ -287,6 +289,22 @@ def test_review_complete_counts_new_findings_and_armed_reviews_keep_findings_wak
     armed_events = wave.snapshot_transition_events(previous, current)
 
     assert [event["kind"] for event in armed_events] == ["review_findings"]
+
+    current["pr"]["statusCheckRollup"] = {
+        "contexts": {
+            "nodes": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "Open SWE Auto-fix",
+                    "status": "COMPLETED",
+                    "title": "Auto-fix dispatch failed",
+                }
+            ]
+        }
+    }
+    autofix_events = wave.snapshot_transition_events(previous, current)
+
+    assert autofix_events[0]["summary"].endswith("; Open SWE Auto-fix: Auto-fix dispatch failed")
 
 
 def test_recorded_plan_link_progress_stays_quiet_until_plan_marker() -> None:
@@ -325,7 +343,13 @@ def test_review_absent_uses_window_and_draft_recovery_hint() -> None:
                     "__typename": "CheckRun",
                     "name": "Open SWE Review",
                     "status": "COMPLETED",
-                }
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "Open SWE Auto-fix",
+                    "status": "COMPLETED",
+                    "title": None,
+                },
             ]
         }
     }
@@ -334,8 +358,27 @@ def test_review_absent_uses_window_and_draft_recovery_hint() -> None:
 
     assert event is not None
     assert event["kind"] == "review_absent"
-    assert "15 minutes" in event["summary"]
-    assert "mark it ready for review" in event["summary"]
+    assert event["summary"] == (
+        "PR #9 has no Open SWE review after 15 minutes; "
+        "draft PR may have skipped auto-review — mark it ready for review"
+    )
+
+    snapshot["pr"]["statusCheckRollup"] = {
+        "contexts": {
+            "nodes": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "Open SWE Auto-fix",
+                    "status": "COMPLETED",
+                    "title": "Auto-fix cycle limit reached",
+                }
+            ]
+        }
+    }
+    event = wave.review_absent_event(snapshot, 900)
+
+    assert event is not None
+    assert event["summary"].endswith("; Open SWE Auto-fix: Auto-fix cycle limit reached")
 
 
 def test_merge_conflict_detects_existing_and_newly_entered_states() -> None:
@@ -394,6 +437,7 @@ def test_github_snapshot_paginates_complete_actor_timeline(
                                 "__typename": "CheckRun",
                                 "name": "Open SWE Review",
                                 "status": "IN_PROGRESS",
+                                "title": "Review in progress",
                             }
                         ]
                     }
@@ -446,7 +490,12 @@ def test_github_snapshot_paginates_complete_actor_timeline(
     assert len(pr["timelineItems"]["nodes"]) == 2
     assert pr["autoMergeRequest"] == {"enabledAt": "now"}
     assert pr["statusCheckRollup"]["contexts"]["nodes"] == [
-        {"__typename": "CheckRun", "name": "Open SWE Review", "status": "IN_PROGRESS"}
+        {
+            "__typename": "CheckRun",
+            "name": "Open SWE Review",
+            "status": "IN_PROGRESS",
+            "title": "Review in progress",
+        }
     ]
 
 
