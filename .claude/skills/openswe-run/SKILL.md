@@ -88,13 +88,16 @@ auto-derived from `gh auth token` when possible. Environment auto-derivations ar
 the dogfood log.
 
 Born-ready auto-merge is repo-scoped, not global. Before the first dispatch at a repo new to
-Open SWE, verify all three pieces exist, or green PRs sit CLEAN silently until the delivery
+Open SWE, verify all four pieces exist, or green PRs sit CLEAN silently until the delivery
 timeout (mastra-pilot PR #2): `gh api repos/<owner>/<repo>/rulesets` returns the three main
 rulesets (Protect main, Review gate, Mergify automatic merge queue); `.mergify.yml` is present
-on `main`; and the repo is listed in the control plane's `enabled_review_repos` store record
-(namespace `["enabled_review_repos"]`, key `default`). If any piece is missing, mirror
-`ericlitman/open-swe`'s config — bootstrap order: Mergify config direct-pushed to `main`
-first, then rulesets, then the store opt-in — or plan for operator merges after green gates.
+on `main`; the repo setting `allow_auto_merge` is true (Mergify queues by arming GitHub
+auto-merge, so with the setting off — the default on new repos — a fully green PR still sits
+unqueued; mastra-pilot PR #3); and the repo is listed in the control plane's
+`enabled_review_repos` store record (namespace `["enabled_review_repos"]`, key `default`).
+If any piece is missing, mirror `ericlitman/open-swe`'s config — bootstrap order: Mergify
+config direct-pushed to `main` first, then rulesets, then `allow_auto_merge`, then the store
+opt-in — or plan for operator merges after green gates.
 
 The pre-mint sharp edge may be retired only after both the control plane runs a release
 containing the OSWE-152 fix (merge `024efcf`) and a guarded-prefix mention probe succeeds after
