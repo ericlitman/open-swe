@@ -337,7 +337,7 @@ query RunIssue($id: String!) {
   issue(id: $id) {
     id identifier title url completedAt canceledAt
     state { type name }
-    team { id key name }
+    team { id key name visibility }
   }
 }
 """
@@ -390,19 +390,20 @@ def linear_webhooks() -> list[dict]:
         variables = {"cursor": cursor}
 
 
-def webhook_covers_team(webhook: dict, team_id: str) -> bool:
+def webhook_covers_team(webhook: dict, team_id: str, team_visibility: str) -> bool:
     if webhook.get("enabled") is not True or "Comment" not in (webhook.get("resourceTypes") or []):
         return False
-    if webhook.get("allPublicTeams") is True:
-        return True
     team = webhook.get("team") or {}
-    return team.get("id") == team_id or team_id in (webhook.get("teamIds") or [])
+    if team.get("id") == team_id or team_id in (webhook.get("teamIds") or []):
+        return True
+    return webhook.get("allPublicTeams") is True and team_visibility == "public"
 
 
 def require_webhook_coverage(issue: dict) -> None:
     team = issue.get("team") or {}
     team_id = str(team.get("id") or "")
     team_name = str(team.get("key") or team.get("name") or "unknown")
+    team_visibility = str(team.get("visibility") or "")
     if not team_id:
         raise RunError(
             f"Linear issue {issue.get('identifier') or issue.get('id')} returned no team, "
@@ -416,10 +417,17 @@ def require_webhook_coverage(issue: dict) -> None:
             "Use a workspace-admin LINEAR_API_KEY (or OAuth token with admin scope), then retry. "
             f"Linear error: {exc}"
         ) from exc
-    if not any(webhook_covers_team(webhook, team_id) for webhook in webhooks):
+    if not any(webhook_covers_team(webhook, team_id, team_visibility) for webhook in webhooks):
+        if team_visibility == "public":
+            action = "Provision a workspace webhook with allPublicTeams=true"
+        else:
+            action = (
+                f"Provision an enabled Comment webhook explicitly scoped to team {team_name}; "
+                "allPublicTeams covers public teams only"
+            )
         raise RunError(
             f"No enabled Linear Comment webhook covers team {team_name}. "
-            "Provision a workspace webhook with allPublicTeams=true before dispatching this ticket."
+            f"{action} before dispatching this ticket."
         )
 
 

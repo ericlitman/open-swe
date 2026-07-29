@@ -1332,7 +1332,7 @@ def test_issue_query_resolves_workflow_state_terminal_timestamps_and_team() -> N
     assert "state { type name }" in run.ISSUE_QUERY
     assert "completedAt" in run.ISSUE_QUERY
     assert "canceledAt" in run.ISSUE_QUERY
-    assert "team { id key name }" in run.ISSUE_QUERY
+    assert "team { id key name visibility }" in run.ISSUE_QUERY
 
 
 def test_linear_webhooks_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1363,9 +1363,23 @@ def test_linear_webhooks_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("webhook", "covered"),
+    ("webhook", "team_visibility", "covered"),
     [
-        ({"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True}, True),
+        (
+            {"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True},
+            "public",
+            True,
+        ),
+        (
+            {"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True},
+            "private",
+            False,
+        ),
+        (
+            {"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True},
+            "restricted",
+            False,
+        ),
         (
             {
                 "enabled": True,
@@ -1373,6 +1387,7 @@ def test_linear_webhooks_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
                 "allPublicTeams": False,
                 "team": {"id": "team-1"},
             },
+            "private",
             True,
         ),
         (
@@ -1382,10 +1397,19 @@ def test_linear_webhooks_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
                 "allPublicTeams": False,
                 "teamIds": ["team-1"],
             },
+            "restricted",
             True,
         ),
-        ({"enabled": False, "resourceTypes": ["Comment"], "allPublicTeams": True}, False),
-        ({"enabled": True, "resourceTypes": ["Issue"], "allPublicTeams": True}, False),
+        (
+            {"enabled": False, "resourceTypes": ["Comment"], "allPublicTeams": True},
+            "public",
+            False,
+        ),
+        (
+            {"enabled": True, "resourceTypes": ["Issue"], "allPublicTeams": True},
+            "public",
+            False,
+        ),
         (
             {
                 "enabled": True,
@@ -1393,12 +1417,15 @@ def test_linear_webhooks_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
                 "allPublicTeams": False,
                 "team": {"id": "team-2"},
             },
+            "public",
             False,
         ),
     ],
 )
-def test_webhook_coverage_matches_workspace_or_target_team(webhook: dict, covered: bool) -> None:
-    assert run.webhook_covers_team(webhook, "team-1") is covered
+def test_webhook_coverage_matches_workspace_or_target_team(
+    webhook: dict, team_visibility: str, covered: bool
+) -> None:
+    assert run.webhook_covers_team(webhook, "team-1", team_visibility) is covered
 
 
 def test_webhook_preflight_names_uncovered_team(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1406,11 +1433,39 @@ def test_webhook_preflight_names_uncovered_team(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(run.RunError) as raised:
         real_require_webhook_coverage(
-            {"id": "issue-1", "identifier": "EZRA-16", "team": {"id": "team-1", "key": "EZRA"}}
+            {
+                "id": "issue-1",
+                "identifier": "EZRA-16",
+                "team": {"id": "team-1", "key": "EZRA", "visibility": "public"},
+            }
         )
 
     assert str(raised.value).startswith("No enabled Linear Comment webhook covers team EZRA")
     assert "allPublicTeams=true" in str(raised.value)
+
+
+def test_webhook_preflight_requires_explicit_coverage_for_private_team(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run,
+        "linear_webhooks",
+        lambda: [{"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True}],
+    )
+
+    with pytest.raises(run.RunError) as raised:
+        real_require_webhook_coverage(
+            {
+                "id": "issue-1",
+                "identifier": "SECRET-1",
+                "team": {"id": "team-1", "key": "SECRET", "visibility": "private"},
+            }
+        )
+
+    message = str(raised.value)
+    assert message.startswith("No enabled Linear Comment webhook covers team SECRET")
+    assert "explicitly scoped to team SECRET" in message
+    assert "allPublicTeams covers public teams only" in message
 
 
 def test_webhook_preflight_distinguishes_configuration_read_failure(
@@ -1423,7 +1478,11 @@ def test_webhook_preflight_distinguishes_configuration_read_failure(
 
     with pytest.raises(run.RunError) as raised:
         real_require_webhook_coverage(
-            {"id": "issue-1", "identifier": "EZRA-16", "team": {"id": "team-1", "key": "EZRA"}}
+            {
+                "id": "issue-1",
+                "identifier": "EZRA-16",
+                "team": {"id": "team-1", "key": "EZRA", "visibility": "public"},
+            }
         )
 
     message = str(raised.value)
@@ -1441,7 +1500,7 @@ def test_start_checks_webhook_coverage_before_handoff(
         "identifier": "ABC-1",
         "url": "https://linear.example/ABC-1",
         "state": {"type": "started", "name": "In Progress"},
-        "team": {"id": "team-1", "key": "ABC"},
+        "team": {"id": "team-1", "key": "ABC", "visibility": "public"},
     }
     monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
     monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)

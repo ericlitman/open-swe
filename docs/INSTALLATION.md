@@ -240,7 +240,7 @@ Open SWE listens for Linear comments that mention `@openswe`.
    - **Label**: `open-swe`
    - **URL**: `https://<your-ngrok-url>/webhooks/linear` — use the ngrok URL from step 2
    - **Secret**: generate with `openssl rand -hex 32` — save this as `LINEAR_WEBHOOK_SECRET`
-3. Select **All public teams**. Do not create one webhook per team: new teams would otherwise be silently uncovered.
+3. Select **All public teams**. Do not create one webhook per public team: new public teams would otherwise be silently uncovered. Private or restricted teams still require explicit team coverage.
 4. Under **Data change events**, enable **Comments → Create** only
 5. Click **Create webhook**
 
