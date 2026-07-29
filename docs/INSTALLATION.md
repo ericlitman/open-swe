@@ -233,15 +233,27 @@ A GitHub or Linear webhook is accepted if the resolved repo's org is in `ALLOWED
 
 Open SWE listens for Linear comments that mention `@openswe`.
 
-**Create a webhook:**
+**Create one workspace webhook:**
 
 1. In Linear, go to **Settings → API → Webhooks → New webhook**
 2. Fill in:
    - **Label**: `open-swe`
    - **URL**: `https://<your-ngrok-url>/webhooks/linear` — use the ngrok URL from step 2
    - **Secret**: generate with `openssl rand -hex 32` — save this as `LINEAR_WEBHOOK_SECRET`
-3. Under **Data change events**, enable **Comments → Create** only
-4. Click **Create webhook**
+3. Select **All public teams**. Do not create one webhook per team: new teams would otherwise be silently uncovered.
+4. Under **Data change events**, enable **Comments → Create** only
+5. Click **Create webhook**
+
+Linear allows only workspace admins, or OAuth applications with the `admin` scope, to read or create webhooks. The `LINEAR_API_KEY` used by `openswe-run` must have that access because `start` verifies webhook coverage before posting a dispatch comment.
+
+For the studio2 migration from the three legacy team-scoped webhooks, use the idempotent cutover command only in a quiet window with zero busy Open SWE threads. Preview is the default; `--apply` creates and confirms the workspace webhook before deleting the known OSWE, BEAR, and MASTRA webhooks in the same invocation:
+
+```bash
+uv run python scripts/provision_linear_webhook.py
+uv run python scripts/provision_linear_webhook.py --apply
+```
+
+Do not post dispatch comments between creation and deletion: overlapping team and workspace webhooks deliver the same Comment event twice. Afterward, query `webhooks` and require exactly one enabled webhook for the endpoint with `allPublicTeams: true` and `resourceTypes: [Comment]`, then verify one dispatch on both a newly covered team and an existing team produces one delivery and one run.
 
 **Configure authentication:**
 
