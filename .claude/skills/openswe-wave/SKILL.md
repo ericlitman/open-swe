@@ -78,6 +78,15 @@ reconciliation intent; Mergify owns admission and merging after required checks 
 Review pass. Manual ready-for-review recovery is not part of this path. Missing, non-approved,
 or unavailable plan state receives no bypass and follows the existing plan gate.
 
+This machinery is repo-scoped. Before a wave's first dispatch at a repo new to Open SWE,
+verify all three pieces exist, or green PRs sit CLEAN silently until the delivery timeout
+(mastra-pilot PR #2): `gh api repos/<owner>/<repo>/rulesets` returns the three main rulesets
+(Protect main, Review gate, Mergify automatic merge queue); `.mergify.yml` is present on
+`main`; and the repo is listed in the control plane's `enabled_review_repos` store record
+(namespace `["enabled_review_repos"]`, key `default`). If any piece is missing, mirror
+`ericlitman/open-swe`'s config — bootstrap order: Mergify config direct-pushed to `main`
+first, then rulesets, then the store opt-in — or plan for operator merges after green gates.
+
 ## Workflow
 
 1. Use `scripts/anchor-sweep <ref> <ticket-file>` before dispatch for out-of-repo/host-state tickets, tickets declaring normative sources, disposable probes, and bundles; ordinary in-repo tickets rely on the plan gate's re-anchor (OSWE-103). Treat present/moved/missing as mechanical evidence only; inspect semantic drift yourself.
