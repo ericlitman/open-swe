@@ -137,15 +137,22 @@ if [ "${1:-}" = "production" ]; then
 fi
 ```
 
-Copy [deploy/compose.yaml](../deploy/compose.yaml) to `"$OPS_DIR/compose.yaml"` and set
-its `env_file` to the absolute `$CURRENT/.env` path (the ops copy pins absolute paths;
-the repo copy stays parameterized). Build the image once, from the rendered Dockerfile:
+Copy [deploy/compose.yaml](../deploy/compose.yaml) to `"$OPS_DIR/compose.yaml"` and pin
+the ops copy's host specifics: set `env_file` to the absolute `$CURRENT/.env` path and
+set the api service's `image:` to the tag you build below (the repo copy stays
+parameterized; the live studio2 copy pins `open-swe-cp-api:7bda79c2`). Build the image
+once, from the rendered Dockerfile, with the same tag the compose file names —
+`open-swe-control-plane-api:local` is the default the repo compose and
+`make production-image` agree on:
 
 ```bash
 cd "$CURRENT" && .venv/bin/langgraph dockerfile "$OPS_DIR/generated.Dockerfile"
 sudo -n -u _openswectl env HOME="$SERVICE_HOME" PATH="$PATH" docker build \
-  -f "$OPS_DIR/generated.Dockerfile" -t open-swe-cp-api:current "$CURRENT"
+  -f "$OPS_DIR/generated.Dockerfile" -t open-swe-control-plane-api:local "$CURRENT"
 ```
+
+A tag mismatch here fails closed but confusingly: compose pulls-then-errors on a tag
+that was never built while the image you did build sits unused.
 
 ## Stage on port 2030
 
