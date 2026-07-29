@@ -551,35 +551,26 @@ async def _langgraph_snapshot(thread_id: str, timeout: float) -> dict[str, Any]:
     from langgraph_sdk import get_client
 
     client = get_client(url=env["LANGGRAPH_URL"], timeout=timeout)
-    thread_task = asyncio.create_task(client.threads.get(thread_id))
-    runs_task = asyncio.create_task(client.runs.list(thread_id, limit=1000))
-    state_task = asyncio.create_task(client.threads.get_state(thread_id))
-    tasks = (thread_task, runs_task, state_task)
+
+    async def latest_state() -> dict[str, Any] | None:
+        try:
+            return await client.threads.get_state(thread_id)
+        except Exception:
+            return None
+
     try:
         async with asyncio.timeout(timeout):
-            thread, runs = await asyncio.gather(thread_task, runs_task)
+            thread, runs, state = await asyncio.gather(
+                client.threads.get(thread_id),
+                client.runs.list(thread_id, limit=1000),
+                latest_state(),
+            )
     except _PollDeadlineError:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
         raise
     except TimeoutError as exc:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
         raise WaveOpsError(f"LANGGRAPH_URL request timed out after {timeout:.1f}s") from exc
     except Exception as exc:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
         raise WaveOpsError(f"LANGGRAPH_URL request failed: {exc}") from exc
-    if not state_task.done():
-        state_task.cancel()
-    state_result = (await asyncio.gather(state_task, return_exceptions=True))[0]
-    state = None if isinstance(state_result, BaseException) else state_result
     return {"thread": thread, "runs": runs, "state": state}
 
 

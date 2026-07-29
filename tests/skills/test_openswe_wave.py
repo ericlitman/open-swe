@@ -1144,22 +1144,30 @@ def test_langgraph_snapshot_falls_back_when_state_read_fails(
     }
 
 
-def test_langgraph_snapshot_falls_back_when_state_read_times_out(
+def test_langgraph_snapshot_awaits_state_after_thread_and_runs_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import langgraph_sdk
 
+    thread_read = wave.asyncio.Event()
+    runs_read = wave.asyncio.Event()
+
     class Threads:
         async def get(self, _thread_id: str) -> dict[str, Any]:
+            thread_read.set()
             return {"status": "busy"}
 
         async def get_state(self, _thread_id: str) -> dict[str, Any]:
-            await wave.asyncio.sleep(60)
-            return {}
+            await thread_read.wait()
+            await runs_read.wait()
+            await wave.asyncio.sleep(0)
+            await wave.asyncio.sleep(0)
+            return {"created_at": "2026-07-29T11:35:35Z"}
 
     class Runs:
         async def list(self, _thread_id: str, *, limit: int) -> list[dict[str, Any]]:
             assert limit == 1000
+            runs_read.set()
             return []
 
     monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
@@ -1169,11 +1177,9 @@ def test_langgraph_snapshot_falls_back_when_state_read_times_out(
         lambda **_kwargs: SimpleNamespace(threads=Threads(), runs=Runs()),
     )
 
-    started = time.perf_counter()
     snapshot = wave.asyncio.run(wave._langgraph_snapshot("thread", 1.0))
 
-    assert time.perf_counter() - started < 0.5
-    assert snapshot == {"thread": {"status": "busy"}, "runs": [], "state": None}
+    assert snapshot["state"] == {"created_at": "2026-07-29T11:35:35Z"}
 
 
 def test_langgraph_snapshot_passes_remaining_timeout_and_is_aggregate_bounded(
