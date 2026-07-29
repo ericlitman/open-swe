@@ -25,6 +25,12 @@ assert SPEC is not None and SPEC.loader is not None
 run = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = run
 SPEC.loader.exec_module(run)
+real_require_webhook_coverage = run.require_webhook_coverage
+
+
+@pytest.fixture(autouse=True)
+def _stub_webhook_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run, "require_webhook_coverage", lambda issue: None)
 
 
 def test_plan_gated_auto_merge_guidance() -> None:
@@ -1322,10 +1328,199 @@ def _start_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
-def test_issue_query_resolves_workflow_state_and_terminal_timestamps() -> None:
+def test_issue_query_resolves_workflow_state_terminal_timestamps_and_team() -> None:
     assert "state { type name }" in run.ISSUE_QUERY
     assert "completedAt" in run.ISSUE_QUERY
     assert "canceledAt" in run.ISSUE_QUERY
+    assert "team { id key name visibility }" in run.ISSUE_QUERY
+
+
+def test_linear_webhooks_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+    pages = [
+        {
+            "webhooks": {
+                "nodes": [{"id": "one"}],
+                "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+            }
+        },
+        {
+            "webhooks": {
+                "nodes": [{"id": "two"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        },
+    ]
+
+    def gql(query: str, variables: dict) -> dict:
+        calls.append(variables)
+        return pages[len(calls) - 1]
+
+    monkeypatch.setattr(run, "linear_gql", gql)
+
+    assert run.linear_webhooks() == [{"id": "one"}, {"id": "two"}]
+    assert calls == [{}, {"cursor": "cursor-1"}]
+
+
+@pytest.mark.parametrize(
+    ("webhook", "team_visibility", "covered"),
+    [
+        (
+            {"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True},
+            "public",
+            True,
+        ),
+        (
+            {"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True},
+            "private",
+            False,
+        ),
+        (
+            {"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True},
+            "restricted",
+            False,
+        ),
+        (
+            {
+                "enabled": True,
+                "resourceTypes": ["Comment"],
+                "allPublicTeams": False,
+                "team": {"id": "team-1"},
+            },
+            "private",
+            True,
+        ),
+        (
+            {
+                "enabled": True,
+                "resourceTypes": ["Comment"],
+                "allPublicTeams": False,
+                "teamIds": ["team-1"],
+            },
+            "restricted",
+            True,
+        ),
+        (
+            {"enabled": False, "resourceTypes": ["Comment"], "allPublicTeams": True},
+            "public",
+            False,
+        ),
+        (
+            {"enabled": True, "resourceTypes": ["Issue"], "allPublicTeams": True},
+            "public",
+            False,
+        ),
+        (
+            {
+                "enabled": True,
+                "resourceTypes": ["Comment"],
+                "allPublicTeams": False,
+                "team": {"id": "team-2"},
+            },
+            "public",
+            False,
+        ),
+    ],
+)
+def test_webhook_coverage_matches_workspace_or_target_team(
+    webhook: dict, team_visibility: str, covered: bool
+) -> None:
+    assert run.webhook_covers_team(webhook, "team-1", team_visibility) is covered
+
+
+def test_webhook_preflight_names_uncovered_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run, "linear_webhooks", lambda: [])
+
+    with pytest.raises(run.RunError) as raised:
+        real_require_webhook_coverage(
+            {
+                "id": "issue-1",
+                "identifier": "EZRA-16",
+                "team": {"id": "team-1", "key": "EZRA", "visibility": "public"},
+            }
+        )
+
+    assert str(raised.value).startswith("No enabled Linear Comment webhook covers team EZRA")
+    assert "allPublicTeams=true" in str(raised.value)
+
+
+def test_webhook_preflight_requires_explicit_coverage_for_private_team(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run,
+        "linear_webhooks",
+        lambda: [{"enabled": True, "resourceTypes": ["Comment"], "allPublicTeams": True}],
+    )
+
+    with pytest.raises(run.RunError) as raised:
+        real_require_webhook_coverage(
+            {
+                "id": "issue-1",
+                "identifier": "SECRET-1",
+                "team": {"id": "team-1", "key": "SECRET", "visibility": "private"},
+            }
+        )
+
+    message = str(raised.value)
+    assert message.startswith("No enabled Linear Comment webhook covers team SECRET")
+    assert "explicitly scoped to team SECRET" in message
+    assert "allPublicTeams covers public teams only" in message
+
+
+def test_webhook_preflight_distinguishes_configuration_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail() -> list[dict]:
+        raise run.RunError("permission denied")
+
+    monkeypatch.setattr(run, "linear_webhooks", fail)
+
+    with pytest.raises(run.RunError) as raised:
+        real_require_webhook_coverage(
+            {
+                "id": "issue-1",
+                "identifier": "EZRA-16",
+                "team": {"id": "team-1", "key": "EZRA", "visibility": "public"},
+            }
+        )
+
+    message = str(raised.value)
+    assert message.startswith("Could not read Linear webhook configuration for team EZRA")
+    assert "workspace-admin LINEAR_API_KEY" in message
+    assert "No enabled Linear Comment webhook" not in message
+
+
+def test_start_checks_webhook_coverage_before_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    issue = {
+        "id": "issue-1",
+        "identifier": "ABC-1",
+        "url": "https://linear.example/ABC-1",
+        "state": {"type": "started", "name": "In Progress"},
+        "team": {"id": "team-1", "key": "ABC", "visibility": "public"},
+    }
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "resolve_issue", lambda ticket: issue)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "thread-1"}),
+    )
+    monkeypatch.setattr(run, "require_webhook_coverage", lambda primary: events.append("coverage"))
+    monkeypatch.setattr(
+        run,
+        "_post_with_handoff",
+        lambda *args, **kwargs: (
+            events.append("handoff") or {"thread_status": "busy", "run_ids": ["run-1"]}
+        ),
+    )
+
+    assert run.cmd_start(_start_args()) == 0
+    assert events == ["coverage", "handoff"]
 
 
 @pytest.mark.parametrize(
@@ -1509,6 +1704,11 @@ def test_start_dry_run_assembles_verification_and_normalizes_punctuation(
         },
     )
     monkeypatch.setattr(run, "dogfood", lambda *args: pytest.fail("dry-run must not log"))
+    monkeypatch.setattr(
+        run,
+        "require_webhook_coverage",
+        lambda issue: pytest.fail("dry-run must not read webhook configuration"),
+    )
     monkeypatch.setattr(
         run,
         "import_wave_module",

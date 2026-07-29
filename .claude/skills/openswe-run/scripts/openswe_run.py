@@ -337,6 +337,19 @@ query RunIssue($id: String!) {
   issue(id: $id) {
     id identifier title url completedAt canceledAt
     state { type name }
+    team { id key name visibility }
+  }
+}
+"""
+
+WEBHOOKS_QUERY = """
+query RunWebhooks($cursor: String) {
+  webhooks(first: 100, after: $cursor) {
+    nodes {
+      id enabled allPublicTeams resourceTypes teamIds
+      team { id key name }
+    }
+    pageInfo { hasNextPage endCursor }
   }
 }
 """
@@ -360,6 +373,62 @@ def resolve_issue(ticket: str) -> dict:
     if not issue:
         raise RunError(f"Linear issue {ticket} was not found")
     return issue
+
+
+def linear_webhooks() -> list[dict]:
+    variables: dict = {}
+    webhooks: list[dict] = []
+    while True:
+        connection = linear_gql(WEBHOOKS_QUERY, variables).get("webhooks") or {}
+        webhooks.extend(node for node in connection.get("nodes") or [] if isinstance(node, dict))
+        page = connection.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            return webhooks
+        cursor = page.get("endCursor")
+        if not cursor:
+            raise RunError("Linear webhook pagination returned no end cursor")
+        variables = {"cursor": cursor}
+
+
+def webhook_covers_team(webhook: dict, team_id: str, team_visibility: str) -> bool:
+    if webhook.get("enabled") is not True or "Comment" not in (webhook.get("resourceTypes") or []):
+        return False
+    team = webhook.get("team") or {}
+    if team.get("id") == team_id or team_id in (webhook.get("teamIds") or []):
+        return True
+    return webhook.get("allPublicTeams") is True and team_visibility == "public"
+
+
+def require_webhook_coverage(issue: dict) -> None:
+    team = issue.get("team") or {}
+    team_id = str(team.get("id") or "")
+    team_name = str(team.get("key") or team.get("name") or "unknown")
+    team_visibility = str(team.get("visibility") or "")
+    if not team_id:
+        raise RunError(
+            f"Linear issue {issue.get('identifier') or issue.get('id')} returned no team, "
+            "so webhook coverage cannot be checked."
+        )
+    try:
+        webhooks = linear_webhooks()
+    except RunError as exc:
+        raise RunError(
+            f"Could not read Linear webhook configuration for team {team_name}. "
+            "Use a workspace-admin LINEAR_API_KEY (or OAuth token with admin scope), then retry. "
+            f"Linear error: {exc}"
+        ) from exc
+    if not any(webhook_covers_team(webhook, team_id, team_visibility) for webhook in webhooks):
+        if team_visibility == "public":
+            action = "Provision a workspace webhook with allPublicTeams=true"
+        else:
+            action = (
+                f"Provision an enabled Comment webhook explicitly scoped to team {team_name}; "
+                "allPublicTeams covers public teams only"
+            )
+        raise RunError(
+            f"No enabled Linear Comment webhook covers team {team_name}. "
+            f"{action} before dispatching this ticket."
+        )
 
 
 def resolve_bundle(primary_ticket: str, included_tickets: list[str]) -> list[dict]:
@@ -1153,6 +1222,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 0
     for issue in issues:
         guard_terminal_issue(args.ticket, issue, args.force)
+    require_webhook_coverage(primary)
     write_bundle_manifest(args.ticket, issues)
     result["handoff"] = _post_with_handoff("start", args.ticket, primary["id"], body, thread_id)
     handoff = result["handoff"]
