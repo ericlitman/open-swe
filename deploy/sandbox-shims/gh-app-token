@@ -1,0 +1,18 @@
+#!/bin/sh
+# Mint a fresh GitHub App installation token inside the production API container.
+# Container port of the OSWE-139 host shim: derives the target repository from the
+# invoking clone's origin, then mints via the in-image agent code (GITHUB_APP_* env).
+invoking_directory=$PWD
+unset GITHUB_APP_TARGET_REPO
+origin_url=$(git -C "$invoking_directory" config --local --get remote.origin.url 2>/dev/null) || origin_url=
+case "$origin_url" in
+  https://github.com/*) target_repo=${origin_url#https://github.com/} ;;
+  git@github.com:*) target_repo=${origin_url#git@github.com:} ;;
+  *) target_repo= ;;
+esac
+target_repo=${target_repo%.git}
+case "$target_repo" in
+  ""|/*|*/|*/*/*|*[!A-Za-z0-9._/-]*) ;;
+  */*) GITHUB_APP_TARGET_REPO=$target_repo export GITHUB_APP_TARGET_REPO ;;
+esac
+exec python3 -c "import asyncio; from agent.utils.github_app import get_github_app_installation_token as f; t = asyncio.run(f(log_errors=False)); assert t, 'token mint failed'; print(t)"

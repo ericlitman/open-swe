@@ -1,0 +1,6 @@
+#!/bin/sh
+# Minting gh wrapper. Fails closed when the mint fails — never falls through to
+# ambient credentials (the silent-fallthrough identity leak from OSWE-202).
+GH_TOKEN="$(/usr/local/bin/gh-app-token)" || { echo "gh shim: installation token mint failed" >&2; exit 1; }
+export GH_TOKEN
+exec /usr/local/bin/gh-real "$@"

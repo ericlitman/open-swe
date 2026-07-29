@@ -277,3 +277,28 @@ each release-activate (until the ops installer does it); the colima VM cap (12 G
 be tuned down once the soak confirms headroom; exit *notification* for unplanned backend
 exits is tracked as a follow-up — launchd KeepAlive plus container restart policies
 already handle restart-on-crash.
+
+## Sandbox GitHub tooling (learned from OSWE-202, 2026-07-29)
+
+With `SANDBOX_TYPE=local`, sandboxes execute inside the API container, so the container
+must carry the GitHub delivery tooling the host previously provided on the wrapper's
+PATH. The first post-cutover run (BEAR-67) implemented and verified successfully, then
+could not push: no `gh`, no git credentials, a blocked thread at 03:09Z. `langgraph.json`
+`dockerfile_lines` now bakes into every rendered Dockerfile: `gh` v2.62.0 (as
+`/usr/local/bin/gh-real`; the release asset is arch-pinned `linux_arm64` — change it for
+amd64 hosts), the minting shims from [deploy/sandbox-shims/](../deploy/sandbox-shims/)
+(container ports of the OSWE-139 host shims; the `gh` wrapper fails closed on mint
+failure instead of falling through to ambient credentials), and a system git credential
+helper so plain `git push` authenticates as the App.
+
+Two related properties to keep in mind:
+
+- **In-container local sandboxes are ephemeral across container recreates.** BEAR-67's
+  bound sandbox (with its unpushed commit) died with a container recreate. With working
+  push credentials the standing commit-and-push convention bounds the loss; durable
+  host-mounted sandboxes (colima mount of the sandbox root plus a compose volume) are the
+  follow-up if that proves insufficient.
+- Verification after any image change: exec into the api container, clone any repo the
+  App covers, and check both `/usr/local/bin/gh-app-token` (prints a token) and
+  `git push --dry-run origin HEAD:refs/heads/credprobe-delete-me` (authenticates). A
+  `gh api user` 403 is expected — installation tokens have no `/user`.
