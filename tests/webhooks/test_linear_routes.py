@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from agent.webhooks import linear as linear_service
 from agent.webhooks.linear_routes import linear_webhook
@@ -547,3 +548,247 @@ async def test_mid_body_repo_prose_uses_persisted_thread_repo() -> None:
     expected_repo = {"owner": "stored", "name": "repo"}
     persist_repo.assert_awaited_once_with("issue-456", expected_repo)
     assert background_tasks.add_task.call_args.args[2] == expected_repo
+
+
+_DELIVERY_ID = "4bc3ee15-6e86-4e33-9a5a-136342a6f43a"
+_APP_USER_ID = "dc637f5e-8932-4c0d-bcbf-933f4092525c"
+
+
+def _agent_session_payload(action: str = "created") -> dict:
+    payload = {
+        "type": "AgentSessionEvent",
+        "action": action,
+        "oauthClientId": "client-id",
+        "organizationId": "org-1",
+        "appUserId": _APP_USER_ID,
+        "agentSession": {
+            "id": "session-1",
+            "organizationId": "org-1",
+            "appUserId": _APP_USER_ID,
+            "issueId": "issue-456",
+            "comment": {"id": "comment-123", "body": "@openswe please help"},
+            "creatorId": "user-1",
+            "creator": {"id": "user-1", "name": "Test User"},
+            "issue": {
+                "id": "issue-456",
+                "url": "https://linear.app/test/issue/TEST-1",
+            },
+        },
+    }
+    if action == "prompted":
+        payload["agentActivity"] = {
+            "id": "prompt-1",
+            "agentSessionId": "session-1",
+            "userId": "user-1",
+            "user": {"id": "user-1", "name": "Test User"},
+            "content": {"type": "prompt", "body": "Please continue"},
+        }
+    return payload
+
+
+async def _invoke_agent_session(payload: dict, delivery_id: str = _DELIVERY_ID):
+    request = AsyncMock()
+    request.body.return_value = json.dumps(payload).encode()
+    request.headers = {
+        "Linear-Signature": "valid",
+        "Linear-Delivery": delivery_id,
+    }
+    background_tasks = MagicMock()
+    result = await linear_webhook(request, background_tasks)
+    return result, background_tasks
+
+
+@pytest.mark.parametrize("action", ["created", "prompted"])
+async def test_agent_session_event_is_acknowledged_without_dispatch(
+    action: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
+    monkeypatch.setenv("LINEAR_APP_USER_ID", _APP_USER_ID)
+    acknowledge = AsyncMock()
+    mention_classifier = MagicMock()
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch("agent.webhooks.common.classify_comment_mention", mention_classifier),
+        patch("agent.webhooks.linear.create_linear_agent_activity", acknowledge),
+        patch(
+            "agent.webhooks.linear.common.generate_thread_id_from_issue",
+            return_value="thread-1",
+        ),
+        patch(
+            "agent.webhooks.linear.common.dashboard_thread_url",
+            return_value="https://openswe.example/agents/thread-1",
+        ),
+    ):
+        result, background_tasks = await _invoke_agent_session(_agent_session_payload(action))
+
+    assert result == {"status": "accepted", "message": "Agent session acknowledged"}
+    background_tasks.add_task.assert_not_called()
+    mention_classifier.assert_not_called()
+    acknowledge.assert_awaited_once()
+    assert acknowledge.call_args.args[:2] == ("session-1", _DELIVERY_ID)
+    content = acknowledge.call_args.args[2]
+    assert content["type"] == "thought"
+    assert "https://linear.app/test/issue/TEST-1" in content["body"]
+    assert "https://openswe.example/agents/thread-1" in content["body"]
+
+
+async def test_duplicate_agent_session_delivery_reuses_activity_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
+    monkeypatch.setenv("LINEAR_APP_USER_ID", _APP_USER_ID)
+    acknowledge = AsyncMock()
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch("agent.webhooks.linear.create_linear_agent_activity", acknowledge),
+    ):
+        first, first_tasks = await _invoke_agent_session(_agent_session_payload())
+        second, second_tasks = await _invoke_agent_session(_agent_session_payload())
+
+    assert first["status"] == second["status"] == "accepted"
+    assert [call.args[1] for call in acknowledge.await_args_list] == [_DELIVERY_ID, _DELIVERY_ID]
+    first_tasks.add_task.assert_not_called()
+    second_tasks.add_task.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (
+            lambda payload: payload.update(oauthClientId="other-client"),
+            "Agent session does not belong to this app",
+        ),
+        (
+            lambda payload: payload["agentSession"].update(appUserId="other-app"),
+            "Agent session does not belong to this app",
+        ),
+        (
+            lambda payload: (
+                payload.update(appUserId="other-app"),
+                payload["agentSession"].update(appUserId="other-app"),
+            ),
+            "Agent session does not belong to this app",
+        ),
+        (
+            lambda payload: payload["agentSession"].update(issueId="other-issue"),
+            "Malformed AgentSessionEvent payload",
+        ),
+        (
+            lambda payload: payload["agentActivity"].update(agentSessionId="other-session"),
+            "Agent activity does not belong to this session",
+        ),
+    ],
+)
+async def test_agent_session_wrong_app_or_session_is_ignored(
+    mutate, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
+    monkeypatch.setenv("LINEAR_APP_USER_ID", _APP_USER_ID)
+    payload = _agent_session_payload("prompted")
+    mutate(payload)
+    acknowledge = AsyncMock()
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch("agent.webhooks.linear.create_linear_agent_activity", acknowledge),
+    ):
+        result, background_tasks = await _invoke_agent_session(payload)
+
+    assert result == {"status": "ignored", "reason": reason}
+    acknowledge.assert_not_awaited()
+    background_tasks.add_task.assert_not_called()
+
+
+async def test_agent_session_malformed_payload_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
+    monkeypatch.setenv("LINEAR_APP_USER_ID", _APP_USER_ID)
+    acknowledge = AsyncMock()
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch("agent.webhooks.linear.create_linear_agent_activity", acknowledge),
+    ):
+        result, background_tasks = await _invoke_agent_session(
+            _agent_session_payload(), delivery_id="not-a-uuid"
+        )
+
+    assert result == {"status": "ignored", "reason": "Malformed AgentSessionEvent payload"}
+    acknowledge.assert_not_awaited()
+    background_tasks.add_task.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["created", "prompted"])
+async def test_agent_session_app_sender_is_ignored(
+    action: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
+    monkeypatch.setenv("LINEAR_APP_USER_ID", _APP_USER_ID)
+    payload = _agent_session_payload(action)
+    if action == "created":
+        payload["agentSession"]["creatorId"] = _APP_USER_ID
+        payload["agentSession"]["creator"]["id"] = _APP_USER_ID
+    else:
+        payload["agentActivity"]["userId"] = _APP_USER_ID
+        payload["agentActivity"]["user"]["id"] = _APP_USER_ID
+    acknowledge = AsyncMock()
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch("agent.webhooks.linear.create_linear_agent_activity", acknowledge),
+    ):
+        result, background_tasks = await _invoke_agent_session(payload)
+
+    assert result == {"status": "ignored", "reason": "Agent session sender is not a human user"}
+    acknowledge.assert_not_awaited()
+    background_tasks.add_task.assert_not_called()
+
+
+async def test_agent_session_signature_failure_is_rejected() -> None:
+    request = AsyncMock()
+    request.body.return_value = json.dumps(_agent_session_payload()).encode()
+    request.headers = {
+        "Linear-Signature": "invalid",
+        "Linear-Delivery": _DELIVERY_ID,
+    }
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=False),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await linear_webhook(request, MagicMock())
+
+    assert exc_info.value.status_code == 401
+
+
+async def test_agent_session_acknowledgement_failure_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
+    monkeypatch.setenv("LINEAR_APP_USER_ID", _APP_USER_ID)
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch(
+            "agent.webhooks.linear.create_linear_agent_activity",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("activity failed"),
+        ),
+        pytest.raises(RuntimeError, match="activity failed"),
+    ):
+        await _invoke_agent_session(_agent_session_payload())
+
+
+async def test_agent_session_without_comment_is_not_acknowledged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
+    monkeypatch.setenv("LINEAR_APP_USER_ID", _APP_USER_ID)
+    payload = _agent_session_payload()
+    payload["agentSession"].pop("comment")
+    acknowledge = AsyncMock()
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch("agent.webhooks.linear.create_linear_agent_activity", acknowledge),
+    ):
+        result, background_tasks = await _invoke_agent_session(payload)
+
+    assert result == {"status": "ignored", "reason": "Malformed AgentSessionEvent payload"}
+    acknowledge.assert_not_awaited()
+    background_tasks.add_task.assert_not_called()

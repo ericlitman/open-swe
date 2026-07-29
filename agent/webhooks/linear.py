@@ -4,13 +4,15 @@ Helpers and constants stay in common.py; they are accessed through the module
 object (``common.X``) so tests that monkeypatch them keep working.
 """
 
+import os
 from typing import Any, cast
+from uuid import UUID
 
 import httpx
 from langchain_core.messages.content import create_text_block
 
 from ..dashboard.plan_store import PLAN_STATUS_APPROVED, get_plan_content
-from ..utils.linear import comment_on_linear_issue
+from ..utils.linear import comment_on_linear_issue, create_linear_agent_activity
 from . import common
 
 _LINEAR_ROUTING_FAILURE_PREFIX = "❌ **Agent Error**"
@@ -18,6 +20,106 @@ _LINEAR_ROUTING_FAILURE_PREFIX = "❌ **Agent Error**"
 
 class LinearThreadRepoError(RuntimeError):
     """Raised when Linear thread repository metadata cannot be accessed safely."""
+
+
+def _is_uuid4(value: str) -> bool:
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return False
+    return parsed.version == 4 and str(parsed) == value.lower()
+
+
+async def process_linear_agent_session_event(
+    payload: dict[str, Any], delivery_id: str
+) -> dict[str, str]:
+    """Acknowledge a verified Linear agent session without dispatching a run."""
+    action = payload.get("action")
+    if action not in {"created", "prompted"}:
+        return {"status": "ignored", "reason": f"Unsupported AgentSessionEvent action: {action}"}
+
+    session = payload.get("agentSession")
+    if not isinstance(session, dict) or not _is_uuid4(delivery_id):
+        return {"status": "ignored", "reason": "Malformed AgentSessionEvent payload"}
+
+    expected_client_id = os.environ.get("LINEAR_CLIENT_ID", "").strip()
+    expected_app_user_id = os.environ.get("LINEAR_APP_USER_ID", "").strip()
+    app_user_id = payload.get("appUserId")
+    session_id = session.get("id")
+    issue = session.get("issue")
+    organization_id = payload.get("organizationId")
+    if (
+        not expected_client_id
+        or not expected_app_user_id
+        or payload.get("oauthClientId") != expected_client_id
+        or app_user_id != expected_app_user_id
+        or session.get("appUserId") != app_user_id
+        or not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(organization_id, str)
+        or not organization_id
+        or session.get("organizationId") != organization_id
+        or not isinstance(issue, dict)
+    ):
+        return {"status": "ignored", "reason": "Agent session does not belong to this app"}
+
+    issue_id = issue.get("id")
+    issue_url = issue.get("url")
+    session_comment = session.get("comment")
+    if (
+        not isinstance(issue_id, str)
+        or not issue_id
+        or session.get("issueId") != issue_id
+        or not isinstance(session_comment, dict)
+        or not isinstance(session_comment.get("id"), str)
+        or not session_comment.get("id")
+        or not isinstance(issue_url, str)
+        or not issue_url
+    ):
+        return {"status": "ignored", "reason": "Malformed AgentSessionEvent payload"}
+
+    if action == "created":
+        sender_id = session.get("creatorId")
+        creator = session.get("creator")
+        if (
+            not isinstance(sender_id, str)
+            or not sender_id
+            or sender_id == app_user_id
+            or not isinstance(creator, dict)
+            or creator.get("id") != sender_id
+        ):
+            return {"status": "ignored", "reason": "Agent session sender is not a human user"}
+    else:
+        activity = payload.get("agentActivity")
+        if not isinstance(activity, dict) or activity.get("agentSessionId") != session_id:
+            return {"status": "ignored", "reason": "Agent activity does not belong to this session"}
+        sender_id = activity.get("userId")
+        sender = activity.get("user")
+        content = activity.get("content")
+        if (
+            not isinstance(sender_id, str)
+            or not sender_id
+            or sender_id == app_user_id
+            or not isinstance(sender, dict)
+            or sender.get("id") != sender_id
+            or not isinstance(content, dict)
+            or content.get("type") != "prompt"
+        ):
+            return {"status": "ignored", "reason": "Agent session sender is not a human user"}
+
+    thread_id = common.generate_thread_id_from_issue(issue_id)
+    dashboard_url = common.dashboard_thread_url(thread_id)
+    body = (
+        f"Acknowledged. Open SWE is handling this through the [Linear issue]({issue_url}) thread."
+    )
+    if dashboard_url:
+        body += f" [Open the deterministic Open SWE thread]({dashboard_url})."
+    await create_linear_agent_activity(
+        session_id,
+        delivery_id,
+        {"type": "thought", "body": body},
+    )
+    return {"status": "accepted", "message": "Agent session acknowledged"}
 
 
 async def get_linear_thread_repo_config(issue_id: str) -> dict[str, str] | None:

@@ -30,14 +30,14 @@ def legacy(webhook_id: str, *, url: str = provision.DEFAULT_WEBHOOK_URL) -> dict
     }
 
 
-def workspace(webhook_id: str = "workspace-1") -> dict:
+def workspace(webhook_id: str = "workspace-1", *, resource_types: list[str] | None = None) -> dict:
     return {
         "id": webhook_id,
         "url": provision.DEFAULT_WEBHOOK_URL,
         "enabled": True,
         "secret": "shared-secret",
         "allPublicTeams": True,
-        "resourceTypes": ["Comment"],
+        "resourceTypes": resource_types or ["Comment", "AgentSessionEvent"],
     }
 
 
@@ -55,6 +55,32 @@ def test_completed_cutover_is_a_noop() -> None:
     plan = provision.plan_cutover([workspace()], provision.DEFAULT_WEBHOOK_URL, "shared-secret")
 
     assert plan == provision.CutoverPlan(False, "workspace-1", ())
+
+
+def test_comment_workspace_is_replaced_without_a_delivery_gap() -> None:
+    current = workspace("comment-workspace", resource_types=["Comment"])
+
+    plan = provision.plan_cutover([current], provision.DEFAULT_WEBHOOK_URL, "shared-secret")
+
+    assert plan == provision.CutoverPlan(True, None, ("comment-workspace",))
+
+
+def test_create_subscribes_to_comments_and_agent_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_gql(query: str, variables: dict) -> dict:
+        captured.update(variables["input"])
+        return {"webhookCreate": {"success": True, "webhook": {"id": "workspace-1"}}}
+
+    monkeypatch.setattr(provision, "linear_gql", fake_gql)
+
+    assert (
+        provision.create_workspace_webhook(
+            provision.DEFAULT_WEBHOOK_URL, provision.DEFAULT_LABEL, "shared-secret"
+        )
+        == "workspace-1"
+    )
+    assert set(captured["resourceTypes"]) == {"Comment", "AgentSessionEvent"}
 
 
 def test_interrupted_cutover_deletes_only_remaining_legacy_webhooks() -> None:
@@ -145,3 +171,29 @@ def test_preview_is_default_and_does_not_mutate(
     payload = json.loads(capsys.readouterr().out)
     assert payload["mode"] == "preview"
     assert payload["plan"]["create_workspace_webhook"] is False
+
+
+def test_apply_replaces_comment_workspace_after_confirming_combined_webhook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = workspace("comment-workspace", resource_types=["Comment"])
+    combined = workspace()
+    states = [[current], [current, combined], [combined]]
+    events: list[str] = []
+
+    monkeypatch.setattr(provision, "list_webhooks", lambda: states.pop(0))
+    monkeypatch.setattr(
+        provision,
+        "create_workspace_webhook",
+        lambda url, label, secret: events.append("create") or "workspace-1",
+    )
+    monkeypatch.setattr(
+        provision, "delete_webhook", lambda webhook_id: events.append(f"delete:{webhook_id}")
+    )
+
+    result = provision.apply_cutover(
+        provision.DEFAULT_WEBHOOK_URL, provision.DEFAULT_LABEL, "shared-secret"
+    )
+
+    assert result == provision.CutoverPlan(False, "workspace-1", ())
+    assert events == ["create", "delete:comment-workspace"]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision the studio2 workspace-scoped Linear Comment webhook."""
+"""Provision the studio2 workspace-scoped Linear webhook."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 LINEAR_URL = "https://api.linear.app/graphql"
 DEFAULT_WEBHOOK_URL = "https://studio2.tail062eee.ts.net:8443/webhooks/linear"
 DEFAULT_LABEL = "open-swe-studio2"
+DESIRED_RESOURCE_TYPES = frozenset({"Comment", "AgentSessionEvent"})
 LEGACY_WEBHOOK_TEAMS = {
     "7afda488-f809-49d0-83ed-6bde826d5a64": "OSWE",
     "3dc766dd-2b1f-4b4a-b4a0-ed602c6c81fc": "BEAR",
@@ -92,13 +93,15 @@ def list_webhooks() -> list[dict]:
         variables = {"cursor": cursor}
 
 
-def _is_workspace_comment_webhook(webhook: dict, url: str, secret: str) -> bool:
+def _is_workspace_webhook(
+    webhook: dict, url: str, secret: str, resource_types: frozenset[str]
+) -> bool:
     return (
         webhook.get("url") == url
         and webhook.get("enabled") is True
         and webhook.get("secret") == secret
         and webhook.get("allPublicTeams") is True
-        and set(webhook.get("resourceTypes") or []) == {"Comment"}
+        and set(webhook.get("resourceTypes") or []) == resource_types
     )
 
 
@@ -117,11 +120,22 @@ def _validate_legacy_webhook(webhook: dict, url: str, expected_team: str) -> Non
 
 
 def plan_cutover(webhooks: list[dict], url: str, secret: str) -> CutoverPlan:
-    desired = [hook for hook in webhooks if _is_workspace_comment_webhook(hook, url, secret)]
+    desired = [
+        hook
+        for hook in webhooks
+        if _is_workspace_webhook(hook, url, secret, DESIRED_RESOURCE_TYPES)
+    ]
+    comment_only = [
+        hook
+        for hook in webhooks
+        if _is_workspace_webhook(hook, url, secret, frozenset({"Comment"}))
+    ]
     if len(desired) > 1:
+        raise ProvisionError(f"Multiple enabled workspace webhooks already target {url}")
+    if len(comment_only) > 1:
         raise ProvisionError(f"Multiple enabled workspace Comment webhooks already target {url}")
     legacy_by_id = {str(hook.get("id")): hook for hook in webhooks if hook.get("id")}
-    delete_ids = []
+    delete_ids = [str(hook["id"]) for hook in comment_only]
     for webhook_id, expected_team in LEGACY_WEBHOOK_TEAMS.items():
         webhook = legacy_by_id.get(webhook_id)
         if webhook is None:
@@ -129,6 +143,7 @@ def plan_cutover(webhooks: list[dict], url: str, secret: str) -> CutoverPlan:
         _validate_legacy_webhook(webhook, url, expected_team)
         delete_ids.append(webhook_id)
     allowed_ids = set(LEGACY_WEBHOOK_IDS)
+    allowed_ids.update(delete_ids)
     if desired:
         allowed_ids.add(str(desired[0]["id"]))
     unexpected = [
@@ -158,7 +173,7 @@ def create_workspace_webhook(url: str, label: str, secret: str) -> str:
                     "url": url,
                     "label": label,
                     "secret": secret,
-                    "resourceTypes": ["Comment"],
+                    "resourceTypes": sorted(DESIRED_RESOURCE_TYPES),
                     "allPublicTeams": True,
                 }
             },

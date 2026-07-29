@@ -30,7 +30,12 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         common.logger.exception("Failed to parse webhook JSON")
         return {"status": "error", "message": "Invalid JSON"}
 
-    if payload.get("type") != "Comment":
+    event_type = payload.get("type")
+    if event_type == "AgentSessionEvent":
+        return await service.process_linear_agent_session_event(
+            payload, request.headers.get("Linear-Delivery", "")
+        )
+    if event_type != "Comment":
         common.logger.debug("Ignoring webhook: not a Comment event")
         return {"status": "ignored", "reason": "Not a Comment event"}
 
