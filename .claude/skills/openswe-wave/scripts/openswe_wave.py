@@ -25,6 +25,7 @@ WAKE_NODES = (
     "review_findings_posted",
     "review_complete",
     "run_blocked",
+    "run_stalled",
     "review_absent",
     "merge_conflict",
     "terminal_merged",
@@ -545,22 +546,41 @@ def linear_comment(issue_id: str, body: str, *, deadline: float | None = None) -
 
 
 async def _langgraph_snapshot(thread_id: str, timeout: float) -> dict[str, Any]:
-    """Fetch thread metadata and recent runs."""
+    """Fetch thread metadata, recent runs, and latest checkpoint state."""
     env = require_env("LANGGRAPH_URL")
     from langgraph_sdk import get_client
 
     client = get_client(url=env["LANGGRAPH_URL"], timeout=timeout)
+    thread_task = asyncio.create_task(client.threads.get(thread_id))
+    runs_task = asyncio.create_task(client.runs.list(thread_id, limit=1000))
+    state_task = asyncio.create_task(client.threads.get_state(thread_id))
+    tasks = (thread_task, runs_task, state_task)
     try:
         async with asyncio.timeout(timeout):
-            thread = await client.threads.get(thread_id)
-            runs = await client.runs.list(thread_id, limit=1000)
+            thread, runs = await asyncio.gather(thread_task, runs_task)
     except _PollDeadlineError:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         raise
     except TimeoutError as exc:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         raise WaveOpsError(f"LANGGRAPH_URL request timed out after {timeout:.1f}s") from exc
     except Exception as exc:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         raise WaveOpsError(f"LANGGRAPH_URL request failed: {exc}") from exc
-    return {"thread": thread, "runs": runs}
+    if not state_task.done():
+        state_task.cancel()
+    state_result = (await asyncio.gather(state_task, return_exceptions=True))[0]
+    state = None if isinstance(state_result, BaseException) else state_result
+    return {"thread": thread, "runs": runs, "state": state}
 
 
 def langgraph_snapshot(thread_id: str, *, deadline: float | None = None) -> dict[str, Any]:
@@ -857,6 +877,7 @@ def _event_node(event: dict[str, Any]) -> str | None:
         "review_findings": "review_findings_posted",
         "review_complete": "review_complete",
         "run_blocked": "run_blocked",
+        "run_stalled": "run_stalled",
         "review_absent": "review_absent",
         "merge_conflict": "merge_conflict",
         "merged": "terminal_merged",
@@ -1308,6 +1329,7 @@ def live_snapshot(
         "review_ids": review_ids,
         "latest_run_status": latest_status,
         "latest_run_at": latest_at,
+        "latest_checkpoint_at": (langgraph.get("state") or {}).get("created_at"),
         "error_run_ids": error_ids,
         "observed_at": datetime.now(UTC).isoformat(),
     }
@@ -1320,30 +1342,36 @@ def liveness_event(
     thread = current.get("langgraph", {}).get("thread") or {}
     if thread.get("status") != "busy":
         return None
-    activity = current.get("latest_run_at")
+    activity = [
+        value
+        for value in (current.get("latest_run_at"), current.get("latest_checkpoint_at"))
+        if value
+    ]
     if not activity:
         return {
             "kind": "unhandled",
             "source": "langgraph",
-            "summary": "busy thread has no recent run activity timestamp",
+            "summary": "busy thread has no recent execution activity timestamp",
         }
     try:
-        activity_at = datetime.fromisoformat(str(activity).replace("Z", "+00:00"))
+        activity_at = max(
+            datetime.fromisoformat(str(value).replace("Z", "+00:00")) for value in activity
+        )
         current_at = datetime.fromisoformat(str(current["observed_at"]).replace("Z", "+00:00"))
         previous_at = datetime.fromisoformat(str(previous["observed_at"]).replace("Z", "+00:00"))
     except (KeyError, ValueError):
         return {
             "kind": "unhandled",
             "source": "langgraph",
-            "summary": "run activity timestamp is unparseable",
+            "summary": "execution activity timestamp is unparseable",
         }
     current_age = (current_at - activity_at).total_seconds()
     previous_age = (previous_at - activity_at).total_seconds()
     if previous_age < stall_seconds <= current_age:
         return {
-            "kind": "unhandled",
+            "kind": "run_stalled",
             "source": "langgraph",
-            "summary": f"busy thread has no run activity for {int(current_age)} seconds",
+            "summary": f"busy thread has no execution activity for {int(current_age)} seconds",
         }
     return None
 

@@ -499,6 +499,15 @@ def test_replay_coalesces_actionable_state_dump() -> None:
     assert len(result["wakes"][0]["evidence"]) == 3
 
 
+def test_run_stalled_replays_as_distinct_wake() -> None:
+    result = wave.replay_events(
+        [{"poll_id": "same", "kind": "run_stalled", "summary": "stalled"}], "session"
+    )
+
+    assert result["wake_count"] == 1
+    assert result["wakes"][0]["wake_node"] == "run_stalled"
+
+
 def test_unhandled_and_terminal_observations_beat_plan_in_same_poll() -> None:
     events = [
         {"poll_id": "same", "kind": "plan_posted"},
@@ -720,22 +729,41 @@ def test_merge_conflict_detects_existing_and_newly_entered_states() -> None:
     assert [event["kind"] for event in events] == ["merge_conflict"]
 
 
-def test_liveness_wakes_only_when_silence_bound_is_crossed() -> None:
+def test_liveness_uses_fresh_checkpoint_when_run_timestamp_is_stale() -> None:
     previous = {
         "langgraph": {"thread": {"status": "busy"}},
         "latest_run_at": "2026-07-23T00:00:00Z",
+        "latest_checkpoint_at": "2026-07-23T00:29:00Z",
         "observed_at": "2026-07-23T00:29:59Z",
     }
     current = {
         "langgraph": {"thread": {"status": "busy"}},
         "latest_run_at": "2026-07-23T00:00:00Z",
+        "latest_checkpoint_at": "2026-07-23T00:29:00Z",
+        "observed_at": "2026-07-23T00:30:01Z",
+    }
+
+    assert wave.liveness_event(previous, current, 1800) is None
+
+
+def test_liveness_wakes_as_run_stalled_when_all_activity_is_stale() -> None:
+    previous = {
+        "langgraph": {"thread": {"status": "busy"}},
+        "latest_run_at": "2026-07-23T00:00:00Z",
+        "latest_checkpoint_at": "2026-07-22T23:59:00Z",
+        "observed_at": "2026-07-23T00:29:59Z",
+    }
+    current = {
+        "langgraph": {"thread": {"status": "busy"}},
+        "latest_run_at": "2026-07-23T00:00:00Z",
+        "latest_checkpoint_at": "2026-07-22T23:59:00Z",
         "observed_at": "2026-07-23T00:30:01Z",
     }
 
     event = wave.liveness_event(previous, current, 1800)
 
     assert event is not None
-    assert event["kind"] == "unhandled"
+    assert event["kind"] == "run_stalled"
     assert wave.liveness_event(current, current, 1800) is None
 
 
@@ -1060,12 +1088,20 @@ def test_langgraph_snapshot_reraises_poll_deadline(
     async def get_thread(_thread_id: str) -> dict[str, Any]:
         raise deadline
 
+    async def get_state(_thread_id: str) -> dict[str, Any]:
+        return {}
+
+    async def list_runs(_thread_id: str, *, limit: int) -> list[Any]:
+        assert limit == 1000
+        return []
+
     monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
     monkeypatch.setattr(
         langgraph_sdk,
         "get_client",
         lambda **_kwargs: SimpleNamespace(
-            threads=SimpleNamespace(get=get_thread), runs=SimpleNamespace()
+            threads=SimpleNamespace(get=get_thread, get_state=get_state),
+            runs=SimpleNamespace(list=list_runs),
         ),
     )
 
@@ -1073,6 +1109,71 @@ def test_langgraph_snapshot_reraises_poll_deadline(
         wave.asyncio.run(wave._langgraph_snapshot("thread", 1.0))
 
     assert exc_info.value is deadline
+
+
+def test_langgraph_snapshot_falls_back_when_state_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import langgraph_sdk
+
+    class Threads:
+        async def get(self, _thread_id: str) -> dict[str, Any]:
+            return {"status": "busy"}
+
+        async def get_state(self, _thread_id: str) -> dict[str, Any]:
+            raise RuntimeError("state unavailable")
+
+    class Runs:
+        async def list(self, _thread_id: str, *, limit: int) -> list[dict[str, Any]]:
+            assert limit == 1000
+            return [{"run_id": "run", "status": "running"}]
+
+    monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
+    monkeypatch.setattr(
+        langgraph_sdk,
+        "get_client",
+        lambda **_kwargs: SimpleNamespace(threads=Threads(), runs=Runs()),
+    )
+
+    snapshot = wave.asyncio.run(wave._langgraph_snapshot("thread", 1.0))
+
+    assert snapshot == {
+        "thread": {"status": "busy"},
+        "runs": [{"run_id": "run", "status": "running"}],
+        "state": None,
+    }
+
+
+def test_langgraph_snapshot_falls_back_when_state_read_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import langgraph_sdk
+
+    class Threads:
+        async def get(self, _thread_id: str) -> dict[str, Any]:
+            return {"status": "busy"}
+
+        async def get_state(self, _thread_id: str) -> dict[str, Any]:
+            await wave.asyncio.sleep(60)
+            return {}
+
+    class Runs:
+        async def list(self, _thread_id: str, *, limit: int) -> list[dict[str, Any]]:
+            assert limit == 1000
+            return []
+
+    monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.invalid")
+    monkeypatch.setattr(
+        langgraph_sdk,
+        "get_client",
+        lambda **_kwargs: SimpleNamespace(threads=Threads(), runs=Runs()),
+    )
+
+    started = time.perf_counter()
+    snapshot = wave.asyncio.run(wave._langgraph_snapshot("thread", 1.0))
+
+    assert time.perf_counter() - started < 0.5
+    assert snapshot == {"thread": {"status": "busy"}, "runs": [], "state": None}
 
 
 def test_langgraph_snapshot_passes_remaining_timeout_and_is_aggregate_bounded(
@@ -1086,6 +1187,9 @@ def test_langgraph_snapshot_passes_remaining_timeout_and_is_aggregate_bounded(
         async def get(self, _thread_id: str) -> dict[str, Any]:
             await wave.asyncio.sleep(0.03)
             return {"status": "busy"}
+
+        async def get_state(self, _thread_id: str) -> dict[str, Any]:
+            return {}
 
     class Runs:
         async def list(self, _thread_id: str, *, limit: int) -> list[Any]:
@@ -1376,6 +1480,32 @@ def test_monitor_can_start_before_pr_creation(monkeypatch: pytest.MonkeyPatch) -
 
     assert snapshot["pr"] == {}
     assert snapshot["pr_number"] is None
+
+
+def test_live_snapshot_includes_latest_checkpoint_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        wave,
+        "linear_snapshot",
+        lambda _issue, **_kwargs: {
+            "viewer": {"id": "session"},
+            "issue": {"comments": {"nodes": []}},
+        },
+    )
+    monkeypatch.setattr(
+        wave,
+        "langgraph_snapshot",
+        lambda _thread, **_kwargs: {
+            "thread": {"metadata": {}},
+            "runs": [],
+            "state": {"created_at": "2026-07-29T11:35:35Z"},
+        },
+    )
+
+    snapshot = wave.live_snapshot("issue", "thread", "owner/repo", None)
+
+    assert snapshot["latest_checkpoint_at"] == "2026-07-29T11:35:35Z"
 
 
 def test_live_snapshot_tracks_only_submitted_open_swe_reviews(

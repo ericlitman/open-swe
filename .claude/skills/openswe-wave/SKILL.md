@@ -100,6 +100,7 @@ The first sample suppresses historical transitions; persistent terminal, conflic
 - `review_findings_posted`
 - `review_complete`
 - `run_blocked`
+- `run_stalled`
 - `review_absent`
 - `merge_conflict`
 - `terminal_merged`

@@ -136,9 +136,10 @@ to 90 minutes. `--timeout-min N` explicitly overrides either default. The phase 
 watch-start logs and `watch_timeout` evidence.
 
 Wake nodes: `plan_posted`, `pr_opened`, `review_findings_posted`, `review_complete`,
-`run_blocked`, `review_absent`, `merge_conflict`, `terminal_merged`, `terminal_closed`,
-`terminal_run_error`, `unhandled_condition`, plus wrapper-level `endpoint_failover`,
-`endpoint_unavailable`, and `watch_timeout` (rc 3). A successful endpoint failover is the one
+`run_blocked`, `run_stalled`, `review_absent`, `merge_conflict`, `terminal_merged`,
+`terminal_closed`, `terminal_run_error`, `unhandled_condition`, plus wrapper-level
+`endpoint_failover`, `endpoint_unavailable`, and `watch_timeout` (rc 3). A successful endpoint
+failover is the one
 exception to exit-on-wake: it is printed immediately, and the same watch continues on the
 replacement endpoint. `endpoint_unavailable` exits fail-closed without retrying the dead endpoint.
 `--pr-number N` is optional; when omitted, the monitor discovers the PR from LangGraph thread metadata so PR recovery checks engage as soon as it exists.
@@ -195,8 +196,8 @@ A Linear comment on the issue lands in the running agent's mid-run queue:
 `approve`, `reject`, `comment`, and `nudge` use the same roughly 60-second handoff confirmation
 as `start`; run the phase-appropriate `watch` command only after they return successfully.
 
-Stall rule: a liveness wake (`unhandled_condition` mentioning run staleness, threshold 30
-minutes) gets **one** nudge — `scripts/openswe-run nudge --ticket OSWE-123 --minutes 30` —
+Stall rule: a liveness wake (`run_stalled`, threshold 30 minutes) gets **one** nudge —
+`scripts/openswe-run nudge --ticket OSWE-123 --minutes 30` —
 then re-watch. A second stall wake escalates to your caller. Never loop nudges.
 
 `review_findings_posted`: read the findings on the PR, reply/resolve via `comment` with a
