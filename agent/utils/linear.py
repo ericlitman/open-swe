@@ -29,6 +29,10 @@ class LinearAuthError(RuntimeError):
     """Safe Linear credential configuration or exchange failure."""
 
 
+class LinearAgentActivityError(RuntimeError):
+    """Raised when a Linear agent activity cannot be created."""
+
+
 @dataclass(frozen=True)
 class LinearAuth:
     headers: dict[str, str]
@@ -199,6 +203,55 @@ async def _graphql_request(query: str, variables: dict[str, Any] | None = None) 
         return data if isinstance(data, dict) else {}
 
     return {"error": "Linear API request failed with status 401"}
+
+
+def _is_duplicate_agent_activity_error(error: Any, activity_id: str) -> bool:
+    if not isinstance(error, list):
+        return False
+    for item in error:
+        if not isinstance(item, dict):
+            continue
+        message = item.get("message")
+        extensions = item.get("extensions")
+        error_type = extensions.get("type") if isinstance(extensions, dict) else item.get("type")
+        if (
+            error_type == "InvalidInput"
+            and isinstance(message, str)
+            and activity_id.lower() in message.lower()
+            and ("AgentActivity" in message or "agent activity" in message.lower())
+            and any(term in message.lower() for term in ("already exists", "duplicate"))
+        ):
+            return True
+    return False
+
+
+async def create_linear_agent_activity(
+    agent_session_id: str, activity_id: str, content: dict[str, Any]
+) -> None:
+    """Create an idempotent Linear agent activity."""
+    mutation = """
+    mutation AgentActivityCreate($input: AgentActivityCreateInput!) {
+        agentActivityCreate(input: $input) {
+            success
+            agentActivity { id }
+        }
+    }
+    """
+    result = await _graphql_request(
+        mutation,
+        {
+            "input": {
+                "id": activity_id,
+                "agentSessionId": agent_session_id,
+                "content": content,
+            }
+        },
+    )
+    if result.get("agentActivityCreate", {}).get("success") is True:
+        return
+    if _is_duplicate_agent_activity_error(result.get("error"), activity_id):
+        return
+    raise LinearAgentActivityError("Failed to create Linear agent activity")
 
 
 async def comment_on_linear_issue(

@@ -441,3 +441,53 @@ async def test_webhook_helpers_preserve_failure_contracts() -> None:
     with patch.object(common, "_graphql_request", AsyncMock(return_value={"error": "failed"})):
         assert await common.react_to_linear_comment("comment-1") is False
         assert await common.fetch_linear_issue_details("issue-1") is None
+
+
+async def test_agent_activity_duplicate_id_is_idempotent() -> None:
+    duplicate = {
+        "error": [
+            {
+                "message": "AgentActivity with id activity-1 already exists",
+                "extensions": {"type": "InvalidInput"},
+            }
+        ]
+    }
+    with patch.object(linear, "_graphql_request", AsyncMock(return_value=duplicate)) as request:
+        await linear.create_linear_agent_activity(
+            "session-1", "activity-1", {"type": "thought", "body": "Acknowledged"}
+        )
+
+    assert request.await_args is not None
+    assert request.await_args.args[1]["input"]["id"] == "activity-1"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"error": "Linear API request failed"},
+        {
+            "error": [
+                {
+                    "message": "A different record already exists",
+                    "extensions": {"type": "InvalidInput"},
+                }
+            ]
+        },
+        {
+            "error": [
+                {
+                    "message": "AgentActivity other-activity already exists",
+                    "extensions": {"type": "InvalidInput"},
+                }
+            ]
+        },
+    ],
+)
+async def test_agent_activity_non_duplicate_errors_surface(error: dict) -> None:
+    with (
+        patch.object(linear, "_graphql_request", AsyncMock(return_value=error)),
+        pytest.raises(linear.LinearAgentActivityError),
+    ):
+        await linear.create_linear_agent_activity(
+            "session-1", "activity-1", {"type": "thought", "body": "Acknowledged"}
+        )

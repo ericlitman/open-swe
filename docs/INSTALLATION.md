@@ -231,7 +231,7 @@ A GitHub or Linear webhook is accepted if the resolved repo's org is in `ALLOWED
 
 ### Linear (optional)
 
-Open SWE listens for Linear comments that mention `@openswe`.
+Open SWE dispatches from Linear comments that mention `@openswe`. Linear UI mentions also open an AgentSession; the same webhook acknowledges that session without dispatching a second run.
 
 **Create one workspace webhook:**
 
@@ -241,24 +241,25 @@ Open SWE listens for Linear comments that mention `@openswe`.
    - **URL**: `https://<your-ngrok-url>/webhooks/linear` — use the ngrok URL from step 2
    - **Secret**: generate with `openssl rand -hex 32` — save this as `LINEAR_WEBHOOK_SECRET`
 3. Select **All public teams**. Do not create one webhook per public team: new public teams would otherwise be silently uncovered. Private or restricted teams still require explicit team coverage.
-4. Under **Data change events**, enable **Comments → Create** only
-5. Click **Create webhook**
+4. Under **Data change events**, enable **Comments → Create**
+5. Enable **Agent session events** so UI mentions can be acknowledged
+6. Click **Create webhook**
 
 Linear allows only workspace admins, or OAuth applications with the `admin` scope, to read or create webhooks. The `LINEAR_API_KEY` used by `openswe-run` must have that access because `start` verifies webhook coverage before posting a dispatch comment.
 
-For the studio2 migration from the three legacy team-scoped webhooks, use the idempotent cutover command only in a quiet window with zero busy Open SWE threads. Preview is the default; `--apply` creates and confirms the workspace webhook before deleting the known OSWE, BEAR, and MASTRA webhooks in the same invocation:
+For studio2 provisioning, release and restart the backend handler first, then use the idempotent cutover command in a quiet window with zero busy Open SWE threads. Preview is the default; `--apply` creates and confirms a workspace webhook subscribed to both `Comment` and `AgentSessionEvent` before deleting the prior Comment-only workspace webhook or the known OSWE, BEAR, and MASTRA webhooks in the same invocation:
 
 ```bash
 uv run python scripts/provision_linear_webhook.py
 uv run python scripts/provision_linear_webhook.py --apply
 ```
 
-Do not post dispatch comments between creation and deletion: overlapping team and workspace webhooks deliver the same Comment event twice. Afterward, query `webhooks` and require exactly one enabled webhook for the endpoint with `allPublicTeams: true` and `resourceTypes: [Comment]`, then verify one dispatch on both a newly covered team and an existing team produces one delivery and one run.
+Do not post dispatch comments between creation and deletion: overlapping webhooks deliver the same Comment event twice. Afterward, query `webhooks` and require exactly one enabled webhook for the endpoint with `allPublicTeams: true` and `resourceTypes` containing exactly `Comment` and `AgentSessionEvent`. Then verify a UI mention produces one Comment-path run and an acknowledged AgentSession. The provisioning command changes Linear only when the operator supplies `--apply`; merging this code does not activate the subscription.
 
 **Configure authentication:**
 
 For app-actor authentication, enable client-credentials tokens on the Linear OAuth app and
-save its credentials as `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET`. Every
+save its credentials as `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET`. Query `viewer { id }` with that app token and save the result as `LINEAR_APP_USER_ID`; AgentSession webhooks fail closed when their app-user identity does not match. Every
 client-credentials minter must request the exact scope set
 `read,write,app:assignable,app:mentionable`: [Linear applies the latest mint's scopes to
 the app grant](https://linear.app/developers/oauth-2-0-authentication#client-credentials-tokens)
@@ -488,6 +489,7 @@ LANGGRAPH_URL="http://localhost:2024"
 # === Linear (if using Linear trigger) ===
 LINEAR_CLIENT_ID=""                    # OAuth app client ID from step 5
 LINEAR_CLIENT_SECRET=""                # OAuth app client secret from step 5
+LINEAR_APP_USER_ID=""                  # `viewer.id` for the installed app user in this workspace
 LINEAR_API_KEY=""                      # Deprecated personal API key fallback
 LINEAR_WEBHOOK_SECRET=""               # From step 5
 
