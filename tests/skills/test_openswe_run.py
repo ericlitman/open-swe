@@ -481,7 +481,7 @@ def test_run_skill_loading_contract_stages_assets() -> None:
         "Treat every file under `scripts/*` as a black-box CLI",
         "Both `scripts/openswe_run.py` and the sibling wave engine",
         "Read `references/run-templates.md` only when composing",
-        "Read `../openswe-wave/references/adjudication-checklist.md` only after `plan_posted`",
+        "Read `../openswe-wave/references/adjudication-checklist.md` only after `plan_posted`, when adjudicating the plan, and again when spot-auditing the opened PR's diff",
         "Read `../openswe-wave/references/recovery-runbook.md` only after a stall",
     ):
         assert phrase in skill

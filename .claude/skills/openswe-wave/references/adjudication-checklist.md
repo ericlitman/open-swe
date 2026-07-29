@@ -33,4 +33,5 @@
 - Confirm required checks and review gates cannot be bypassed.
 - Confirm fixtures distinguish observed facts from inferred transient fields.
 - Run the focused tests independently and inspect representative CLI output.
+- When correctness depends on deployed-runtime behavior (completion order, latency, timestamp semantics), run one read-only live probe of the changed code against the deployed endpoint — instant-resolving mocks cannot falsify it (OSWE-204).
 - Treat bloat as a finding even when scope matches and checks are green: would the upstream maintainer accept the diff as a minimal patch?
