@@ -65,14 +65,10 @@ async def process_linear_agent_session_event(
 
     issue_id = issue.get("id")
     issue_url = issue.get("url")
-    session_comment = session.get("comment")
     if (
         not isinstance(issue_id, str)
         or not issue_id
         or session.get("issueId") != issue_id
-        or not isinstance(session_comment, dict)
-        or not isinstance(session_comment.get("id"), str)
-        or not session_comment.get("id")
         or not isinstance(issue_url, str)
         or not issue_url
     ):

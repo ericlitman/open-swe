@@ -775,7 +775,7 @@ async def test_agent_session_acknowledgement_failure_surfaces(
         await _invoke_agent_session(_agent_session_payload())
 
 
-async def test_agent_session_without_comment_is_not_acknowledged(
+async def test_delegated_agent_session_is_acknowledged_without_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
@@ -789,6 +789,6 @@ async def test_agent_session_without_comment_is_not_acknowledged(
     ):
         result, background_tasks = await _invoke_agent_session(payload)
 
-    assert result == {"status": "ignored", "reason": "Malformed AgentSessionEvent payload"}
-    acknowledge.assert_not_awaited()
+    assert result == {"status": "accepted", "message": "Agent session acknowledged"}
+    acknowledge.assert_awaited_once()
     background_tasks.add_task.assert_not_called()
