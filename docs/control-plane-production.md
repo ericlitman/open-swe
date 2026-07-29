@@ -97,9 +97,14 @@ sudo -n chown _openswectl:_openswectl "$CURRENT/.env"
 sudo -n chmod 600 "$CURRENT/.env"
 ```
 
-`_openswectl` cannot *create* files in the root-owned release dir, so this root-side step
-must be repeated after **every `release-activate`** (each release is a new directory).
-The wrapper's production role refreshes the file's contents thereafter (overwriting an
+`_openswectl` cannot *create* files in the root-owned release dir, so the file must be
+created root-side for every new release directory. On studio2-ops-managed hosts this is
+automatic as of 2026-07-29: studio2-ops `bin/release-activate` materializes
+`releases/<sha>/.env` (same `PATH=` filter, `_openswectl`-owned, mode 600) before
+kickstarting services, failing closed if the ops env file is missing or the filtered
+copy comes out empty. The manual commands above remain for the initial cutover (which
+precedes the first activation) and for hosts not managed by studio2-ops. The wrapper's
+production role refreshes the file's contents on every service start (overwriting an
 existing `_openswectl`-owned file works; creating one does not).
 
 ## Back up, then add the production wrapper role
@@ -279,8 +284,8 @@ back into the pickles by rollback.
 
 Studio2 outcome (2026-07-28): api container 219 MiB vs the dev runtime's 13,554 MiB
 fresh-boot; ThreadTTL (delete / 1440 min / hourly sweep) active in the runtime config;
-`api_variant=licensed`. Remaining operational notes: re-materialize `current/.env` after
-each release-activate (until the ops installer does it); the colima VM cap (12 GiB) can
+`api_variant=licensed`. Remaining operational notes: per-release `.env` materialization
+is automatic since 2026-07-29 (studio2-ops `release-activate`); the colima VM cap (12 GiB) can
 be tuned down once the soak confirms headroom; exit *notification* for unplanned backend
 exits is tracked as a follow-up — launchd KeepAlive plus container restart policies
 already handle restart-on-crash.
