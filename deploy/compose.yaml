@@ -1,0 +1,48 @@
+name: open-swe-control-plane
+services:
+  langgraph-redis:
+    image: redis:6
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  langgraph-postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - langgraph-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  langgraph-api:
+    image: ${OPEN_SWE_API_IMAGE:-open-swe-control-plane-api:local}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OPEN_SWE_API_PORT:-2024}:8000"
+    # The env file is written for the host; it must not contain PATH= or other
+    # host-shell variables (the production wrapper filters PATH when it
+    # materializes this file — a leaked PATH shadows the image's interpreter
+    # and the server dies with "python3: not found").
+    env_file:
+      - ${OPEN_SWE_ENV_FILE:-../.env}
+    environment:
+      # In-container self-calls (Slack tools, dispatch) must target this
+      # container, not the host-published port.
+      LANGGRAPH_URL: http://127.0.0.1:8000
+      REDIS_URI: redis://langgraph-redis:6379
+      POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
+    depends_on:
+      langgraph-redis:
+        condition: service_healthy
+      langgraph-postgres:
+        condition: service_healthy
+volumes:
+  langgraph-data:
