@@ -2021,7 +2021,7 @@ def test_wave_skill_loading_contract_stages_assets() -> None:
         "Treat every file under `scripts/*` as a black-box CLI",
         "`scripts/openswe_wave.py` is an implementation detail",
         "Read `references/comment-templates.md` only when composing",
-        "Read `references/adjudication-checklist.md` only when a plan is ready for review",
+        "Read `references/adjudication-checklist.md` only when a plan is ready for review, and again when spot-auditing an opened PR's diff",
         "Read `references/recovery-runbook.md` only after a stall",
         "Running `scripts/anchor-sweep` over the canonical ticket before dispatch",
     ):

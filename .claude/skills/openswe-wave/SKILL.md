@@ -12,7 +12,7 @@ At invocation, load only this `SKILL.md`. Treat every file under `scripts/*` as 
 Load references only at their workflow event:
 
 - Read `references/comment-templates.md` only when composing the relevant dispatch, approval or rejection, spot-audit, closeout, or tally comment.
-- Read `references/adjudication-checklist.md` only when a plan is ready for review.
+- Read `references/adjudication-checklist.md` only when a plan is ready for review, and again when spot-auditing an opened PR's diff.
 - Read `references/recovery-runbook.md` only after a stall, merge conflict, queue stall, or other recovery event.
 
 Running `scripts/anchor-sweep` over the canonical ticket before dispatch is verification, not loading, and is required for out-of-repo/host-state tickets, tickets declaring normative sources, disposable probes, and bundles; for ordinary in-repo tickets the plan gate's re-anchor owns premise verification (OSWE-103 tally, 2026-07-28). Run the CLI without reading its implementation.

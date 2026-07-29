@@ -12,7 +12,7 @@ At invocation, load only this `SKILL.md`. Treat every file under `scripts/*` as 
 Load references only at their workflow event:
 
 - Read `references/run-templates.md` only when composing the relevant dispatch, approval, rejection, or other operator comment.
-- Read `../openswe-wave/references/adjudication-checklist.md` only after `plan_posted`, when adjudicating the plan.
+- Read `../openswe-wave/references/adjudication-checklist.md` only after `plan_posted`, when adjudicating the plan, and again when spot-auditing the opened PR's diff.
 - Read `../openswe-wave/references/recovery-runbook.md` only after a stall, merge conflict, queue stall, or other recovery event.
 
 Single-run sibling of `openswe-wave`. Dispatch → watch → adjudicate plan → watch → report. A bundle remains one run: the first ticket is primary, included tickets share its Linear thread, branch, plan, PR, and monitor.
