@@ -4,9 +4,11 @@ Helpers and constants stay in common.py; they are accessed through the module
 object (``common.X``) so tests that monkeypatch them keep working.
 """
 
+import re
 import uuid
 from typing import Any
 
+from ..dashboard.autofix_state import set_pr_autofix_disabled
 from ..review.findings import FindingInteraction, ReviewerPRMeta, ReviewerSlackThread
 from ..utils.github_comments import GitHubAuthError
 from ..utils.slack import GitHubPrRef
@@ -638,6 +640,60 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         client=langgraph_client,
     )
     await common._store_current_reviewer_run_id(thread_id, run)
+
+
+_AUTOFIX_COMMAND_RE = re.compile(r"autofix\s+(on|off)\b", re.IGNORECASE)
+
+
+def _parse_autofix_command(comment_body: str) -> bool | None:
+    """Parse an explicitly mentioned ``@open-swe autofix on|off`` command."""
+    mention = common.classify_comment_mention(comment_body, common.OPEN_SWE_TAGS)
+    if mention.disposition != "accepted":
+        return None
+    match = _AUTOFIX_COMMAND_RE.search(comment_body)
+    if match is None:
+        return None
+    return match.group(1).lower() == "off"
+
+
+async def process_github_autofix_command(payload: dict[str, Any], *, disabled: bool) -> None:
+    """Persist and acknowledge a per-PR review auto-fix toggle."""
+    repository = payload.get("repository", {})
+    owner = repository.get("owner", {}).get("login", "")
+    name = repository.get("name", "")
+    pr_number = payload.get("issue", {}).get("number")
+    if not owner or not name or not isinstance(pr_number, int):
+        return
+
+    await set_pr_autofix_disabled(owner, name, pr_number, disabled)
+    common.logger.info(
+        "Review auto-fix %s for %s/%s#%s via comment",
+        "disabled" if disabled else "enabled",
+        owner,
+        name,
+        pr_number,
+    )
+
+    comment = payload.get("comment", {})
+    comment_id = comment.get("id")
+    if not isinstance(comment_id, int):
+        return
+    token, _ = await common.get_github_app_installation_token_with_expiry(
+        target_repo=f"{owner}/{name}", repositories=[name]
+    )
+    if not token:
+        return
+    try:
+        await common.react_to_github_comment(
+            {"owner": owner, "name": name},
+            comment_id,
+            event_type="issue_comment",
+            token=token,
+            pull_number=pr_number,
+            node_id=comment.get("node_id"),
+        )
+    except Exception:  # noqa: BLE001
+        common.logger.debug("Failed to react to auto-fix command comment", exc_info=True)
 
 
 async def process_github_pr_comment(payload: dict[str, Any], event_type: str) -> None:

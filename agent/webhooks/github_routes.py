@@ -163,6 +163,18 @@ async def github_webhook(
         )
         return {"status": "ignored", "reason": reason}
 
+    autofix_command = service._parse_autofix_command(comment_body)
+    if is_pull_request_comment and autofix_command is not None:
+        if not await common._is_repo_auto_review_enabled(webhook_repo_config):
+            return {"status": "ignored", "reason": "Repository not enabled for review"}
+        gate_rejection = await common._enforce_public_repo_org_gate(payload, event_type)
+        if gate_rejection is not None:
+            return gate_rejection
+        background_tasks.add_task(
+            service.process_github_autofix_command, payload, disabled=autofix_command
+        )
+        return {"status": "accepted", "message": "Processing auto-fix toggle"}
+
     gate_rejection = await common._enforce_public_repo_org_gate(payload, event_type)
     if gate_rejection is not None:
         return gate_rejection
