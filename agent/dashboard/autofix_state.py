@@ -1,10 +1,9 @@
-"""Per-PR auto-fix opt-out, stored in the LangGraph Store.
+"""Per-PR review auto-fix opt-out, stored in the LangGraph Store.
 
-Auto-fix is gated by the per-user ``auto_fix_ci`` profile flag.
-On top of that, a single PR can be silenced with ``@open-swe autofix off`` (and
-re-enabled with ``@open-swe autofix on``), mirroring Cursor's
-``@cursor autofix off`` per-PR control. The toggle lives here rather than on the
-agent thread so a disable command is honored even before any fix run exists.
+Review auto-fix is gated by team settings, repository enrollment, and the per-user
+``auto_fix_ci`` profile flag. A PR comment can disable it with
+``@open-swe autofix off`` and re-enable it with ``@open-swe autofix on``. The
+toggle lives here so a disable command is honored before any fix run exists.
 """
 
 from __future__ import annotations

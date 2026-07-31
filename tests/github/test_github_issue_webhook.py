@@ -54,6 +54,159 @@ def _post_github_webhook(
     )
 
 
+@pytest.mark.parametrize(
+    ("body", "disabled"),
+    [("@open-swe autofix off", True), ("@open-swe autofix on", False)],
+)
+def test_parse_autofix_command(body: str, disabled: bool) -> None:
+    assert github_webhooks._parse_autofix_command(body) is disabled
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@open-swe",
+        "A passing reference to autofix off",
+        "@open-swe please review this\n\n> Example: autofix off",
+        "@open-swe please review this\n\n```\nautofix off\n```",
+        "@open-swe please review this; autofix off",
+    ],
+)
+def test_parse_autofix_command_requires_adjacent_command(body: str) -> None:
+    assert github_webhooks._parse_autofix_command(body) is None
+
+
+@pytest.mark.parametrize(
+    ("body", "disabled"),
+    [("@open-swe autofix off", True), ("@open-swe autofix on", False)],
+)
+def test_github_webhook_persists_and_acknowledges_autofix_command(
+    monkeypatch: pytest.MonkeyPatch, body: str, disabled: bool
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_repo_enabled(_repo_config: dict[str, str]) -> bool:
+        return True
+
+    async def fake_set(owner: str, repo: str, pr_number: int, value: bool) -> None:
+        captured["state"] = (owner, repo, pr_number, value)
+
+    async def fake_token(**kwargs: object) -> tuple[str, str]:
+        captured["token_args"] = kwargs
+        return "app-token", "2026-01-01T00:00:00Z"
+
+    async def fake_react(repo_config: dict[str, str], comment_id: int, **kwargs: object) -> bool:
+        captured["reaction"] = (repo_config, comment_id, kwargs)
+        return True
+
+    async def fail_process_pr_comment(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("toggle command must not dispatch an agent run")
+
+    monkeypatch.setattr(webhook_common, "GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
+    monkeypatch.setattr(webhook_common, "_is_repo_auto_review_enabled", fake_repo_enabled)
+    monkeypatch.setattr(github_webhooks, "set_pr_autofix_disabled", fake_set)
+    monkeypatch.setattr(webhook_common, "get_github_app_installation_token_with_expiry", fake_token)
+    monkeypatch.setattr(webhook_common, "react_to_github_comment", fake_react)
+    monkeypatch.setattr(github_webhooks, "process_github_pr_comment", fail_process_pr_comment)
+
+    response = _post_github_webhook(
+        TestClient(app),
+        "issue_comment",
+        {
+            "action": "created",
+            "issue": {
+                "number": 1244,
+                "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/1244"},
+            },
+            "comment": {"id": 9, "node_id": "node-9", "body": body},
+            "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+            "sender": {"login": "octocat"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "message": "Processing auto-fix toggle"}
+    assert captured["state"] == ("acme", "widgets", 1244, disabled)
+    assert captured["token_args"] == {
+        "target_repo": "acme/widgets",
+        "repositories": ["widgets"],
+    }
+    reaction = captured["reaction"]
+    assert isinstance(reaction, tuple)
+    repo_config, comment_id, reaction_args = reaction
+    assert repo_config == {"owner": "acme", "name": "widgets"}
+    assert comment_id == 9
+    assert reaction_args == {
+        "event_type": "issue_comment",
+        "token": "app-token",
+        "pull_number": 1244,
+        "node_id": "node-9",
+    }
+
+
+def test_github_webhook_autofix_reference_without_mention_does_not_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_toggle(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("unmentioned reference must not toggle auto-fix")
+
+    monkeypatch.setattr(webhook_common, "GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
+    monkeypatch.setattr(github_webhooks, "process_github_autofix_command", fail_toggle)
+
+    response = _post_github_webhook(
+        TestClient(app),
+        "issue_comment",
+        {
+            "action": "created",
+            "issue": {"number": 1244, "pull_request": {"url": "https://example.test/pr"}},
+            "comment": {"id": 9, "body": "A passing reference to autofix off"},
+            "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+            "sender": {"login": "octocat"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ignored",
+        "reason": "Comment does not mention @openswe or @open-swe",
+    }
+
+
+def test_github_webhook_non_pr_autofix_comment_keeps_issue_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: dict[str, object] = {}
+
+    async def fake_process_issue(payload: dict[str, object], event_type: str) -> None:
+        called["event_type"] = event_type
+
+    async def fail_toggle(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("issue comments must not toggle PR auto-fix")
+
+    monkeypatch.setattr(webhook_common, "GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
+    monkeypatch.setattr(github_webhooks, "process_github_issue", fake_process_issue)
+    monkeypatch.setattr(github_webhooks, "process_github_autofix_command", fail_toggle)
+
+    response = _post_github_webhook(
+        TestClient(app),
+        "issue_comment",
+        {
+            "action": "created",
+            "issue": {"id": 12345, "number": 42, "title": "Autofix question"},
+            "comment": {"id": 9, "body": "@open-swe autofix off"},
+            "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+            "sender": {"login": "octocat"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "accepted",
+        "message": "Processing GitHub issue comment event",
+    }
+    assert called["event_type"] == "issue_comment"
+
+
 def _sign_slack_body(body: bytes, timestamp: str = "1700000000") -> str:
     base_string = f"v0:{timestamp}:{body.decode()}"
     sig = hmac.new(_TEST_SLACK_SECRET.encode(), base_string.encode(), hashlib.sha256).hexdigest()
