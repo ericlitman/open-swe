@@ -62,8 +62,18 @@ def test_parse_autofix_command(body: str, disabled: bool) -> None:
     assert github_webhooks._parse_autofix_command(body) is disabled
 
 
-def test_parse_autofix_command_requires_mention() -> None:
-    assert github_webhooks._parse_autofix_command("A passing reference to autofix off") is None
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@open-swe",
+        "A passing reference to autofix off",
+        "@open-swe please review this\n\n> Example: autofix off",
+        "@open-swe please review this\n\n```\nautofix off\n```",
+        "@open-swe please review this; autofix off",
+    ],
+)
+def test_parse_autofix_command_requires_adjacent_command(body: str) -> None:
+    assert github_webhooks._parse_autofix_command(body) is None
 
 
 @pytest.mark.parametrize(

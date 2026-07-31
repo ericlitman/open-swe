@@ -642,15 +642,17 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
     await common._store_current_reviewer_run_id(thread_id, run)
 
 
-_AUTOFIX_COMMAND_RE = re.compile(r"autofix\s+(on|off)\b", re.IGNORECASE)
+_AUTOFIX_COMMAND_RE = re.compile(r"^[ \t]+autofix[ \t]+(on|off)\b", re.IGNORECASE)
 
 
 def _parse_autofix_command(comment_body: str) -> bool | None:
     """Parse an explicitly mentioned ``@open-swe autofix on|off`` command."""
     mention = common.classify_comment_mention(comment_body, common.OPEN_SWE_TAGS)
-    if mention.disposition != "accepted":
+    if mention.disposition != "accepted" or mention.end is None:
         return None
-    match = _AUTOFIX_COMMAND_RE.search(comment_body)
+    remaining = comment_body[mention.end :]
+    line_tail = remaining.splitlines()[0] if remaining else ""
+    match = _AUTOFIX_COMMAND_RE.match(line_tail)
     if match is None:
         return None
     return match.group(1).lower() == "off"
