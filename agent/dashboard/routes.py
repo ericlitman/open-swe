@@ -153,6 +153,7 @@ from .team_settings import (
     get_team_default_model,
     get_team_default_subagent_model,
     get_team_fable_enabled,
+    get_team_model_resolution_diagnostics,
     get_team_settings,
     upsert_team_settings,
 )
@@ -670,6 +671,13 @@ async def api_get_team_settings(
     session: dict[str, Any] = _SESSION_DEP,
 ) -> dict[str, Any]:
     return await get_team_settings()
+
+
+@router.get("/team-settings/model-resolution")
+async def api_get_team_settings_model_resolution(
+    session: dict[str, Any] = _SESSION_DEP,
+) -> dict[str, Any]:
+    return {"surfaces": await get_team_model_resolution_diagnostics()}
 
 
 @router.put("/team-settings")

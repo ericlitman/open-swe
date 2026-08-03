@@ -12,6 +12,7 @@ import type {
   UserMapping,
 } from "@/lib/api"
 import { AppShell, SettingsRow, SettingsSection } from "@/components/AppShell"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -809,6 +810,8 @@ function FableSection() {
     onSuccess: (saved) => {
       qc.setQueryData(["teamSettings"], saved)
       qc.invalidateQueries({ queryKey: ["options"] }) // refresh pickers so Fable appears/disappears
+      // Disabling Fable rewrites model pairs server-side, so the fallback badge can go stale.
+      void qc.invalidateQueries({ queryKey: ["teamModelResolution"] })
       setError(null)
     },
     onError: (e: Error) => setError(e.message),
@@ -844,6 +847,10 @@ function GlobalDefaultsSection({ models }: { models: Array<ModelOption> }) {
     queryKey: ["teamSettings"],
     queryFn: api.getTeamSettings,
   })
+  const modelResolution = useQuery({
+    queryKey: ["teamModelResolution"],
+    queryFn: api.getTeamModelResolution,
+  })
   const [error, setError] = useState<string | null>(null)
   const [defaultRepoDraft, setDefaultRepoDraft] = useState("")
 
@@ -855,10 +862,16 @@ function GlobalDefaultsSection({ models }: { models: Array<ModelOption> }) {
     mutationFn: (body: TeamSettings) => api.saveTeamSettings(body),
     onSuccess: (saved) => {
       qc.setQueryData(["teamSettings"], saved)
+      void qc.invalidateQueries({ queryKey: ["teamModelResolution"] })
       setError(null)
     },
     onError: (e: Error) => setError(e.message),
   })
+
+  const productDefaultSurfaces =
+    modelResolution.data?.surfaces.filter(
+      (surface) => surface.fallback === "product_default"
+    ) ?? []
 
   return (
     <SettingsSection
@@ -866,6 +879,21 @@ function GlobalDefaultsSection({ models }: { models: Array<ModelOption> }) {
       description="Workspace-wide model defaults. Per-user Cloud Agent selections override the agent defaults."
     >
       <div className="divide-y divide-border">
+        {productDefaultSurfaces.length > 0 && (
+          <div className="flex items-start gap-3 bg-destructive/5 px-4 py-3">
+            <Badge variant="destructive" className="shrink-0">
+              Product default fallback
+            </Badge>
+            <p className="text-xs text-destructive">
+              {productDefaultSurfaces
+                .map(
+                  (surface) =>
+                    `${surface.surface.replaceAll("_", " ")} → ${surface.resolved_model}/${surface.resolved_effort}`
+                )
+                .join(", ")}
+            </p>
+          </div>
+        )}
         <RolePicker
           label="Open SWE Agent"
           description="Model used for code-writing runs triggered from Slack, Linear, GitHub, and the Open SWE Agent."

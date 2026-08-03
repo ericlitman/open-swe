@@ -314,7 +314,11 @@ async def _get_stored_team_settings(*, raise_on_error: bool = False) -> dict[str
     return value if isinstance(value, dict) else {}
 
 
-async def get_team_settings(*, raise_on_error: bool = False) -> dict[str, Any]:
+async def get_team_settings(
+    *,
+    raise_on_error: bool = False,
+    preserve_unset_model_pairs: bool = False,
+) -> dict[str, Any]:
     defaults = _default_settings()
     value = (
         await _get_stored_team_settings(raise_on_error=True)
@@ -325,6 +329,12 @@ async def get_team_settings(*, raise_on_error: bool = False) -> dict[str, Any]:
     # selection) still surface the hardcoded default instead of a null.
     overlay = {k: v for k, v in value.items() if v is not None}
     merged = {**defaults, **overlay}
+    if preserve_unset_model_pairs:
+        for model_field, effort_field in _MODEL_PAIR_FIELDS:
+            if value.get(model_field) is None:
+                merged[model_field] = None
+            if value.get(effort_field) is None:
+                merged[effort_field] = None
     # These current opt-in fields were in the stale-field purge from older
     # settings shapes and must survive the response.
     for stale_field in (
@@ -414,51 +424,65 @@ async def get_team_default_model(
     ``"chat"`` (the review-page PR chat) has no hardcoded default: when its
     admin setting is unset/invalid it inherits the team **agent** default.
     """
-    settings = await get_team_settings()
+    settings = await get_team_settings(preserve_unset_model_pairs=True)
     if role == "chat":
         model = settings.get("default_chat_model")
         effort = settings.get("default_chat_reasoning_effort")
-        if (
-            isinstance(model, str)
-            and isinstance(effort, str)
-            and model in SUPPORTED_MODEL_IDS
-            and model_supports_effort(model, effort)
-        ):
-            return _resolve_default_pair(model, effort)
+        if _is_supported_pair(model, effort):
+            return _resolve_default_pair(
+                model,
+                effort,
+                surface="chat",
+                setting="default_chat_model",
+            )
         # Inherit the Agent default when no chat-specific model is configured.
         model = settings.get("default_agent_model")
         effort = settings.get("default_agent_reasoning_effort")
+        surface = "chat"
+        setting = "default_agent_model"
     elif role == "agent":
         model = settings.get("default_agent_model")
         effort = settings.get("default_agent_reasoning_effort")
+        surface = "agent"
+        setting = "default_agent_model"
     else:
         model = settings.get("default_reviewer_model")
         effort = settings.get("default_reviewer_reasoning_effort")
-    return _resolve_default_pair(model, effort)
+        surface = "reviewer"
+        setting = "default_reviewer_model"
+    return _resolve_default_pair(model, effort, surface=surface, setting=setting)
 
 
 async def get_team_default_model_pair(
     role: Literal["agent", "reviewer"],
 ) -> tuple[tuple[str, str], tuple[str, str]]:
     """Return default ``(main, subagent)`` model pairs for ``role`` from one store read."""
-    settings = await get_team_settings()
+    settings = await get_team_settings(preserve_unset_model_pairs=True)
     if role == "agent":
         main = _resolve_default_pair(
             settings.get("default_agent_model"),
             settings.get("default_agent_reasoning_effort"),
+            surface="agent",
+            setting="default_agent_model",
         )
         subagent = _resolve_default_pair(
             settings.get("default_agent_subagent_model"),
             settings.get("default_agent_subagent_reasoning_effort"),
+            surface="agent_subagent",
+            setting="default_agent_subagent_model",
         )
     else:
         main = _resolve_default_pair(
             settings.get("default_reviewer_model"),
             settings.get("default_reviewer_reasoning_effort"),
+            surface="reviewer",
+            setting="default_reviewer_model",
         )
         subagent = _resolve_default_pair(
             settings.get("default_reviewer_subagent_model"),
             settings.get("default_reviewer_subagent_reasoning_effort"),
+            surface="reviewer_subagent",
+            setting="default_reviewer_subagent_model",
         )
     return main, subagent
 
@@ -472,19 +496,21 @@ async def get_team_default_grouping_model() -> tuple[str, str]:
     pass is a cheap, fast companion to the reviewer, so it should track that
     cheaper tier rather than the primary reviewer model.
     """
-    settings = await get_team_settings()
+    settings = await get_team_settings(preserve_unset_model_pairs=True)
     model = settings.get("default_grouping_model")
     effort = settings.get("default_grouping_reasoning_effort")
-    if (
-        isinstance(model, str)
-        and isinstance(effort, str)
-        and model in SUPPORTED_MODEL_IDS
-        and model_supports_effort(model, effort)
-    ):
-        return _resolve_default_pair(model, effort)
+    if _is_supported_pair(model, effort):
+        return _resolve_default_pair(
+            model,
+            effort,
+            surface="grouping",
+            setting="default_grouping_model",
+        )
     return _resolve_default_pair(
         settings.get("default_reviewer_subagent_model"),
         settings.get("default_reviewer_subagent_reasoning_effort"),
+        surface="grouping",
+        setting="default_reviewer_subagent_model",
     )
 
 
@@ -556,26 +582,151 @@ async def get_team_default_subagent_model(
     role: Literal["agent", "reviewer"],
 ) -> tuple[str, str]:
     """Return the team-wide default subagent ``(model_id, reasoning_effort)`` for ``role``."""
-    settings = await get_team_settings()
+    settings = await get_team_settings(preserve_unset_model_pairs=True)
     if role == "agent":
         model = settings.get("default_agent_subagent_model")
         effort = settings.get("default_agent_subagent_reasoning_effort")
+        surface = "agent_subagent"
+        setting = "default_agent_subagent_model"
     else:
         model = settings.get("default_reviewer_subagent_model")
         effort = settings.get("default_reviewer_subagent_reasoning_effort")
-    return _resolve_default_pair(model, effort)
+        surface = "reviewer_subagent"
+        setting = "default_reviewer_subagent_model"
+    return _resolve_default_pair(model, effort, surface=surface, setting=setting)
 
 
-def _resolve_default_pair(model: object, effort: object) -> tuple[str, str]:
-    """Supported pair if valid, else same-provider fallback, else global default."""
-    if (
+def _is_supported_pair(model: object, effort: object) -> bool:
+    return (
         isinstance(model, str)
         and isinstance(effort, str)
         and model in SUPPORTED_MODEL_IDS
         and model_supports_effort(model, effort)
-    ):
-        return model, effort
+    )
+
+
+def _resolve_pair_tier(
+    model: object,
+    effort: object,
+) -> tuple[Literal["none", "provider", "product_default"], tuple[str, str]]:
+    """Resolve a model pair and identify which fallback tier supplied it."""
+    if _is_supported_pair(model, effort):
+        assert isinstance(model, str) and isinstance(effort, str)
+        return "none", (model, effort)
     provider_pair = provider_fallback_pair(model, effort)
     if provider_pair is not None:
-        return provider_pair
-    return default_model_pair()
+        return "provider", provider_pair
+    return "product_default", default_model_pair()
+
+
+def _resolve_default_pair(
+    model: object,
+    effort: object,
+    *,
+    surface: str,
+    setting: str,
+) -> tuple[str, str]:
+    """Resolve a production model pair and warn when the product default supplies it."""
+    fallback, resolved = _resolve_pair_tier(model, effort)
+    if fallback == "product_default":
+        resolved_model, resolved_effort = resolved
+        logger.warning(
+            "model resolution fell back to product default for %s "
+            "(%s unset or invalid); resolved %s/%s",
+            surface,
+            setting,
+            resolved_model,
+            resolved_effort,
+            extra={
+                "model_resolution_fallback": {
+                    "surface": surface,
+                    "setting": setting,
+                    "resolved_model": resolved_model,
+                    "resolved_effort": resolved_effort,
+                }
+            },
+        )
+    return resolved
+
+
+def _model_resolution_diagnostic(
+    *,
+    surface: str,
+    setting: str,
+    model: object,
+    effort: object,
+) -> dict[str, Any]:
+    fallback, (resolved_model, resolved_effort) = _resolve_pair_tier(model, effort)
+    return {
+        "surface": surface,
+        "setting": setting,
+        "fallback": fallback,
+        "resolved_model": resolved_model,
+        "resolved_effort": resolved_effort,
+    }
+
+
+async def get_team_model_resolution_diagnostics() -> list[dict[str, Any]]:
+    """Report all production model resolutions without emitting fallback warnings."""
+    settings = await get_team_settings(preserve_unset_model_pairs=True)
+    diagnostics = [
+        _model_resolution_diagnostic(
+            surface="agent",
+            setting="default_agent_model",
+            model=settings.get("default_agent_model"),
+            effort=settings.get("default_agent_reasoning_effort"),
+        ),
+        _model_resolution_diagnostic(
+            surface="agent_subagent",
+            setting="default_agent_subagent_model",
+            model=settings.get("default_agent_subagent_model"),
+            effort=settings.get("default_agent_subagent_reasoning_effort"),
+        ),
+        _model_resolution_diagnostic(
+            surface="reviewer",
+            setting="default_reviewer_model",
+            model=settings.get("default_reviewer_model"),
+            effort=settings.get("default_reviewer_reasoning_effort"),
+        ),
+        _model_resolution_diagnostic(
+            surface="reviewer_subagent",
+            setting="default_reviewer_subagent_model",
+            model=settings.get("default_reviewer_subagent_model"),
+            effort=settings.get("default_reviewer_subagent_reasoning_effort"),
+        ),
+    ]
+
+    grouping_model = settings.get("default_grouping_model")
+    grouping_effort = settings.get("default_grouping_reasoning_effort")
+    if _is_supported_pair(grouping_model, grouping_effort):
+        grouping_setting = "default_grouping_model"
+    else:
+        grouping_setting = "default_reviewer_subagent_model"
+        grouping_model = settings.get("default_reviewer_subagent_model")
+        grouping_effort = settings.get("default_reviewer_subagent_reasoning_effort")
+    diagnostics.append(
+        _model_resolution_diagnostic(
+            surface="grouping",
+            setting=grouping_setting,
+            model=grouping_model,
+            effort=grouping_effort,
+        )
+    )
+
+    chat_model = settings.get("default_chat_model")
+    chat_effort = settings.get("default_chat_reasoning_effort")
+    if _is_supported_pair(chat_model, chat_effort):
+        chat_setting = "default_chat_model"
+    else:
+        chat_setting = "default_agent_model"
+        chat_model = settings.get("default_agent_model")
+        chat_effort = settings.get("default_agent_reasoning_effort")
+    diagnostics.append(
+        _model_resolution_diagnostic(
+            surface="chat",
+            setting=chat_setting,
+            model=chat_model,
+            effort=chat_effort,
+        )
+    )
+    return diagnostics

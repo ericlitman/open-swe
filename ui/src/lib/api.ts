@@ -191,6 +191,23 @@ export interface TeamSettings {
   updated_at?: string | null
 }
 
+export type ModelResolutionFallbackTier =
+  | "none"
+  | "provider"
+  | "product_default"
+
+export interface ModelResolutionSurface {
+  surface: string
+  setting: string
+  fallback: ModelResolutionFallbackTier
+  resolved_model: string
+  resolved_effort: string
+}
+
+export interface ModelResolutionDiagnostics {
+  surfaces: Array<ModelResolutionSurface>
+}
+
 export interface ProviderCredentialStatus {
   connected: boolean
   site?: string
@@ -698,6 +715,8 @@ export const api = {
       method: "DELETE",
     }),
   getTeamSettings: () => request<TeamSettings>("/team-settings"),
+  getTeamModelResolution: () =>
+    request<ModelResolutionDiagnostics>("/team-settings/model-resolution"),
   saveTeamSettings: (body: TeamSettings) =>
     request<TeamSettings>("/team-settings", {
       method: "PUT",
