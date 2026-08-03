@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from langgraph_sdk import get_client
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..utils.gateway import resolve_gateway_enabled
 from .options import (
@@ -21,6 +22,7 @@ from .options import (
     SUPPORTED_MODEL_IDS,
     default_model_pair,
     gate_fable_model,
+    model_default_effort,
     model_supports_effort,
     provider_fallback_pair,
 )
@@ -49,8 +51,6 @@ class TeamSettingsUpdate(BaseModel):
     # Tri-state LLM Gateway toggle: True/False is authoritative, None inherits the
     # LANGSMITH_GATEWAY_ENABLED deployment default.
     gateway_enabled: bool | None = None
-    # Review auto-fix and plan-gate opt-ins. None preserves the stored value, so
-    # clients that do not render these fields cannot erase them on unrelated saves.
     autofix_enabled: bool | None = None
     autofix_severity_threshold: Literal["low", "medium", "high", "critical"] | None = None
     require_plan_approval: bool | None = None
@@ -74,6 +74,18 @@ class TeamSettingsUpdate(BaseModel):
     plan_profile: str | None = None
     review_profile: str | None = None
     reviewer_routing: str | None = None
+    supplied_fields: frozenset[str] | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _capture_supplied_fields(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+        values = dict(data)
+        values["supplied_fields"] = frozenset(
+            field_name for field_name in data if field_name != "supplied_fields"
+        )
+        return values
 
     @field_validator("plan_profile", "review_profile", mode="before")
     @classmethod
@@ -133,39 +145,13 @@ class TeamSettingsUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_model_pairs(self) -> TeamSettingsUpdate:
-        self.default_agent_model, self.default_agent_reasoning_effort = _normalize_stale_model_pair(
-            self.default_agent_model,
-            self.default_agent_reasoning_effort,
-        )
-        self.default_agent_subagent_model, self.default_agent_subagent_reasoning_effort = (
-            _normalize_stale_model_pair(
-                self.default_agent_subagent_model,
-                self.default_agent_subagent_reasoning_effort,
-            )
-        )
-        self.default_reviewer_model, self.default_reviewer_reasoning_effort = (
-            _normalize_stale_model_pair(
-                self.default_reviewer_model,
-                self.default_reviewer_reasoning_effort,
-            )
-        )
-        (
-            self.default_reviewer_subagent_model,
-            self.default_reviewer_subagent_reasoning_effort,
-        ) = _normalize_stale_model_pair(
-            self.default_reviewer_subagent_model,
-            self.default_reviewer_subagent_reasoning_effort,
-        )
-        self.default_grouping_model, self.default_grouping_reasoning_effort = (
-            _normalize_stale_model_pair(
-                self.default_grouping_model,
-                self.default_grouping_reasoning_effort,
-            )
-        )
-        self.default_chat_model, self.default_chat_reasoning_effort = _normalize_stale_model_pair(
-            self.default_chat_model,
-            self.default_chat_reasoning_effort,
-        )
+        for model_field, effort_field in _MODEL_PAIR_FIELDS:
+            model = getattr(self, model_field)
+            effort = getattr(self, effort_field)
+            normalized = _normalize_stale_model_pair(model, effort)
+            if normalized != (model, effort):
+                setattr(self, model_field, normalized[0])
+                setattr(self, effort_field, normalized[1])
         _validate_model_effort_pair(
             self.default_agent_model, self.default_agent_reasoning_effort, "agent"
         )
@@ -190,26 +176,6 @@ class TeamSettingsUpdate(BaseModel):
         _validate_model_effort_pair(
             self.default_chat_model, self.default_chat_reasoning_effort, "review chat"
         )
-        if not self.fable_enabled:
-            # Disabling Fable is the ZDR kill switch and must always succeed: rather
-            # than reject a payload that still carries a Fable default, swap each
-            # Fable default to its safe non-Fable fallback (mirrors the runtime
-            # gate_fable_model guard) so the stored record can't advertise Fable.
-            for model_field, effort_field in (
-                ("default_agent_model", "default_agent_reasoning_effort"),
-                ("default_agent_subagent_model", "default_agent_subagent_reasoning_effort"),
-                ("default_reviewer_model", "default_reviewer_reasoning_effort"),
-                ("default_reviewer_subagent_model", "default_reviewer_subagent_reasoning_effort"),
-                ("default_grouping_model", "default_grouping_reasoning_effort"),
-                ("default_chat_model", "default_chat_reasoning_effort"),
-            ):
-                model = getattr(self, model_field)
-                if model in FABLE_MODEL_IDS:
-                    new_model, new_effort = gate_fable_model(
-                        model, getattr(self, effort_field), fable_enabled=False
-                    )
-                    setattr(self, model_field, new_model)
-                    setattr(self, effort_field, new_effort)
         return self
 
 
@@ -323,6 +289,19 @@ def _default_settings() -> dict[str, Any]:
     }
 
 
+_PERSISTED_SETTING_FIELDS: tuple[str, ...] = tuple(
+    field_name for field_name in _default_settings() if field_name != "updated_at"
+)
+
+# The merge in upsert_team_settings reads each persisted field off the update
+# model, so a stored-only default would blow up every PUT. Fail at import
+# instead, where it's obvious which of the two lists is missing the field.
+assert set(_PERSISTED_SETTING_FIELDS) <= set(TeamSettingsUpdate.model_fields), (
+    "every persisted setting needs a matching TeamSettingsUpdate field: "
+    f"{sorted(set(_PERSISTED_SETTING_FIELDS) - set(TeamSettingsUpdate.model_fields))}"
+)
+
+
 async def _get_stored_team_settings(*, raise_on_error: bool = False) -> dict[str, Any]:
     try:
         item = await _client().store.get_item(TEAM_SETTINGS_NAMESPACE, TEAM_SETTINGS_KEY)
@@ -358,67 +337,53 @@ async def get_team_settings(*, raise_on_error: bool = False) -> dict[str, Any]:
 
 
 async def upsert_team_settings(update: TeamSettingsUpdate) -> dict[str, Any]:
-    stored = await _get_stored_team_settings()
-    value: dict[str, Any] = {
-        "review_draft_prs": update.review_draft_prs,
-        "pr_summaries": update.pr_summaries,
-        "review_trace_links": update.review_trace_links,
-        "gateway_enabled": update.gateway_enabled,
-        # None preserves the stored opt-in: saving unrelated settings from a
-        # client that doesn't send these fields must not disable auto-fix.
-        "autofix_enabled": (
-            update.autofix_enabled
-            if update.autofix_enabled is not None
-            else stored.get("autofix_enabled")
-        ),
-        "autofix_severity_threshold": (
-            update.autofix_severity_threshold
-            if update.autofix_severity_threshold is not None
-            else stored.get("autofix_severity_threshold")
-        ),
-        "require_plan_approval": (
-            update.require_plan_approval
-            if update.require_plan_approval is not None
-            else stored.get("require_plan_approval")
-        ),
-        "auto_merge_mode": (
-            update.auto_merge_mode
-            if update.auto_merge_mode is not None
-            else _normalize_auto_merge_mode(stored.get("auto_merge_mode"))
-        ),
-        "fable_enabled": update.fable_enabled,
-        "review_tracing_project": update.review_tracing_project,
-        "org_guidelines": update.org_guidelines,
-        "default_agent_model": update.default_agent_model,
-        "default_agent_reasoning_effort": update.default_agent_reasoning_effort,
-        "default_agent_subagent_model": update.default_agent_subagent_model,
-        "default_agent_subagent_reasoning_effort": update.default_agent_subagent_reasoning_effort,
-        "default_repo": update.default_repo,
-        "default_reviewer_model": update.default_reviewer_model,
-        "default_reviewer_reasoning_effort": update.default_reviewer_reasoning_effort,
-        "default_reviewer_subagent_model": update.default_reviewer_subagent_model,
-        "default_reviewer_subagent_reasoning_effort": update.default_reviewer_subagent_reasoning_effort,
-        "default_grouping_model": update.default_grouping_model,
-        "default_grouping_reasoning_effort": update.default_grouping_reasoning_effort,
-        "default_chat_model": update.default_chat_model,
-        "default_chat_reasoning_effort": update.default_chat_reasoning_effort,
-        "plan_profile": (
-            update.plan_profile
-            if "plan_profile" in update.model_fields_set
-            else stored.get("plan_profile")
-        ),
-        "review_profile": (
-            update.review_profile
-            if "review_profile" in update.model_fields_set
-            else stored.get("review_profile")
-        ),
-        "reviewer_routing": (
-            update.reviewer_routing
-            if "reviewer_routing" in update.model_fields_set
-            else stored.get("reviewer_routing")
-        ),
-        "updated_at": datetime.now(UTC).isoformat(),
-    }
+    """Persist a partial update: omitted fields keep their stored value, an
+    explicitly supplied ``None`` clears the setting.
+
+    This is a read-modify-write, so a swallowed store read would leave ``stored``
+    empty and quietly overwrite every unsupplied field with a default — the same
+    erasure this function exists to prevent. Fail the write instead.
+    """
+    stored = await _get_stored_team_settings(raise_on_error=True)
+    defaults = _default_settings()
+    supplied_fields = update.supplied_fields
+    value: dict[str, Any] = {}
+    for field_name in _PERSISTED_SETTING_FIELDS:
+        if supplied_fields is None or field_name in supplied_fields:
+            value[field_name] = getattr(update, field_name)
+        else:
+            value[field_name] = stored.get(field_name, defaults[field_name])
+            if field_name == "auto_merge_mode":
+                value[field_name] = _normalize_auto_merge_mode(value[field_name])
+
+    # Normalize only pairs the caller touched in this update. An untouched pair
+    # is preserved stored state and must round-trip byte-for-byte even when it
+    # is stale or invalid (e.g. a retired model id): clearing it here would let
+    # an unrelated one-field update jump that role's model cross-provider on
+    # read — the OSWE-222 erasure class. _resolve_default_pair already repairs
+    # stale pairs at read time.
+    for model_field, effort_field in _MODEL_PAIR_FIELDS:
+        if supplied_fields is not None and supplied_fields.isdisjoint((model_field, effort_field)):
+            continue
+        model = value[model_field]
+        effort = value[effort_field]
+        if not isinstance(model, str):
+            value[model_field] = None
+            value[effort_field] = None
+        elif not isinstance(effort, str) or not model_supports_effort(model, effort):
+            default_effort = model_default_effort(model)
+            if default_effort is None:
+                value[model_field] = None
+            value[effort_field] = default_effort
+
+    value["updated_at"] = datetime.now(UTC).isoformat()
+    if not value["fable_enabled"]:
+        for model_field, effort_field in _MODEL_PAIR_FIELDS:
+            model = value[model_field]
+            if isinstance(model, str) and model in FABLE_MODEL_IDS:
+                value[model_field], value[effort_field] = gate_fable_model(
+                    model, value[effort_field], fable_enabled=False
+                )
     await _client().store.put_item(TEAM_SETTINGS_NAMESPACE, TEAM_SETTINGS_KEY, value)
     return value
 

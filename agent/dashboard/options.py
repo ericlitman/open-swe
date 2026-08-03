@@ -196,6 +196,14 @@ def model_supports_effort(model_id: str, effort: str) -> bool:
     return False
 
 
+def model_default_effort(model_id: str) -> str | None:
+    """Return ``model_id``'s configured default effort, or None if unknown."""
+    for m in SUPPORTED_MODELS:
+        if m["id"] == model_id:
+            return m["default_effort"]
+    return None
+
+
 def model_supports_images(model_id: str) -> bool:
     for m in SUPPORTED_MODELS:
         if m["id"] == model_id:
