@@ -242,6 +242,15 @@ async def _run_stage(
     )
     structured = result.get("structured_response") if isinstance(result, dict) else None
     if not isinstance(structured, BaseModel):
+        # An empty message list means the stage graph ran no nodes at all, which
+        # is a different failure from a model that answered without the tool.
+        logger.error(
+            "Bounded reviewer stage returned no structured response: "
+            "result_keys=%s message_count=%s configurable_keys=%s",
+            sorted(result) if isinstance(result, dict) else type(result).__name__,
+            len(result["messages"]) if isinstance(result, dict) and "messages" in result else None,
+            sorted(config.get("configurable") or {}),
+        )
         raise RuntimeError("bounded reviewer stage returned no structured response")
     return structured
 
@@ -682,6 +691,19 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
             return {"error": f"record/publish failed: {exc}"}
 
     async def settle(state: AdversarialState, runtime: Runtime) -> dict[str, Any]:
+        # Every failure route lands here, and the graph still exits "success", so
+        # this is the only place a swallowed spine error can reach the log.
+        if error := state.get("error"):
+            finder_errors = {
+                item["finder"]: item["error"]
+                for item in state.get("finder_results", [])
+                if item["error"]
+            }
+            logger.error(
+                "Adversarial review ended without publishing: %s finder_errors=%s",
+                error,
+                finder_errors or None,
+            )
         await settle_review_check_on_exit.aafter_agent(cast(AgentState, state), runtime)
         return {}
 
