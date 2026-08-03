@@ -12,8 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain.agents.middleware import AgentState
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.graph.state import RunnableConfig
 from langgraph.runtime import Runtime
+from pydantic import Field
 
 from agent.middleware import ExcludeToolsMiddleware
 from agent.review.trace_context import PRTraceContext
@@ -30,11 +33,13 @@ from agent.reviewer_adversarial import (
     RESERVED_SUBAGENT_TOOLS,
     PrepareAdversarialReviewerRunMiddleware,
     _active_finder_names,
+    _bounded_agent,
     _finder_payload,
     _finder_prompt,
     _judgment_context,
     _prepare_context,
     _render_parent_prompt,
+    _run_stage,
     get_reviewer_adversarial_agent,
 )
 from agent.utils.agent_definitions import (
@@ -1104,8 +1109,12 @@ def test_gate_added_same_file_candidate_requires_independence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finder_timeout_fails_closed_and_settles_terminal_check() -> None:
+async def test_finder_timeout_fails_closed_and_settles_terminal_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     from agent.review.adversarial import FinderOutput
+
+    caplog.set_level(logging.ERROR, logger="agent.reviewer_adversarial")
 
     stages = [object() for _ in range(6)]
     stage_iter = iter(stages)
@@ -1178,6 +1187,9 @@ async def test_finder_timeout_fails_closed_and_settles_terminal_check() -> None:
     add.assert_not_awaited()
     publish.assert_not_awaited()
     settle.assert_awaited_once()
+    assert "Adversarial review ended without publishing" in caplog.text
+    assert "finder fanout incomplete or failed" in caplog.text
+    assert "security finder timed out" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1462,3 +1474,109 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
     assert gate_calls == 2
     add.assert_awaited_once()
     publish.assert_awaited_once()
+
+
+class _StubToolCallModel(BaseChatModel):
+    """Tool-calling stand-in that answers with whatever tool it is told to call."""
+
+    response_tool: str | None
+    bound_tool_names: list[str] = Field(default_factory=list)
+    invocations: list[int] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "stub-tool-call"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> _StubToolCallModel:
+        self.bound_tool_names = [_stub_tool_name(tool) for tool in tools]
+        return self
+
+    def _generate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
+        self.invocations.append(len(messages))
+        message = AIMessage(
+            content="done",
+            tool_calls=(
+                [{"name": self.response_tool, "args": {"candidates": []}, "id": "stub-1"}]
+                if self.response_tool
+                else []
+            ),
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _stub_tool_name(tool: Any) -> str:
+    if isinstance(tool, dict):
+        nested = tool.get("function")
+        name = tool.get("name") or (nested.get("name") if isinstance(nested, dict) else None)
+        return str(name or "")
+    return str(getattr(tool, "name", None) or getattr(tool, "__name__", ""))
+
+
+def _finder_specs(model: BaseChatModel) -> list[Any]:
+    definition = load_agent_definition("reviewer-adversarial")
+    return [
+        spec
+        for spec in build_subagents(definition, model=model, reserved_tools=RESERVED_SUBAGENT_TOOLS)
+        if str(spec["name"]) not in {"general-purpose", "adjudicator"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bounded_finder_agent_calls_its_model_and_returns_structured_output() -> None:
+    """Every other compiled-graph test patches out `_bounded_agent` and `_run_stage`,
+    so this is the only coverage of the finder sub-agent production actually builds."""
+    from deepagents.backends import StateBackend
+
+    from agent.review.adversarial import FinderOutput
+
+    specs = _finder_specs(cast(BaseChatModel, _StubToolCallModel(response_tool="FinderOutput")))
+    assert {str(spec["name"]) for spec in specs} == {"conventions", "correctness", "security"}
+
+    for spec in specs:
+        model = cast(_StubToolCallModel, spec.get("model"))
+        graph = _bounded_agent(
+            model=cast(BaseChatModel, model),
+            response_format=FinderOutput,
+            backend=StateBackend(),
+            tools=cast(list[Any], spec.get("tools", [])),
+            middleware=[
+                *cast(list[Any], spec.get("middleware", [])),
+                ExcludeToolsMiddleware(excluded=frozenset({"task"})),
+            ],
+        )
+        structured = await _run_stage(graph, "review the diff", cast(RunnableConfig, {}))
+
+        assert isinstance(structured, FinderOutput), str(spec["name"])
+        assert model.invocations, f"{spec['name']} finder never called its model"
+        assert "FinderOutput" in model.bound_tool_names, str(spec["name"])
+
+
+@pytest.mark.asyncio
+async def test_run_stage_logs_diagnostics_when_no_structured_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from deepagents.backends import StateBackend
+
+    from agent.review.adversarial import FinderOutput
+
+    caplog.set_level(logging.ERROR, logger="agent.reviewer_adversarial")
+    graph = _bounded_agent(
+        model=cast(BaseChatModel, _StubToolCallModel(response_tool=None)),
+        response_format=FinderOutput,
+        backend=StateBackend(),
+        tools=[],
+        middleware=[],
+    )
+
+    with pytest.raises(RuntimeError, match="no structured response"):
+        await _run_stage(
+            graph,
+            "review the diff",
+            cast(RunnableConfig, {"configurable": {"thread_id": "t", "repo": {"owner": "o"}}}),
+        )
+
+    assert "Bounded reviewer stage returned no structured response" in caplog.text
+    assert "message_count=" in caplog.text
+    assert "configurable_keys=['repo', 'thread_id']" in caplog.text
