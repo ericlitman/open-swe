@@ -5,11 +5,33 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent.dashboard import team_settings as ts
-from agent.dashboard.options import FABLE_MODEL_IDS, fable_disabled_fallback
+from agent.dashboard.options import (
+    FABLE_MODEL_IDS,
+    SUPPORTED_MODEL_IDS,
+    fable_disabled_fallback,
+    model_default_effort,
+)
 
 _FABLE_MODEL = "anthropic:claude-fable-5"
 _NON_DEFAULT_MODEL = "openai:gpt-5.6-sol"
 _NON_DEFAULT_EFFORT = "high"
+_RETIRED_MODEL = "anthropic:claude-opus-4-1"
+
+_MODEL_PAIR_ROLES = (
+    "agent",
+    "agent subagent",
+    "reviewer",
+    "reviewer subagent",
+    "review diff grouping",
+    "review chat",
+)
+
+_DEFAULTED_EFFORT_MODEL_FIELDS = {
+    "default_agent_reasoning_effort": "default_agent_model",
+    "default_agent_subagent_reasoning_effort": "default_agent_subagent_model",
+    "default_reviewer_reasoning_effort": "default_reviewer_model",
+    "default_reviewer_subagent_reasoning_effort": "default_reviewer_subagent_model",
+}
 
 _NULLABLE_FIELD_VALUES: dict[str, object] = {
     "gateway_enabled": True,
@@ -56,6 +78,16 @@ async def _upsert_with_stored(
 
     put_item.assert_awaited_once_with(ts.TEAM_SETTINGS_NAMESPACE, ts.TEAM_SETTINGS_KEY, value)
     return value
+
+
+def _assert_model_pairs_valid(value: dict[str, object]) -> None:
+    for (model_field, effort_field), role in zip(
+        ts._MODEL_PAIR_FIELDS, _MODEL_PAIR_ROLES, strict=True
+    ):
+        model, effort = value[model_field], value[effort_field]
+        assert isinstance(model, str | None), model_field
+        assert isinstance(effort, str | None), effort_field
+        ts._validate_model_effort_pair(model, effort, role)
 
 
 @pytest.mark.asyncio
@@ -116,8 +148,9 @@ async def test_partial_auto_merge_update_preserves_every_other_stored_field(
 @pytest.mark.parametrize("field_name", _NULLABLE_FIELD_VALUES)
 @pytest.mark.asyncio
 async def test_explicit_null_clears_nullable_field(field_name: str) -> None:
+    defaults = ts._default_settings()
     stored = {
-        **ts._default_settings(),
+        **defaults,
         field_name: _NULLABLE_FIELD_VALUES[field_name],
     }
     update = ts.TeamSettingsUpdate.model_validate({field_name: None})
@@ -125,7 +158,141 @@ async def test_explicit_null_clears_nullable_field(field_name: str) -> None:
     assert field_name in (update.supplied_fields or frozenset())
     value = await _upsert_with_stored(update, stored)
 
-    assert value[field_name] is None
+    model_field = _DEFAULTED_EFFORT_MODEL_FIELDS.get(field_name)
+    if model_field is None:
+        assert value[field_name] is None
+    else:
+        fallback_model = defaults[model_field]
+        assert isinstance(fallback_model, str)
+        assert value[field_name] == model_default_effort(fallback_model)
+
+
+@pytest.mark.asyncio
+async def test_clearing_model_also_clears_stored_effort_and_keeps_pairs_valid() -> None:
+    stored = {
+        **ts._default_settings(),
+        "default_agent_model": _NON_DEFAULT_MODEL,
+        "default_agent_reasoning_effort": _NON_DEFAULT_EFFORT,
+    }
+    update = ts.TeamSettingsUpdate.model_validate({"default_agent_model": None})
+
+    value = await _upsert_with_stored(update, stored)
+
+    assert value["default_agent_model"] is None
+    assert value["default_agent_reasoning_effort"] is None
+    _assert_model_pairs_valid(value)
+
+
+@pytest.mark.parametrize(("model_field", "effort_field"), ts._MODEL_PAIR_FIELDS)
+@pytest.mark.asyncio
+async def test_clearing_effort_backfills_model_default_effort(
+    model_field: str, effort_field: str
+) -> None:
+    stored = {
+        **ts._default_settings(),
+        model_field: _NON_DEFAULT_MODEL,
+        effort_field: _NON_DEFAULT_EFFORT,
+    }
+    update = ts.TeamSettingsUpdate.model_validate({effort_field: None})
+
+    value = await _upsert_with_stored(update, stored)
+
+    assert value[model_field] == _NON_DEFAULT_MODEL
+    assert value[effort_field] == model_default_effort(_NON_DEFAULT_MODEL)
+
+
+@pytest.mark.parametrize("stored_model", ["retired:model", 42])
+@pytest.mark.asyncio
+async def test_invalid_stored_model_pair_is_cleanly_cleared_when_pair_is_touched(
+    stored_model: object,
+) -> None:
+    stored = {
+        **ts._default_settings(),
+        "default_chat_model": stored_model,
+        "default_chat_reasoning_effort": _NON_DEFAULT_EFFORT,
+    }
+    update = ts.TeamSettingsUpdate.model_validate({"default_chat_reasoning_effort": None})
+
+    value = await _upsert_with_stored(update, stored)
+
+    assert value["default_chat_model"] is None
+    assert value["default_chat_reasoning_effort"] is None
+    _assert_model_pairs_valid(value)
+
+
+@pytest.mark.asyncio
+async def test_unrelated_update_preserves_stale_stored_model_pair_byte_for_byte() -> None:
+    # Guard against silent rot: this test only proves scope if the id is retired.
+    assert _RETIRED_MODEL not in SUPPORTED_MODEL_IDS
+    stored = {
+        **ts._default_settings(),
+        "default_agent_model": _RETIRED_MODEL,
+        "default_agent_reasoning_effort": _NON_DEFAULT_EFFORT,
+    }
+    update = ts.TeamSettingsUpdate.model_validate({"auto_merge_mode": ts.AUTO_MERGE_NEVER})
+
+    value = await _upsert_with_stored(update, stored)
+
+    assert value["default_agent_model"] == _RETIRED_MODEL
+    assert value["default_agent_reasoning_effort"] == _NON_DEFAULT_EFFORT
+
+
+@pytest.mark.asyncio
+async def test_supplying_model_over_stale_stored_pair_normalizes_it() -> None:
+    replacement_model = "anthropic:claude-sonnet-5"
+    assert _RETIRED_MODEL not in SUPPORTED_MODEL_IDS
+    stored = {
+        **ts._default_settings(),
+        "default_agent_model": _RETIRED_MODEL,
+        "default_agent_reasoning_effort": _NON_DEFAULT_EFFORT,
+    }
+    update = ts.TeamSettingsUpdate.model_construct(
+        default_agent_model=replacement_model,
+        supplied_fields=frozenset({"default_agent_model"}),
+    )
+
+    value = await _upsert_with_stored(update, stored)
+
+    assert value["default_agent_model"] == replacement_model
+    assert value["default_agent_reasoning_effort"] == _NON_DEFAULT_EFFORT
+    _assert_model_pairs_valid(value)
+
+
+@pytest.mark.asyncio
+async def test_changing_model_backfills_effort_when_stored_effort_is_unsupported() -> None:
+    replacement_model = "google_genai:gemini-3.5-flash"
+    stored = {
+        **ts._default_settings(),
+        "default_agent_model": _NON_DEFAULT_MODEL,
+        "default_agent_reasoning_effort": "xhigh",
+    }
+    update = ts.TeamSettingsUpdate.model_construct(
+        default_agent_model=replacement_model,
+        supplied_fields=frozenset({"default_agent_model"}),
+    )
+
+    value = await _upsert_with_stored(update, stored)
+
+    assert value["default_agent_model"] == replacement_model
+    assert value["default_agent_reasoning_effort"] == model_default_effort(replacement_model)
+
+
+@pytest.mark.asyncio
+async def test_valid_supplied_model_pair_survives_normalization() -> None:
+    model = "google_genai:gemini-3.5-flash"
+    effort = "high"
+    stored = ts._default_settings()
+    update = ts.TeamSettingsUpdate.model_validate(
+        {
+            "default_agent_model": model,
+            "default_agent_reasoning_effort": effort,
+        }
+    )
+
+    value = await _upsert_with_stored(update, stored)
+
+    assert value["default_agent_model"] == model
+    assert value["default_agent_reasoning_effort"] == effort
 
 
 @pytest.mark.asyncio

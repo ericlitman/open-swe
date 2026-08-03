@@ -22,6 +22,7 @@ from .options import (
     SUPPORTED_MODEL_IDS,
     default_model_pair,
     gate_fable_model,
+    model_default_effort,
     model_supports_effort,
     provider_fallback_pair,
 )
@@ -354,6 +355,26 @@ async def upsert_team_settings(update: TeamSettingsUpdate) -> dict[str, Any]:
             value[field_name] = stored.get(field_name, defaults[field_name])
             if field_name == "auto_merge_mode":
                 value[field_name] = _normalize_auto_merge_mode(value[field_name])
+
+    # Normalize only pairs the caller touched in this update. An untouched pair
+    # is preserved stored state and must round-trip byte-for-byte even when it
+    # is stale or invalid (e.g. a retired model id): clearing it here would let
+    # an unrelated one-field update jump that role's model cross-provider on
+    # read — the OSWE-222 erasure class. _resolve_default_pair already repairs
+    # stale pairs at read time.
+    for model_field, effort_field in _MODEL_PAIR_FIELDS:
+        if supplied_fields is not None and supplied_fields.isdisjoint((model_field, effort_field)):
+            continue
+        model = value[model_field]
+        effort = value[effort_field]
+        if not isinstance(model, str):
+            value[model_field] = None
+            value[effort_field] = None
+        elif not isinstance(effort, str) or not model_supports_effort(model, effort):
+            default_effort = model_default_effort(model)
+            if default_effort is None:
+                value[model_field] = None
+            value[effort_field] = default_effort
 
     value["updated_at"] = datetime.now(UTC).isoformat()
     if not value["fable_enabled"]:
