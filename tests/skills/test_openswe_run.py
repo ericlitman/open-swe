@@ -2599,7 +2599,7 @@ def test_post_action_fails_closed_when_watch_exits_before_ready(
     expected = _expected_watch(tmp_path)
     error_path = expected["error_path"]
     assert isinstance(error_path, str)
-    Path(error_path).write_text("older error\n\nlatest error\n\n")
+    Path(error_path).write_text("stale error from a previous arm\n")
 
     class Process:
         pid = 42
@@ -2607,9 +2607,15 @@ def test_post_action_fails_closed_when_watch_exits_before_ready(
         def poll(self) -> int:
             return 1
 
+    def popen(*args, **kwargs):
+        kwargs["stderr"].write("latest error\n\n")
+        kwargs["stderr"].flush()
+        return Process()
+
+    monkeypatch.setattr(run.sys.stderr, "isatty", lambda: False, raising=False)
     monkeypatch.setattr(run, "_watch_lock_held", lambda path: False)
     monkeypatch.setattr(run, "_read_json_object", lambda path: None)
-    monkeypatch.setattr(run.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(run.subprocess, "Popen", popen)
     monkeypatch.setattr(run, "dogfood", lambda *args, **kwargs: None)
 
     with pytest.raises(run.RunError) as raised:
@@ -2620,6 +2626,7 @@ def test_post_action_fails_closed_when_watch_exits_before_ready(
     assert "no live delivery watch could be verified" in message
     assert "interval 60s, timeout 90m" in message
     assert "watch process exited with status 1; last stderr: latest error" in message
+    assert "stale error from a previous arm" not in message
 
 
 def test_posted_comment_propagates_unwatched_failure_after_handoff(

@@ -337,17 +337,16 @@ def ensure_post_watch(expected: dict) -> dict:
         str(ready_path),
     ]
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    error_path = Path(expected["error_path"])
+    stderr_redirected = not sys.stderr.isatty()
+    stderr_offset = error_path.stat().st_size if stderr_redirected and error_path.exists() else 0
     with ExitStack() as stack:
         stdout = (
             None
             if sys.stdout.isatty()
             else stack.enter_context(Path(expected["output_path"]).open("a"))
         )
-        stderr = (
-            None
-            if sys.stderr.isatty()
-            else stack.enter_context(Path(expected["error_path"]).open("a"))
-        )
+        stderr = stack.enter_context(error_path.open("a")) if stderr_redirected else None
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -379,9 +378,11 @@ def ensure_post_watch(expected: dict) -> dict:
     detail = (
         f"watch process exited with status {process.poll()}" if process.poll() is not None else ""
     )
-    if detail:
+    if detail and stderr_redirected:
         try:
-            lines = Path(expected["error_path"]).read_text().splitlines()
+            with error_path.open() as handle:
+                handle.seek(stderr_offset)
+                lines = handle.read().splitlines()
         except OSError:
             lines = []
         last_stderr = next((line for line in reversed(lines) if line.strip()), None)
