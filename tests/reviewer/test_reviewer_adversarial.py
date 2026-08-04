@@ -1081,32 +1081,28 @@ def test_dedupe_merges_only_confirmed_cross_file_locations() -> None:
         )
 
 
-def test_gate_added_same_file_candidate_requires_independence() -> None:
-    from agent.review.adversarial import IndependenceDecision, apply_independence, gate_triggers
+def test_nonindependent_empty_keep_uses_severity_and_candidate_id() -> None:
+    from agent.review.adversarial import IndependenceDecision, apply_independence
 
-    diff = (
-        "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
-        "@@ -1 +1 @@\n-old\n+new\n"
-    )
     candidates = [
-        cast(dict[str, Any], _candidate("c1")),
-        cast(dict[str, Any], _candidate("g1")),
+        cast(dict[str, Any], {**_candidate("c3"), "severity": "high"}),
+        cast(dict[str, Any], {**_candidate("c1"), "severity": "medium"}),
+        cast(dict[str, Any], {**_candidate("c2"), "severity": "high"}),
     ]
-    triggers, collisions = gate_triggers(diff, candidates)
-    assert triggers == ["same-file-independence"]
     result = apply_independence(
         candidates,
-        collisions,
+        [["c3", "c1", "c2"]],
         [
             IndependenceDecision(
-                candidate_ids=["c1", "g1"],
+                candidate_ids=["c1", "c2", "c3"],
                 independent=False,
-                keep_candidate_ids=["c1"],
+                keep_candidate_ids=[],
                 rationale="same failure",
             )
         ],
     )
-    assert [item["candidate_id"] for item in result] == ["c1"]
+
+    assert [item["candidate_id"] for item in result] == ["c2"]
 
 
 @pytest.mark.asyncio
@@ -1343,13 +1339,39 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
     stage_iter = iter(stages)
     gate_calls = 0
     prompts: list[tuple[object, str]] = []
+    initial = [
+        CandidateDraft(
+            file=file,
+            start_line=line,
+            end_line=line,
+            quoted_line=f"changed_{line}",
+            failure_mode=f"failure {candidate_id}",
+            severity="high",
+            side="RIGHT",
+        )
+        for candidate_id, file, line in (
+            ("c1", "a/one.py", 1),
+            ("c2", "b/two.py", 1),
+            ("c3", "c/shared.py", 1),
+            ("c4", "c/shared.py", 2),
+            ("c5", "c/shared.py", 3),
+        )
+    ]
 
     async def run_stage(graph: object, *_args: object, **_kwargs: object) -> Any:
         nonlocal gate_calls
-        prompts.append((graph, str(_args[0])))
-        if graph in {stages[2], stages[3]}:
+        prompt = str(_args[0])
+        prompts.append((graph, prompt))
+        if graph is stages[2]:
+            return FinderOutput(candidates=initial)
+        if graph is stages[3]:
             return FinderOutput(candidates=[])
         if graph is stages[0]:
+            candidate_ids = (
+                ("g1",)
+                if "gate candidate" in prompt
+                else tuple(f"c{index}" for index in range(1, 6))
+            )
             return VerdictBatch(
                 verdicts=[
                     Verdict(
@@ -1357,7 +1379,7 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
                         verdict="keep-confirmed",
                         evidence="reachable",
                     )
-                    for candidate_id in ("g1", "g2")
+                    for candidate_id in candidate_ids
                 ]
             )
         if graph is stages[5]:
@@ -1366,28 +1388,46 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
                 return GateOutput(
                     candidates=[
                         CandidateDraft(
-                            file="src/app.py",
-                            start_line=line,
-                            end_line=line,
-                            quoted_line=f"changed_{line}",
-                            failure_mode=f"failure {line}",
-                            severity="high",
+                            file="z/gate.py",
+                            start_line=9,
+                            end_line=9,
+                            quoted_line="gate_changed",
+                            failure_mode="failure g1",
+                            severity="medium",
                             side="RIGHT",
                         )
-                        for line in (1, 2)
-                    ]
+                    ],
+                    independence=[
+                        IndependenceDecision(
+                            candidate_ids=["ignored"],
+                            independent=True,
+                            keep_candidate_ids=[],
+                            rationale="surplus re-read output",
+                        )
+                    ],
                 )
             return GateOutput(
+                candidates=[
+                    CandidateDraft(
+                        file="c/shared.py",
+                        start_line=99,
+                        end_line=99,
+                        quoted_line="surplus",
+                        failure_mode="surplus same-file candidate",
+                        severity="critical",
+                        side="RIGHT",
+                    )
+                ],
                 independence=[
                     IndependenceDecision(
-                        candidate_ids=["g1", "g2"],
+                        candidate_ids=["c3", "c4", "c5"],
                         independent=False,
-                        keep_candidate_ids=["g1"],
-                        rationale="same user-visible failure",
+                        keep_candidate_ids=["c3", "c4"],
+                        rationale="two distinct survivors",
                     )
-                ]
+                ],
             )
-        raise AssertionError("unexpected parent adjudicator stage")
+        raise AssertionError("unexpected stage")
 
     config = cast(
         RunnableConfig,
@@ -1429,10 +1469,11 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
                 "stage_context": "context",
                 "parent_review_context": "PARENT CONTEXT MARKER",
                 "diff_text": (
-                    "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n"
-                    "+++ b/src/app.py\n@@ -1,2 +1,2 @@\n-old1\n-old2\n+new1\n+new2\n"
+                    "diff --git a/uncovered/major.py b/uncovered/major.py\n"
+                    "--- a/uncovered/major.py\n+++ b/uncovered/major.py\n"
+                    "@@ -1,2 +1,2 @@\n-old1\n-old2\n+new1\n+new2\n"
                 ),
-                "diff_line_set": {"src/app.py": {"RIGHT": {1, 2}, "LEFT": {1, 2}}},
+                "diff_line_set": {"uncovered/major.py": {"RIGHT": {1, 2}, "LEFT": {1, 2}}},
                 "diff_path": "/tmp/review.diff",
                 "pr_title": "change app",
             },
@@ -1461,20 +1502,200 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
 
     finder_prompts = [prompt for graph, prompt in prompts if graph in {stages[2], stages[3]}]
     judgment_prompts = [prompt for graph, prompt in prompts if graph in {stages[0], stages[5]}]
+    gate_prompts = [prompt for graph, prompt in prompts if graph is stages[5]]
     assert finder_prompts and all(
         "PARENT CONTEXT MARKER" not in prompt for prompt in finder_prompts
     )
-    assert len(judgment_prompts) == 3
+    assert len(judgment_prompts) == 4
     assert all("PARENT CONTEXT MARKER" in prompt for prompt in judgment_prompts)
+    assert "Return only candidates and leave independence empty." in gate_prompts[0]
+    assert "Return no candidates and one independence decision per listed group." in gate_prompts[1]
 
     assert result["gate_triggers"] == [
-        "zero-findings",
         "uncovered-major-prefix",
         "same-file-independence",
     ]
+    assert [item["candidate_id"] for item in result["gate_candidates"]] == ["g1"]
+    assert {item["candidate_id"] for item in result["kept_candidates"]} == {
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "g1",
+    }
+    assert all(
+        item["failure_mode"] != "surplus same-file candidate" for item in result["kept_candidates"]
+    )
     assert gate_calls == 2
-    add.assert_awaited_once()
+    assert add.await_count == 5
     publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("has_adjudicated", "metadata", "writes_pending"),
+    [
+        (True, {}, False),
+        (False, {"review_check_run_id": 41}, True),
+        (
+            False,
+            {
+                "review_check_run_id": 41,
+                "review_check_pending_result": {"summary": "existing pending"},
+            },
+            False,
+        ),
+        (
+            False,
+            {
+                "review_check_run_id": 41,
+                "review_check_deferred_result": {"review_check_run_id": 41},
+            },
+            False,
+        ),
+    ],
+)
+async def test_gate_exception_falls_back_or_settles_without_leaking_failure_tail(
+    has_adjudicated: bool,
+    metadata: dict[str, object],
+    writes_pending: bool,
+) -> None:
+    from agent.review.adversarial import CandidateDraft, FinderOutput, Verdict, VerdictBatch
+
+    stages = [object() for _ in range(6)]
+    stage_iter = iter(stages)
+    secret = "gate-secret-credential"
+    candidate = CandidateDraft(
+        file="src/app.py",
+        start_line=1,
+        end_line=1,
+        quoted_line="new",
+        failure_mode="original adjudicated failure",
+        severity="high",
+        side="RIGHT",
+    )
+
+    async def run_stage(graph: object, *_args: object, **_kwargs: object) -> Any:
+        if graph is stages[2]:
+            return FinderOutput(candidates=[candidate] if has_adjudicated else [])
+        if graph is stages[3]:
+            return FinderOutput(candidates=[])
+        if graph is stages[0] and has_adjudicated:
+            return VerdictBatch(
+                verdicts=[
+                    Verdict(
+                        candidate_id="c1",
+                        verdict="keep-confirmed",
+                        evidence="reachable",
+                    )
+                ]
+            )
+        if graph is stages[5]:
+            raise LookupError(secret)
+        raise AssertionError("unexpected stage")
+
+    config = cast(
+        RunnableConfig,
+        {"configurable": {"thread_id": "adversarial-thread", "__is_for_execution__": True}},
+    )
+    with (
+        patch(
+            "agent.reviewer_adversarial._cached_reviewer_team_defaults",
+            new_callable=AsyncMock,
+            return_value=(("team-main", "low"), ("team-sub", "low")),
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_review_profile_name",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_gateway_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "agent.reviewer_adversarial.get_team_fable_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("agent.reviewer_adversarial._make_model_or_defer", return_value=MagicMock()),
+        patch(
+            "agent.reviewer_adversarial._bounded_agent",
+            side_effect=lambda **_kwargs: next(stage_iter),
+        ),
+        patch(
+            "agent.reviewer_adversarial._prepare_context",
+            new_callable=AsyncMock,
+            return_value={
+                "work_dir": "/workspace",
+                "working_dir": "/workspace/repo",
+                "rendered_system_prompt": "prompt",
+                "stage_context": "context",
+                "diff_text": (
+                    "diff --git a/uncovered/major.py b/uncovered/major.py\n"
+                    "--- a/uncovered/major.py\n+++ b/uncovered/major.py\n"
+                    "@@ -1 +1 @@\n-old\n+new\n"
+                ),
+                "diff_line_set": {"uncovered/major.py": {"RIGHT": {1}, "LEFT": {1}}},
+                "diff_path": "/tmp/review.diff",
+                "pr_title": "change app",
+            },
+        ),
+        patch("agent.reviewer_adversarial._run_stage", side_effect=run_stage),
+        patch(
+            "agent.reviewer_adversarial.agent_tools.add_finding",
+            new_callable=AsyncMock,
+            return_value={"success": True, "finding_id": "f1"},
+        ) as add,
+        patch(
+            "agent.reviewer_adversarial.agent_tools.publish_review",
+            new_callable=AsyncMock,
+            return_value={"success": True, "review_id": 7},
+        ) as publish,
+        patch(
+            "agent.reviewer_adversarial.get_thread_metadata",
+            new_callable=AsyncMock,
+            return_value=metadata,
+        ),
+        patch(
+            "agent.reviewer_adversarial.set_reviewer_thread_metadata",
+            new_callable=AsyncMock,
+        ) as set_metadata,
+        patch.object(
+            __import__(
+                "agent.reviewer_adversarial", fromlist=["settle_review_check_on_exit"]
+            ).settle_review_check_on_exit,
+            "aafter_agent",
+            new_callable=AsyncMock,
+        ) as settle,
+    ):
+        graph = await get_reviewer_adversarial_agent(config)
+        result = await graph.ainvoke({"messages": []})
+
+    assert result["gate_candidates"] == []
+    assert result["gate_verdicts"] == []
+    settle.assert_awaited_once()
+    if has_adjudicated:
+        assert result.get("error", "") == ""
+        assert [item["candidate_id"] for item in result["kept_candidates"]] == ["c1"]
+        add.assert_awaited_once()
+        publish.assert_awaited_once()
+        set_metadata.assert_not_awaited()
+    else:
+        assert result["error"] == f"pre-publish gate failed: {secret}"
+        assert result["kept_candidates"] == []
+        add.assert_not_awaited()
+        publish.assert_not_awaited()
+        if writes_pending:
+            set_metadata.assert_awaited_once()
+            await_args = set_metadata.await_args
+            assert await_args is not None
+            pending = await_args.kwargs["extra"]["review_check_pending_result"]
+            assert "Failure class: pre-publish gate failed." in pending["summary"]
+            assert secret not in pending["summary"]
+        else:
+            set_metadata.assert_not_awaited()
 
 
 class _StubToolCallModel(BaseChatModel):
