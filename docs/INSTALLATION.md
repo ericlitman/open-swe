@@ -486,10 +486,14 @@ CONFIGURED_ADMINS=""                   # e.g. "alice,bob@my-org.com"
 # Defaults to http://localhost:2024 locally; set to your deployment URL in prod.
 LANGGRAPH_URL="http://localhost:2024"
 
-# === Run completion webhook (optional) ===
+# === Run completion webhook ===
 # Absolute, non-loopback URL to <your deployment>/webhooks/run-complete. With the secret set,
-# every dispatched run attaches it so failed runs post a reply to their source channel.
-# Relative and loopback URLs are rejected; dispatch disables replies with a startup warning.
+# every dispatched run attaches it so failed runs post a reply to their source channel, and
+# review checks deferred behind an active PR-linked implementation or auto-fix run get
+# released when that run finishes — without the pair, a blocking Open SWE Review check can
+# stay in progress indefinitely. Set both unless you run without review checks and can live
+# without failure replies. Relative and loopback URLs are rejected; dispatch disables the
+# webhook with a startup warning.
 COMPLETION_WEBHOOK_URL=""              # e.g. https://open-swe.example.com/webhooks/run-complete
 # Shared secret appended to the webhook URL as ?token=. The route fails closed and rejects
 # all calls when this is unset.

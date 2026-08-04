@@ -293,9 +293,11 @@ already handle restart-on-crash.
 ## Run-completion webhook
 
 Both `COMPLETION_WEBHOOK_URL` and `RUN_COMPLETE_WEBHOOK_SECRET` must be present in the ops
-env file for run-failure replies. The URL must be non-loopback; on studio2, use the tailnet
-HTTPS hostname with `tailscale serve` mapping `/webhooks` to the API port. A missing pair
-silently disables run-failure replies.
+env file. They arm run-failure replies and, just as critically, the release of review
+checks deferred behind active PR-linked implementation/auto-fix runs — a missing pair can
+leave a blocking `Open SWE Review` check in progress indefinitely. The URL must be
+non-loopback; on studio2, use the tailnet HTTPS hostname with `tailscale serve` mapping
+`/webhooks` to the API port.
 
 ## Sandbox GitHub tooling (learned from OSWE-202, 2026-07-29)
 
