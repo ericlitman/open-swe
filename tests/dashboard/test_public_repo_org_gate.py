@@ -55,6 +55,7 @@ def _common_setup(monkeypatch, *, gate: str = "langchain-ai") -> None:
     monkeypatch.setattr(webhook_common, "GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
     monkeypatch.setattr(webhook_common, "PUBLIC_REPO_ORG_GATE", gate)
     monkeypatch.setattr(webhook_common, "ALLOWED_GITHUB_ORGS", frozenset())
+    monkeypatch.setattr(webhook_common, "ALLOWED_GITHUB_REPOS", frozenset())
 
 
 def test_gate_blocks_non_member_on_public_pr_comment(monkeypatch) -> None:
@@ -293,6 +294,49 @@ def test_review_requested_is_unsupported_before_public_repo_gate(monkeypatch) ->
     assert response.json() == {
         "status": "ignored",
         "reason": "Unsupported GitHub pull_request action: review_requested",
+    }
+    assert seen["calls"] == []
+
+
+def test_mergify_push_is_accepted_without_org_membership_lookup(monkeypatch) -> None:
+    _common_setup(monkeypatch)
+    seen = _install_membership_stub(monkeypatch, members=set())
+    called: dict[str, object] = {}
+
+    async def fake_auto_review_enabled(repo_config: dict[str, str]) -> bool:
+        called["repo_config"] = repo_config
+        return True
+
+    async def fake_process_github_push_event(payload: dict[str, Any]) -> None:
+        called["payload"] = payload
+
+    monkeypatch.setattr(webhook_common, "_is_repo_auto_review_enabled", fake_auto_review_enabled)
+    monkeypatch.setattr(
+        github_webhooks, "process_github_push_event", fake_process_github_push_event
+    )
+
+    client = TestClient(app)
+    payload = {
+        "ref": "refs/heads/feature-branch",
+        "after": "new-head-sha",
+        "repository": {
+            "id": 123,
+            "owner": {"login": "ericlitman"},
+            "name": "open-swe",
+            "private": False,
+        },
+        "sender": {"login": "mergify[bot]", "type": "Bot"},
+    }
+    response = _post_github_webhook(client, "push", payload)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "accepted",
+        "message": "Processing GitHub push for reviewer watch",
+    }
+    assert called == {
+        "repo_config": {"owner": "ericlitman", "name": "open-swe"},
+        "payload": payload,
     }
     assert seen["calls"] == []
 
