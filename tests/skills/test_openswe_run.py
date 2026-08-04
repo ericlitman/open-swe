@@ -1006,6 +1006,32 @@ def test_body_hygiene_rejects_ambiguous_directives(body: str) -> None:
         run.guard_body_hygiene(body)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@openswe repo owner/name — Execute ABC-1.",
+        "@OpenSWE RePo:OWNER/NAME — Execute ABC-1.",
+    ],
+)
+def test_start_repo_directive_accepts_matching_body(body: str) -> None:
+    run.guard_start_repo_directive(body, "owner/name")
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("@openswe Execute ABC-1.", "must specify the resolved repository"),
+        (
+            "@openswe repo other/name — Execute ABC-1.",
+            "does not match --repo",
+        ),
+    ],
+)
+def test_start_repo_directive_rejects_missing_or_conflicting_body(body: str, message: str) -> None:
+    with pytest.raises(run.RunError, match=message):
+        run.guard_start_repo_directive(body, "owner/name")
+
+
 def test_force_cannot_bypass_body_hygiene(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         run,
@@ -1185,11 +1211,15 @@ def test_shared_post_helper_uses_one_child_for_baseline_post_and_poll(
         return process
 
     monkeypatch.setattr(run, "_start_handoff_process", start)
-    monkeypatch.setattr(run, "post_comment", lambda *args: events.append("post"))
+    monkeypatch.setattr(
+        run,
+        "post_comment",
+        lambda *args: events.append("post") or {"id": "comment-1"},
+    )
     monkeypatch.setattr(
         run,
         "_await_handoff",
-        lambda actual_process, thread_id: (
+        lambda actual_process, thread_id, **kwargs: (
             events.append("poll") or {"thread_status": "busy", "run_ids": ["run-1"]}
         ),
     )
@@ -1198,6 +1228,111 @@ def test_shared_post_helper_uses_one_child_for_baseline_post_and_poll(
 
     assert final == {"thread_status": "busy", "run_ids": ["run-1"]}
     assert events == ["baseline", "post", "signal", "poll"]
+
+
+def test_post_handoff_surfaces_immediate_parented_agent_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Stdin:
+        def write(self, value: str) -> None:
+            assert value == "posted\n"
+
+        def flush(self) -> None:
+            return None
+
+    class Process:
+        stdin = Stdin()
+        stopped = False
+
+        def poll(self):
+            return 0 if self.stopped else None
+
+        def terminate(self) -> None:
+            self.stopped = True
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    process = Process()
+    monkeypatch.setattr(run, "_start_handoff_process", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        run,
+        "post_comment",
+        lambda *args: {
+            "id": "dispatch-1",
+            "url": "https://linear.example/ABC-1#comment-dispatch",
+        },
+    )
+    monkeypatch.setattr(
+        run,
+        "linear_snapshot",
+        lambda issue_id: {
+            "comments": [
+                {
+                    "id": "error-1",
+                    "body": (
+                        "❌ **Agent Error**\n\nThe target repository `owner/name` is not enabled."
+                    ),
+                    "url": "https://linear.example/ABC-1#comment-error",
+                    "parent": {"id": "dispatch-1"},
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(run.RunError) as raised:
+        run._post_with_handoff(
+            "start",
+            "ABC-1",
+            "issue-1",
+            "@openswe repo owner/name — Execute ABC-1.",
+            "thread-1",
+        )
+
+    message = str(raised.value)
+    assert "The target repository `owner/name` is not enabled." in message
+    assert "https://linear.example/ABC-1#comment-error" in message
+    assert "LangGraph handoff timeout" not in message
+    assert process.stopped is True
+
+
+def test_handoff_timeout_checks_for_rejection_before_reporting_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {"error": "LangGraph handoff timeout: missing thread"}
+
+    class Process:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout=None):
+            return run.HANDOFF_RESULT_SENTINEL + json.dumps(payload) + "\n", ""
+
+    replies = iter(
+        [
+            None,
+            {
+                "reason": "The target repository `owner/name` is not enabled.",
+                "url": "https://linear.example/ABC-1#comment-error",
+            },
+        ]
+    )
+    monkeypatch.setattr(run, "find_dispatch_rejection", lambda *args: next(replies))
+
+    with pytest.raises(run.RunError) as raised:
+        run._await_handoff(
+            Process(),
+            "thread-1",
+            issue_id="issue-1",
+            parent_comment_id="dispatch-1",
+        )
+
+    message = str(raised.value)
+    assert "The target repository `owner/name` is not enabled." in message
+    assert "https://linear.example/ABC-1#comment-error" in message
+    assert "LangGraph handoff timeout" not in message
 
 
 @pytest.mark.parametrize(
@@ -1347,6 +1482,72 @@ def _start_args(**overrides) -> argparse.Namespace:
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_start_posts_matching_custom_repo_body_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    body = "@OpenSWE RePo:OWNER/NAME — Execute ABC-1."
+    posted: list[str] = []
+    issue = {
+        "id": "issue-1",
+        "identifier": "ABC-1",
+        "url": "https://linear.example/ABC-1",
+        "state": {"type": "started", "name": "In Progress"},
+        "team": {"id": "team-1", "key": "ABC", "visibility": "public"},
+    }
+    monkeypatch.setenv("OPENSWE_STABLE_ROOT", str(tmp_path))
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "resolve_issue", lambda ticket: issue)
+    monkeypatch.setattr(run, "read_body", lambda args: body)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: type("Wave", (), {"derive_linear_thread_id": lambda issue_id: "thread-1"}),
+    )
+    monkeypatch.setattr(run, "require_webhook_coverage", lambda primary: None)
+    monkeypatch.setattr(
+        run,
+        "_post_with_handoff",
+        lambda action, ticket, issue_id, actual_body, thread_id: (
+            posted.append(actual_body) or {"thread_status": "busy", "run_ids": ["run-1"]}
+        ),
+    )
+
+    assert run.cmd_start(_start_args(body_file="body.md")) == 0
+    assert posted == [body]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@openswe Execute ABC-1.",
+        "@openswe repo other/name — Execute ABC-1.",
+    ],
+)
+def test_start_refuses_invalid_custom_repo_body_before_handoff(
+    monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    monkeypatch.setattr(run, "log_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run, "ensure_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        run,
+        "resolve_issue",
+        lambda ticket: {
+            "id": "issue-1",
+            "identifier": "ABC-1",
+            "url": "https://linear.example/ABC-1",
+        },
+    )
+    monkeypatch.setattr(run, "read_body", lambda args: body)
+    monkeypatch.setattr(
+        run,
+        "import_wave_module",
+        lambda: pytest.fail("invalid custom body must fail before handoff setup"),
+    )
+
+    with pytest.raises(run.RunError):
+        run.cmd_start(_start_args(body_file="body.md"))
 
 
 def test_issue_query_resolves_workflow_state_terminal_timestamps_and_team() -> None:

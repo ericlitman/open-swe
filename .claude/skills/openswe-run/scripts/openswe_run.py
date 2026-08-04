@@ -71,6 +71,7 @@ CHILD_FAILURE_EXIT = 4
 HANDOFF_TIMEOUT_SECONDS = 60.0
 HANDOFF_POLL_INTERVAL_SECONDS = 2.0
 HANDOFF_SNAPSHOT_TIMEOUT_SECONDS = 10
+LINEAR_AGENT_ERROR_PREFIX = "❌ **Agent Error**"
 PHASE_TIMEOUT_MINUTES = {"plan": 30.0, "delivery": 90.0}
 WATCH_INTERVAL_SECONDS = 60.0
 WATCH_START_TIMEOUT_SECONDS = 70.0
@@ -557,7 +558,7 @@ query RunSnapshot($id: String!, $cursor: String) {
   issue(id: $id) {
     id identifier
     comments(first: 100, after: $cursor) {
-      nodes { id body createdAt user { id name } }
+      nodes { id body url createdAt parent { id } user { id name } }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -673,15 +674,31 @@ def linear_snapshot(issue_id: str) -> dict:
         variables = {"id": issue_id, "cursor": page.get("endCursor")}
 
 
-def post_comment(issue_id: str, body: str) -> None:
+def post_comment(issue_id: str, body: str) -> dict:
     mutation = """
     mutation RunComment($input: CommentCreateInput!) {
       commentCreate(input: $input) { success comment { id } }
     }
     """
     result = linear_gql(mutation, {"input": {"issueId": issue_id, "body": body}})
-    if (result.get("commentCreate") or {}).get("success") is not True:
+    created = result.get("commentCreate") or {}
+    comment = created.get("comment") or {}
+    if created.get("success") is not True or not comment.get("id"):
         raise RunError("Linear comment was not accepted")
+    return comment
+
+
+def find_dispatch_rejection(issue_id: str, parent_comment_id: str) -> dict | None:
+    for comment in reversed(linear_snapshot(issue_id)["comments"]):
+        parent = comment.get("parent") or {}
+        body = str(comment.get("body") or "")
+        if parent.get("id") != parent_comment_id or not body.startswith(LINEAR_AGENT_ERROR_PREFIX):
+            continue
+        return {
+            "reason": body[len(LINEAR_AGENT_ERROR_PREFIX) :].strip(),
+            "url": str(comment.get("url") or ""),
+        }
+    return None
 
 
 # --------------------------------------------------------------------------- environment
@@ -1045,6 +1062,24 @@ def guard_body_hygiene(body: str) -> None:
         )
 
 
+def guard_start_repo_directive(body: str, repo: str) -> None:
+    match = re.match(
+        r"^@openswe repo(?:\s+|:)(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b",
+        body,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        raise RunError(
+            "A custom start body must specify the resolved repository immediately after "
+            "@openswe as `repo owner/name` or `repo:owner/name`."
+        )
+    body_repo = match.group("repo")
+    if body_repo.casefold() != repo.casefold():
+        raise RunError(
+            f"Custom start body repository {body_repo!r} does not match --repo {repo!r}."
+        )
+
+
 def guard_placeholders(ticket: str, body: str, force: bool) -> None:
     body_without_code = INLINE_CODE_RE.sub("", FENCED_CODE_RE.sub("", body))
     leftovers = sorted(set(PLACEHOLDER_RE.findall(body_without_code)))
@@ -1265,12 +1300,52 @@ def _start_handoff_process(
     return process
 
 
-def _await_handoff(process: subprocess.Popen, thread_id: str) -> dict:
+def _dispatch_rejection_message(issue_id: str, parent_comment_id: str) -> str | None:
+    rejection = find_dispatch_rejection(issue_id, parent_comment_id)
+    if rejection is None:
+        return None
+    return "Open SWE dispatch rejected: {} ({})".format(rejection["reason"], rejection["url"])
+
+
+def _raise_if_dispatch_rejected(
+    process: subprocess.Popen,
+    issue_id: str | None,
+    parent_comment_id: str | None,
+) -> None:
+    if issue_id is None or parent_comment_id is None:
+        return
     try:
-        stdout, stderr = process.communicate(timeout=HANDOFF_TIMEOUT_SECONDS + 10)
-    except subprocess.TimeoutExpired as exc:
+        rejection = _dispatch_rejection_message(issue_id, parent_comment_id)
+    except Exception:
         _stop_handoff_process(process)
-        raise RunError(f"LangGraph handoff monitor overran for thread {thread_id}") from exc
+        raise
+    if rejection is not None:
+        _stop_handoff_process(process)
+        raise RunError(rejection)
+
+
+def _await_handoff(
+    process: subprocess.Popen,
+    thread_id: str,
+    *,
+    issue_id: str | None = None,
+    parent_comment_id: str | None = None,
+) -> dict:
+    deadline = time.monotonic() + HANDOFF_TIMEOUT_SECONDS + 10
+    while True:
+        _raise_if_dispatch_rejected(process, issue_id, parent_comment_id)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _raise_if_dispatch_rejected(process, issue_id, parent_comment_id)
+            _stop_handoff_process(process)
+            raise RunError(f"LangGraph handoff monitor overran for thread {thread_id}")
+        try:
+            stdout, stderr = process.communicate(
+                timeout=min(HANDOFF_POLL_INTERVAL_SECONDS, remaining)
+            )
+            break
+        except subprocess.TimeoutExpired:
+            continue
     payload = None
     for line in reversed(stdout.splitlines()):
         if not line.startswith(HANDOFF_RESULT_SENTINEL):
@@ -1280,6 +1355,7 @@ def _await_handoff(process: subprocess.Popen, thread_id: str) -> dict:
     if not isinstance(payload, dict):
         detail = stderr.strip()[-400:] or stdout.strip()[-400:]
         raise RunError(f"LangGraph handoff monitor failed for thread {thread_id}: {detail}")
+    _raise_if_dispatch_rejected(process, issue_id, parent_comment_id)
     if payload.get("error"):
         raise RunError(str(payload["error"]))
     final = payload.get("handoff")
@@ -1300,7 +1376,7 @@ def _post_with_handoff(
 ) -> dict:
     process = _start_handoff_process(action, ticket, thread_id, plan_context=plan_context)
     try:
-        post_comment(issue_id, body)
+        comment = post_comment(issue_id, body)
     except Exception:
         _stop_handoff_process(process)
         raise
@@ -1315,7 +1391,12 @@ def _post_with_handoff(
             f"Linear comment was posted, but the LangGraph handoff monitor failed "
             f"before polling thread {thread_id}: {detail}"
         ) from exc
-    return _await_handoff(process, thread_id)
+    return _await_handoff(
+        process,
+        thread_id,
+        issue_id=issue_id,
+        parent_comment_id=str(comment["id"]),
+    )
 
 
 # --------------------------------------------------------------------------- commands
@@ -1398,6 +1479,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             ).removesuffix("."),
         )
     guard_body_hygiene(body)
+    if args.body_file:
+        guard_start_repo_directive(body, args.repo)
     guard_placeholders(args.ticket, body, False if is_bundle else args.force)
     if is_bundle:
         guard_bundle_membership(body, identifiers)
