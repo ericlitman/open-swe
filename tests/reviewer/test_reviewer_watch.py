@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -42,18 +43,43 @@ def _pr_close_payload(*, action: str, number: int = 7) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_push_event_skips_branch_deletion() -> None:
+async def test_push_event_skips_branch_deletion(caplog: pytest.LogCaptureFixture) -> None:
     payload = _push_payload(
         ref="refs/heads/feat-x", after="0000000000000000000000000000000000000000"
     )
-    with patch(
-        "agent.webhooks.common._is_repo_auto_review_enabled",
-        new_callable=AsyncMock,
-        return_value=True,
+    with caplog.at_level(logging.INFO):
+        await github_webhooks.process_github_push_event(payload)
+
+    assert "repo=lc/repo ref=refs/heads/feat-x reason=branch deletion or missing SHA" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_push_event_logs_when_no_open_pr_is_found(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload = _push_payload(ref="refs/heads/feat-x", after="newsha")
+
+    with (
+        patch(
+            "agent.webhooks.common._is_repo_auto_review_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "agent.webhooks.common.get_github_app_installation_token_with_expiry",
+            new_callable=AsyncMock,
+            return_value=("t", None),
+        ),
+        patch(
+            "agent.webhooks.common._fetch_open_pr_for_branch",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        caplog.at_level(logging.INFO),
     ):
         await github_webhooks.process_github_push_event(payload)
-    # If we got here without crashing and with no other patches needed, the
-    # function returned early on the deletion check.
+
+    assert "repo=lc/repo ref=refs/heads/feat-x reason=no open PR found for branch" in caplog.text
 
 
 @pytest.mark.asyncio

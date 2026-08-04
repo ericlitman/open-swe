@@ -410,21 +410,28 @@ async def process_github_pr_close(payload: dict[str, Any]) -> None:
 
 async def process_github_push_event(payload: dict[str, Any]) -> None:
     """Re-trigger the reviewer for a watched PR when its head branch is pushed to."""
-    ref = payload.get("ref", "")
-    after_sha = payload.get("after", "")
-    if not ref.startswith("refs/heads/"):
-        common.logger.debug("Push ignored: ref %s is not a branch", ref)
-        return
-    if not isinstance(after_sha, str) or not after_sha or set(after_sha) == {"0"}:
-        common.logger.debug("Push to %s ignored: branch deletion or missing SHA", ref)
-        return
-    head_ref = ref[len("refs/heads/") :]
-
     repo = payload.get("repository", {})
     repo_config = {
         "owner": repo.get("owner", {}).get("login", "") or repo.get("owner", {}).get("name", ""),
         "name": repo.get("name", ""),
     }
+    repo_full_name = f"{repo_config['owner']}/{repo_config['name']}"
+    ref = payload.get("ref", "")
+    after_sha = payload.get("after", "")
+    if not ref.startswith("refs/heads/"):
+        common.logger.info(
+            "Push ignored: repo=%s ref=%s reason=ref is not a branch", repo_full_name, ref
+        )
+        return
+    if not isinstance(after_sha, str) or not after_sha or set(after_sha) == {"0"}:
+        common.logger.info(
+            "Push ignored: repo=%s ref=%s reason=branch deletion or missing SHA",
+            repo_full_name,
+            ref,
+        )
+        return
+    head_ref = ref[len("refs/heads/") :]
+
     repo_private = common._repo_private_from_payload(payload)
     repo_id = common._repo_id_from_payload(payload)
     if not repo_config["owner"] or not repo_config["name"]:
@@ -452,11 +459,10 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
 
     pr = await common._fetch_open_pr_for_branch(repo_config, head_ref, token=app_token)
     if not pr:
-        common.logger.debug(
-            "No open PR found for push to %s/%s head=%s",
-            repo_config["owner"],
-            repo_config["name"],
-            head_ref,
+        common.logger.info(
+            "Push ignored: repo=%s ref=%s reason=no open PR found for branch",
+            repo_full_name,
+            ref,
         )
         return
 
