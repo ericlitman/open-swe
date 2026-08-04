@@ -150,7 +150,7 @@ to 90 minutes. `--timeout-min N` explicitly overrides either default. The phase 
 watch-start logs and `watch_timeout` evidence.
 
 Wake nodes: `plan_posted`, `pr_opened`, `review_findings_posted`, `review_complete`,
-`run_blocked`, `run_stalled`, `review_absent`, `merge_conflict`, `terminal_merged`,
+`run_blocked`, `run_stalled`, `review_absent`, `merge_conflict`, `merge_queue_stalled`, `terminal_merged`,
 `terminal_closed`, `terminal_run_error`, `unhandled_condition`, plus wrapper-level
 `endpoint_failover`, `endpoint_unavailable`, and `watch_timeout` (rc 3). A successful endpoint
 failover is the one
@@ -159,7 +159,9 @@ replacement endpoint. `endpoint_unavailable` exits fail-closed without retrying 
 `--pr-number N` is optional; when omitted, the monitor discovers the PR from LangGraph thread metadata so PR recovery checks engage as soon as it exists.
 The wrapper passes a run-stable comment watermark and `--until-wake` to `wave-monitor`, so a
 child restart resumes from the last successfully classified poll instead of adopting a fresh
-baseline. OSWE-135 remains a known sharp edge (torn reviewThreads read → spurious
+baseline. Control-plane failure replies, with or without a `Cause:` suffix, wake as
+`terminal_run_error`; their complete reply text is retained in wake evidence. Persistent
+`review_absent` and `merge_queue_stalled` conditions are watermarked by PR head across re-watches. OSWE-135 remains a known sharp edge (torn reviewThreads read → spurious
 `unhandled_condition`; benign, re-watch); poll deadlines handle the OSWE-136 hung-read path.
 
 ## 3. The plan gate — adjudicate it yourself, at full weight
@@ -186,17 +188,7 @@ On `plan_posted`:
    scripts/openswe-run reject --ticket OSWE-123 --body-file reject.md
    ```
 
-4. Continue with the deterministic phase command that matches the decision. After approval:
-
-   ```bash
-   scripts/openswe-run watch --ticket OSWE-123 --repo owner/repo --phase delivery
-   ```
-
-   After rejection:
-
-   ```bash
-   scripts/openswe-run watch --ticket OSWE-123 --repo owner/repo --phase plan
-   ```
+4. The posting command verifies or re-arms the deterministic phase watch before returning success. Approval reports a delivery watch; rejection reports a plan watch. Its JSON output includes `watch.status`, `phase`, `interval_seconds`, and `timeout_minutes`. If the replacement cannot complete a live baseline, the command exits nonzero and explicitly reports that the posted action was handed off but the ticket is unwatched.
 
 5. Escalate to the operator only on a genuine reject-or-rework decision you cannot resolve
    from the ticket and the plan.
@@ -208,14 +200,17 @@ Repeat the phase-appropriate command until a terminal wake.
 A Linear comment on the issue lands in the running agent's mid-run queue:
 `scripts/openswe-run comment --ticket OSWE-123 --body-file msg.md`. The posting commands
 `approve`, `reject`, `comment`, and `nudge` use the same roughly 60-second handoff confirmation
-as `start`; run the phase-appropriate `watch` command only after they return successfully.
+as `start`, then verify or re-arm a background watch before returning success. Approval, comment,
+and nudge use the delivery phase; rejection uses the plan phase. A matching active watch is
+reported as `verified`; a replacement is reported as `rearmed`, with its interval and timeout.
+The managed watch inherits the posting terminal, so later wake JSON remains visible to the supervising caller. Pass `--repo owner/repo` when continuing a run without its original local dogfood log; otherwise the repository is recovered from the anchored dispatch record.
 
 Stall rule: a liveness wake (`run_stalled`, threshold 30 minutes) gets **one** nudge —
 `scripts/openswe-run nudge --ticket OSWE-123 --minutes 30` —
-then re-watch. A second stall wake escalates to your caller. Never loop nudges.
+then rely on the automatically re-armed watch. A second stall wake escalates to your caller. Never loop nudges.
 
 `review_findings_posted`: read the findings on the PR, reply/resolve via `comment` with a
-`@openswe` mention, re-watch.
+`@openswe` mention; the command re-arms the delivery watch.
 
 ## 5. Report and close
 

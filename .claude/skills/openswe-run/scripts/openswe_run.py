@@ -18,17 +18,20 @@ langgraph_sdk, absent from system python3 (see dogfood log 2026-07-26).
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,6 +71,14 @@ HANDOFF_TIMEOUT_SECONDS = 60.0
 HANDOFF_POLL_INTERVAL_SECONDS = 2.0
 HANDOFF_SNAPSHOT_TIMEOUT_SECONDS = 10
 PHASE_TIMEOUT_MINUTES = {"plan": 30.0, "delivery": 90.0}
+WATCH_INTERVAL_SECONDS = 60.0
+WATCH_START_TIMEOUT_SECONDS = 70.0
+WATCH_ACTION_PHASE = {
+    "approval": "delivery",
+    "rejection": "plan",
+    "comment": "delivery",
+    "nudge": "delivery",
+}
 # Matches unfilled template placeholders like <TICKET> or <owner/repo>; the
 # ':' exclusion spares autolinks like <https://...>.
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z][^>:\n]*>")
@@ -201,6 +212,167 @@ def log_path(ticket: str, *, new_run: bool = False) -> Path:
 def known_ids_path(ticket: str) -> Path:
     run_log = log_path(ticket)
     return run_log.with_name(f"{run_log.stem}-known-comment-ids.json")
+
+
+def watch_state_path(ticket: str) -> Path:
+    run_log = log_path(ticket)
+    return run_log.with_name(f"{run_log.stem}-watch.json")
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    os.replace(temporary, path)
+
+
+def _read_json_object(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _watch_lock_path(state_path: Path) -> Path:
+    return state_path.with_suffix(state_path.suffix + ".lock")
+
+
+def _watch_lock_held(state_path: Path) -> bool:
+    lock_path = _watch_lock_path(state_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    return False
+
+
+def _run_repo(ticket: str) -> str:
+    path = log_path(ticket)
+    pattern = re.compile(r"^- \S+ \[cmd\] dispatched \S+ to ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) ")
+    for line in reversed(path.read_text().splitlines()):
+        match = pattern.match(line)
+        if match:
+            return match.group(1)
+    raise RunError(
+        f"No dispatched repository is recorded for {ticket.upper()}; "
+        "start the ticket before posting a monitor-lane action."
+    )
+
+
+def post_watch_context(ticket: str, action: str, repo: str | None = None) -> dict:
+    phase = WATCH_ACTION_PHASE[action]
+    state_path = watch_state_path(ticket)
+    return {
+        "ticket": ticket.upper(),
+        "repo": repo or _run_repo(ticket),
+        "phase": phase,
+        "interval_seconds": WATCH_INTERVAL_SECONDS,
+        "timeout_minutes": PHASE_TIMEOUT_MINUTES[phase],
+        "state_path": str(state_path),
+    }
+
+
+def _watch_state_matches(state: dict | None, expected: dict) -> bool:
+    return bool(
+        state
+        and state.get("status") == "ready"
+        and state.get("ticket") == expected["ticket"]
+        and state.get("repo") == expected["repo"]
+        and state.get("phase") == expected["phase"]
+        and state.get("interval_seconds") == expected["interval_seconds"]
+        and state.get("timeout_minutes") == expected["timeout_minutes"]
+    )
+
+
+def _watch_result(status: str, expected: dict) -> dict:
+    return {
+        "status": status,
+        "phase": expected["phase"],
+        "interval_seconds": expected["interval_seconds"],
+        "timeout_minutes": expected["timeout_minutes"],
+    }
+
+
+def ensure_post_watch(expected: dict) -> dict:
+    state_path = Path(expected["state_path"])
+    state = _read_json_object(state_path)
+    if _watch_lock_held(state_path):
+        state = _read_json_object(state_path)
+        if _watch_state_matches(state, expected):
+            return _watch_result("verified", expected)
+        raise RunError(
+            f"A live watch exists for {expected['ticket']}, but it does not match the required "
+            f"{expected['phase']} watch (interval {expected['interval_seconds']:g}s, timeout "
+            f"{expected['timeout_minutes']:g}m). The posted action was handed off, but the "
+            "required watch could not be verified."
+        )
+
+    token = uuid.uuid4().hex
+    ready_path = state_path.with_name(f".{state_path.name}.{token}.ready")
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "watch",
+        "--ticket",
+        expected["ticket"],
+        "--repo",
+        expected["repo"],
+        "--phase",
+        expected["phase"],
+        "--interval",
+        str(expected["interval_seconds"]),
+        "--timeout-min",
+        str(expected["timeout_minutes"]),
+        "--managed-state-file",
+        str(state_path),
+        "--managed-token",
+        token,
+        "--ready-file",
+        str(ready_path),
+    ]
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + WATCH_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        state = _read_json_object(state_path)
+        if _watch_state_matches(state, expected) and state.get("token") == token:
+            if _watch_lock_held(state_path):
+                ready_path.unlink(missing_ok=True)
+                return _watch_result("rearmed", expected)
+        if process.poll() is not None:
+            break
+        time.sleep(0.1)
+    state = _read_json_object(state_path)
+    if _watch_state_matches(state, expected) and _watch_lock_held(state_path):
+        ready_path.unlink(missing_ok=True)
+        return _watch_result("verified", expected)
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    ready_path.unlink(missing_ok=True)
+    detail = (
+        f"watch process exited with status {process.poll()}" if process.poll() is not None else ""
+    )
+    dogfood(
+        expected["ticket"],
+        "error",
+        f"posted action handed off but {expected['phase']} watch re-arm failed: {detail}",
+    )
+    raise RunError(
+        f"The action was posted and handed off, but no live {expected['phase']} watch could be "
+        f"verified for {expected['ticket']} (interval {expected['interval_seconds']:g}s, timeout "
+        f"{expected['timeout_minutes']:g}m)" + (f": {detail}" if detail else ".")
+    )
 
 
 def dogfood(ticket: str, tag: str, text: str) -> None:
@@ -1253,6 +1425,9 @@ def _spawn_monitor(args: argparse.Namespace, issue_id: str) -> tuple[subprocess.
     ]
     if not args.follow:
         command.append("--until-wake")
+    ready_file = getattr(args, "ready_file", None)
+    if ready_file:
+        command.extend(["--ready-file", str(ready_file)])
     if args.pr_number:
         command.extend(["--pr-number", str(args.pr_number)])
     process = subprocess.Popen(
@@ -1317,7 +1492,7 @@ def _recover_langgraph_endpoint(ticket: str, issue: dict, issue_id: str) -> bool
     return True
 
 
-def cmd_watch(args: argparse.Namespace) -> int:
+def _cmd_watch(args: argparse.Namespace) -> int:
     """Exit-on-first-wake watch. Healthy monitors are silent; wakes are one JSON line."""
     ensure_env(args.ticket, langgraph=True, github=True)
     issue = resolve_issue(args.ticket)
@@ -1336,6 +1511,25 @@ def cmd_watch(args: argparse.Namespace) -> int:
         f"watermark {watermark})",
     )
     process, stderr_tail = _spawn_monitor(args, issue_id)
+    ready_file = getattr(args, "ready_file", None)
+    managed_state_file = getattr(args, "managed_state_file", None)
+    if ready_file and managed_state_file:
+        readiness_deadline = time.monotonic() + args.interval + 5
+        ready_path = Path(ready_file)
+        while time.monotonic() < readiness_deadline:
+            if ready_path.exists():
+                state = _read_json_object(Path(managed_state_file)) or {}
+                state.update({"status": "ready", "ready_at": now_iso()})
+                _atomic_write_json(Path(managed_state_file), state)
+                break
+            if process.poll() is not None:
+                raise RunError("wave-monitor exited before completing its live baseline")
+            time.sleep(0.1)
+        else:
+            process.terminate()
+            raise RunError(
+                "wave-monitor did not verify a live baseline before the readiness deadline"
+            )
     deadline = time.monotonic() + timeout_min * 60
     restarts = 0
     buffered = ""
@@ -1412,6 +1606,45 @@ def cmd_watch(args: argparse.Namespace) -> int:
             continue
 
 
+def _managed_watch_payload(args: argparse.Namespace, status: str) -> dict:
+    return {
+        "version": 1,
+        "status": status,
+        "ticket": args.ticket.upper(),
+        "repo": args.repo,
+        "phase": args.phase,
+        "interval_seconds": float(args.interval),
+        "timeout_minutes": watch_timeout_min(args),
+        "pid": os.getpid(),
+        "token": args.managed_token,
+        "updated_at": now_iso(),
+    }
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    state_file = getattr(args, "managed_state_file", None)
+    if not state_file:
+        return _cmd_watch(args)
+    if not getattr(args, "managed_token", None) or not getattr(args, "ready_file", None):
+        raise RunError("managed watch needs state, token, and ready-file arguments")
+    state_path = Path(state_file)
+    lock_path = _watch_lock_path(state_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RunError(f"a watch already owns {lock_path}") from exc
+        _atomic_write_json(state_path, _managed_watch_payload(args, "starting"))
+        try:
+            return _cmd_watch(args)
+        finally:
+            state = _read_json_object(state_path) or _managed_watch_payload(args, "exited")
+            if state.get("token") == args.managed_token:
+                state.update({"status": "exited", "updated_at": now_iso()})
+                _atomic_write_json(state_path, state)
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     ensure_env(args.ticket, langgraph=False, github=False)
     issue = resolve_issue(args.ticket)
@@ -1454,14 +1687,25 @@ def _post_prepared(
     guard_body_hygiene(body)
     guard_placeholders(args.ticket, body, getattr(args, "force", False))
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
+    watch_context = post_watch_context(args.ticket, action, getattr(args, "repo", None))
     final = _post_with_handoff(action, args.ticket, issue["id"], body, thread_id)
+    watch = ensure_post_watch(watch_context)
     dogfood(
         args.ticket,
         "cmd",
         f"{action} posted on {issue['identifier']}; handoff "
         f"status={final.get('thread_status')} runs={len(final.get('run_ids') or [])}: {body[:160]}",
     )
-    print(json.dumps({"identifier": issue["identifier"], "posted": action, "handoff": final}))
+    print(
+        json.dumps(
+            {
+                "identifier": issue["identifier"],
+                "posted": action,
+                "handoff": final,
+                "watch": watch,
+            }
+        )
+    )
     return 0
 
 
@@ -1491,6 +1735,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
     if len(identifiers) > 1:
         guard_bundle_membership(body, identifiers)
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
+    watch_context = post_watch_context(args.ticket, "approval", getattr(args, "repo", None))
     state = set_plan_status(thread_id, "approved", plan_mode=False)
     dogfood(
         args.ticket,
@@ -1511,13 +1756,23 @@ def cmd_approve(args: argparse.Namespace) -> int:
         thread_id,
         plan_context=plan_context,
     )
+    watch = ensure_post_watch(watch_context)
     dogfood(
         args.ticket,
         "cmd",
         f"approval posted on {issue['identifier']}; handoff "
         f"status={final.get('thread_status')} runs={len(final.get('run_ids') or [])}: {body[:160]}",
     )
-    print(json.dumps({"identifier": issue["identifier"], "posted": "approval", "handoff": final}))
+    print(
+        json.dumps(
+            {
+                "identifier": issue["identifier"],
+                "posted": "approval",
+                "handoff": final,
+                "watch": watch,
+            }
+        )
+    )
     return 0
 
 
@@ -1535,6 +1790,7 @@ def cmd_reject(args: argparse.Namespace) -> int:
         args.ticket, body, False if len(identifiers) > 1 else getattr(args, "force", False)
     )
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
+    watch_context = post_watch_context(args.ticket, "rejection", getattr(args, "repo", None))
     # Send the record back to revising, as the dashboard's reject endpoint does.
     # Without this a rejection posted after an approval would leave the plan
     # approved, and the resulting run would arm auto-merge on a rejected plan.
@@ -1557,13 +1813,23 @@ def cmd_reject(args: argparse.Namespace) -> int:
         thread_id,
         plan_context=plan_context,
     )
+    watch = ensure_post_watch(watch_context)
     dogfood(
         args.ticket,
         "cmd",
         f"rejection posted on {issue['identifier']}; handoff "
         f"status={final.get('thread_status')} runs={len(final.get('run_ids') or [])}: {body[:160]}",
     )
-    print(json.dumps({"identifier": issue["identifier"], "posted": "rejection", "handoff": final}))
+    print(
+        json.dumps(
+            {
+                "identifier": issue["identifier"],
+                "posted": "rejection",
+                "handoff": final,
+                "watch": watch,
+            }
+        )
+    )
     return 0
 
 
@@ -1767,10 +2033,13 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--repo", required=True)
     watch.add_argument("--pr-number", type=int)
     watch.add_argument("--phase", choices=sorted(PHASE_TIMEOUT_MINUTES), default="plan")
-    watch.add_argument("--interval", type=float, default=60)
+    watch.add_argument("--interval", type=float, default=WATCH_INTERVAL_SECONDS)
     watch.add_argument("--timeout-min", type=float)
     watch.add_argument("--heartbeat-min", type=float, default=10)
     watch.add_argument("--max-restarts", type=int, default=2)
+    watch.add_argument("--managed-state-file", help=argparse.SUPPRESS)
+    watch.add_argument("--managed-token", help=argparse.SUPPRESS)
+    watch.add_argument("--ready-file", help=argparse.SUPPRESS)
     watch.add_argument("--follow", action="store_true", help="stream wakes instead of exiting")
     watch.set_defaults(func=cmd_watch)
 
@@ -1781,6 +2050,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     approve = sub.add_parser("approve", help="post plan approval (requires --adjudicated)")
     approve.add_argument("--ticket", required=True)
+    approve.add_argument("--repo")
     approve.add_argument("--body-file", required=True)
     approve.add_argument("--adjudicated", action="store_true")
     approve.add_argument("--force", action="store_true")
@@ -1788,18 +2058,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     reject = sub.add_parser("reject", help="post plan rejection with corrections")
     reject.add_argument("--ticket", required=True)
+    reject.add_argument("--repo")
     reject.add_argument("--body-file", required=True)
     reject.add_argument("--force", action="store_true")
     reject.set_defaults(func=cmd_reject)
 
     comment = sub.add_parser("comment", help="post a mid-run message to the agent")
     comment.add_argument("--ticket", required=True)
+    comment.add_argument("--repo")
     comment.add_argument("--body-file", required=True)
     comment.add_argument("--force", action="store_true")
     comment.set_defaults(func=cmd_comment)
 
     nudge = sub.add_parser("nudge", help="post the one allowed stall nudge")
     nudge.add_argument("--ticket", required=True)
+    nudge.add_argument("--repo")
     nudge.add_argument("--minutes", type=int, default=30)
     nudge.set_defaults(func=cmd_nudge)
 

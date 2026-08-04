@@ -1,0 +1,62 @@
+{
+  "session_user_id": "operator",
+  "known_ids": [],
+  "comments": [
+    {
+      "id": "failure-1",
+      "createdAt": "2026-08-03T06:25:39Z",
+      "body": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up.",
+      "user": {
+        "id": "control-plane"
+      }
+    },
+    {
+      "id": "failure-2",
+      "createdAt": "2026-08-03T07:28:28Z",
+      "body": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up. Cause: worker exited before completion.",
+      "user": {
+        "id": "control-plane"
+      }
+    },
+    {
+      "id": "failure-3",
+      "createdAt": "2026-08-03T08:31:43Z",
+      "body": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up. Cause: model call failed.",
+      "user": {
+        "id": "control-plane"
+      }
+    }
+  ],
+  "events": [
+    {
+      "source": "linear",
+      "poll_id": "2026-08-03T06:25:39Z",
+      "kind": "run_error",
+      "comment_id": "failure-1",
+      "author_id": "control-plane",
+      "summary": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up.",
+      "session_user_id": "operator",
+      "reply_text": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up."
+    },
+    {
+      "source": "linear",
+      "poll_id": "2026-08-03T07:28:28Z",
+      "kind": "run_error",
+      "comment_id": "failure-2",
+      "author_id": "control-plane",
+      "summary": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up. Cause: worker exited before completion.",
+      "session_user_id": "operator",
+      "reply_text": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up. Cause: worker exited before completion."
+    },
+    {
+      "source": "linear",
+      "poll_id": "2026-08-03T08:31:43Z",
+      "kind": "run_error",
+      "comment_id": "failure-3",
+      "author_id": "control-plane",
+      "summary": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up. Cause: model call failed.",
+      "session_user_id": "operator",
+      "reply_text": "⚠️ I wasn't able to finish that — the run hit an unexpected error. Send another message and I'll pick it back up. Cause: model call failed."
+    }
+  ]
+}

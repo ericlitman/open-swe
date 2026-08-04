@@ -54,6 +54,20 @@ gh pr merge <number> --repo <owner/repo> --auto --squash --match-head-commit <he
 
 The monitor verifies the unchanged head remains non-draft with auto-merge armed and posts the Linear action log. It never directly merges or bypasses checks.
 
+
+## Armed, green, stalled in Mergify queue
+
+Trigger only from LangGraph metadata `auto_merge_alert_reason=queue_stall_in_queue`. The monitor emits `merge_queue_stalled`; recovery is operator-only because refresh and requeue did not clear the recorded stall.
+
+The known cause is a Mergify branch update producing a new PR head without a required `Open SWE Review` check. Confirm the PR is open, auto-merge remains armed, the reported head is current, required CI is otherwise green, and `main` is quiet. Then retrigger review on that updated head:
+
+```bash
+gh pr ready <number> --repo <owner/repo> --undo
+gh pr ready <number> --repo <owner/repo>
+```
+
+Wait for a fresh `Open SWE Review` check on the unchanged head and let normal queue protections converge. If `main` advances again, the queue may update the head and repeat the condition; do not loop the toggle on an active repository. This procedure is historical fallback once OSWE-246 is deployed, because that change makes review checks materialize on queue branch updates.
+
 ## Stand down
 
 Do not mutate when any evidence gate fails, the head moves, an API call fails, a prior action marker exists, the PR is terminal, or post-action verification fails. Emit `unhandled_condition` with the blocking evidence for operator judgment.
