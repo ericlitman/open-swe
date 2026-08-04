@@ -372,6 +372,8 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
                 if mergify_state == "queued" and metadata.get("auto_merge_phase") == "queued":
                     if metadata.get("auto_merge_head_sha") != head_sha:
                         alert_metadata["auto_merge_phase_since"] = now.isoformat()
+                        if metadata.get("auto_merge_alert_reason"):
+                            alert_metadata["auto_merge_alert_reason"] = ""
                     else:
                         phase_since = _parse_created_at(metadata.get("auto_merge_phase_since"))
                         if phase_since is not None:

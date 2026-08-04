@@ -390,21 +390,20 @@ async def test_auto_merge_does_not_alert_for_recent_queue_dwell(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("seeded_alert_reason", ["", "queue_stall_in_queue"])
 async def test_auto_merge_resets_queue_dwell_when_head_changes(
     monkeypatch: pytest.MonkeyPatch,
+    seeded_alert_reason: str,
 ) -> None:
     old_phase_since = (datetime.now(UTC) - timedelta(minutes=16)).isoformat()
-    threads = _FakeThreads(
-        [
-            [
-                _auto_merge_thread(
-                    auto_merge_phase="queued",
-                    auto_merge_phase_since=old_phase_since,
-                    auto_merge_head_sha="def456",
-                )
-            ]
-        ]
-    )
+    thread_metadata: dict[str, Any] = {
+        "auto_merge_phase": "queued",
+        "auto_merge_phase_since": old_phase_since,
+        "auto_merge_head_sha": "def456",
+    }
+    if seeded_alert_reason:
+        thread_metadata["auto_merge_alert_reason"] = seeded_alert_reason
+    threads = _FakeThreads([[_auto_merge_thread(**thread_metadata)]])
     _patch_auto_merge(
         monkeypatch,
         threads,
@@ -417,7 +416,10 @@ async def test_auto_merge_resets_queue_dwell_when_head_changes(
     await_args = threads.update.await_args
     assert await_args is not None
     written = await_args.kwargs["metadata"]
-    assert "auto_merge_alert_reason" not in written
+    if seeded_alert_reason:
+        assert written["auto_merge_alert_reason"] == ""
+    else:
+        assert "auto_merge_alert_reason" not in written
     assert "auto_merge_alert_at" not in written
     assert written["auto_merge_phase_since"] == written["auto_merge_phase_at"]
     assert written["auto_merge_phase_since"] != old_phase_since
