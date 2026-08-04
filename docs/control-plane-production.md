@@ -290,6 +290,13 @@ be tuned down once the soak confirms headroom; exit *notification* for unplanned
 exits is tracked as a follow-up — launchd KeepAlive plus container restart policies
 already handle restart-on-crash.
 
+## Run-completion webhook
+
+Both `COMPLETION_WEBHOOK_URL` and `RUN_COMPLETE_WEBHOOK_SECRET` must be present in the ops
+env file for run-failure replies. The URL must be non-loopback; on studio2, use the tailnet
+HTTPS hostname with `tailscale serve` mapping `/webhooks` to the API port. A missing pair
+silently disables run-failure replies.
+
 ## Sandbox GitHub tooling (learned from OSWE-202, 2026-07-29)
 
 With `SANDBOX_TYPE=local`, sandboxes execute inside the API container, so the container

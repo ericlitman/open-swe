@@ -486,6 +486,15 @@ CONFIGURED_ADMINS=""                   # e.g. "alice,bob@my-org.com"
 # Defaults to http://localhost:2024 locally; set to your deployment URL in prod.
 LANGGRAPH_URL="http://localhost:2024"
 
+# === Run completion webhook (optional) ===
+# Absolute, non-loopback URL to <your deployment>/webhooks/run-complete. With the secret set,
+# every dispatched run attaches it so failed runs post a reply to their source channel.
+# Relative and loopback URLs are rejected; dispatch disables replies with a startup warning.
+COMPLETION_WEBHOOK_URL=""              # e.g. https://open-swe.example.com/webhooks/run-complete
+# Shared secret appended to the webhook URL as ?token=. The route fails closed and rejects
+# all calls when this is unset.
+RUN_COMPLETE_WEBHOOK_SECRET=""         # Generate with: openssl rand -hex 32
+
 # === Linear (if using Linear trigger) ===
 LINEAR_CLIENT_ID=""                    # OAuth app client ID from step 5
 LINEAR_CLIENT_SECRET=""                # OAuth app client secret from step 5

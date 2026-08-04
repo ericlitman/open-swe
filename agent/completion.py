@@ -17,6 +17,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import re
 from typing import Any
 
 from .review.findings import REVIEWER_THREAD_KIND, open_surfaced_finding_count
@@ -72,7 +73,7 @@ def verify_run_complete_token(token: str | None) -> bool:
     return token is not None and hmac.compare_digest(token, secret)
 
 
-def _failure_text(status: str, dashboard_url: str | None = None) -> str:
+def _failure_text(status: str, dashboard_url: str | None = None, cause: str | None = None) -> str:
     if status == "timeout":
         reason = "timed out"
     elif status == "interrupted":
@@ -83,6 +84,8 @@ def _failure_text(status: str, dashboard_url: str | None = None) -> str:
         f"⚠️ I wasn't able to finish that — the run {reason}. "
         "Send another message and I'll pick it back up."
     )
+    if cause:
+        text += f" Cause: {cause}."
     if dashboard_url:
         text += f" You can view the error in <{dashboard_url}|Open SWE Web>."
     return text
@@ -134,6 +137,28 @@ async def _settle_failed_reviewer_check(thread_id: str, metadata: dict[str, Any]
 
 def _run_value(run: Any, name: str) -> Any:
     return run.get(name) if isinstance(run, dict) else getattr(run, name, None)
+
+
+async def _run_failure_cause(client: Any, thread_id: str, run_id: str) -> str | None:
+    try:
+        payload = await client.runs.join(thread_id, run_id)
+        if not isinstance(payload, dict):
+            return None
+        err = payload.get("__error__")
+        if not isinstance(err, dict):
+            return None
+        error = err.get("error")
+        message = err.get("message")
+        cause = f"{error}: {message}" if error else str(message)
+        return re.sub(r"\s+", " ", cause).strip()[:300]
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "run-complete: could not inspect failure cause for %s/%s",
+            thread_id,
+            run_id,
+            exc_info=True,
+        )
+        return None
 
 
 async def _latest_run_info(client: Any, thread_id: str) -> tuple[str | None, str | None, bool]:
@@ -251,12 +276,17 @@ async def settle_deferred_review_check(
     return True
 
 
-async def _post_failure_reply(thread_id: str, metadata: dict[str, Any], status: str) -> bool:
+async def _post_failure_reply(
+    thread_id: str,
+    metadata: dict[str, Any],
+    status: str,
+    cause: str | None = None,
+) -> bool:
     """Post a failure reply to the run's originating channel. Best-effort."""
     source = metadata.get("source")
     ctx = metadata.get("source_context")
     ctx = ctx if isinstance(ctx, dict) else {}
-    text = _failure_text(status)
+    text = _failure_text(status, cause=cause)
 
     slack_thread = ctx.get("slack_thread")
     if source == "slack" or isinstance(slack_thread, dict):
@@ -264,7 +294,7 @@ async def _post_failure_reply(thread_id: str, metadata: dict[str, Any], status: 
             channel_id = slack_thread.get("channel_id")
             thread_ts = slack_thread.get("thread_ts")
             if channel_id and thread_ts:
-                slack_text = _failure_text(status, dashboard_thread_url(thread_id))
+                slack_text = _failure_text(status, dashboard_thread_url(thread_id), cause)
                 return await post_slack_thread_reply(channel_id, thread_ts, slack_text)
         return False
 
@@ -380,7 +410,8 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
             raise deferred_error
         return {"status": "ignored", "reason": "failure reply already posted for run"}
 
-    posted = await _post_failure_reply(thread_id, metadata, status)
+    cause = await _run_failure_cause(client, thread_id, run_id) if run_id is not None else None
+    posted = await _post_failure_reply(thread_id, metadata, status, cause)
     if not posted:
         if deferred_error is not None:
             raise deferred_error
