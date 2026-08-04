@@ -600,8 +600,7 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
             return {"error": f"adjudication failed: {exc}"}
 
     async def prepublish(state: AdversarialState) -> dict[str, Any]:
-        adjudicated = list(state.get("kept_candidates", []))
-        kept = list(adjudicated)
+        kept = list(state.get("kept_candidates", []))
         triggers, _ = gate_triggers(state.get("diff_text", ""), kept)
         if not triggers:
             return {"gate_triggers": [], "kept_candidates": kept}
@@ -673,11 +672,11 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                 "kept_candidates": kept,
             }
         except Exception as exc:
-            if adjudicated:
+            if kept:
                 logger.exception(
                     "Pre-publish gate failed; publishing adjudicated candidates unchanged"
                 )
-                return {"gate_triggers": triggers, "kept_candidates": adjudicated}
+                return {"gate_triggers": triggers, "kept_candidates": kept}
             return {"error": f"pre-publish gate failed: {exc}", "gate_triggers": triggers}
 
     async def record_publish(state: AdversarialState) -> dict[str, Any]:

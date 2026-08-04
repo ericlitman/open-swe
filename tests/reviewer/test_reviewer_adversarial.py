@@ -1532,6 +1532,159 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
 
 
 @pytest.mark.asyncio
+async def test_late_gate_failure_publishes_latest_consistent_kept_set() -> None:
+    from agent.review.adversarial import (
+        CandidateDraft,
+        FinderOutput,
+        GateOutput,
+        Verdict,
+        VerdictBatch,
+        publication_blocker,
+    )
+
+    stages = [object() for _ in range(6)]
+    stage_iter = iter(stages)
+    gate_calls = 0
+    candidates = [
+        CandidateDraft(
+            file="src/app.py",
+            start_line=line,
+            end_line=line,
+            quoted_line=f"changed_{line}",
+            failure_mode=f"original adjudicated failure {candidate_id}",
+            severity="high",
+            side="RIGHT",
+        )
+        for candidate_id, line in (("c1", 1), ("c2", 2))
+    ]
+
+    async def run_stage(graph: object, *_args: object, **_kwargs: object) -> Any:
+        nonlocal gate_calls
+        prompt = str(_args[0])
+        if graph is stages[2]:
+            return FinderOutput(candidates=candidates)
+        if graph is stages[3]:
+            return FinderOutput(candidates=[])
+        if graph is stages[0]:
+            candidate_ids = ("g1",) if "gate candidate" in prompt else ("c1", "c2")
+            return VerdictBatch(
+                verdicts=[
+                    Verdict(
+                        candidate_id=candidate_id,
+                        verdict="keep-confirmed",
+                        evidence="reachable",
+                    )
+                    for candidate_id in candidate_ids
+                ]
+            )
+        if graph is stages[5]:
+            gate_calls += 1
+            if gate_calls == 1:
+                return GateOutput(
+                    candidates=[
+                        CandidateDraft(
+                            file="src/gate.py",
+                            start_line=9,
+                            end_line=9,
+                            quoted_line="gate_changed",
+                            failure_mode="confirmed gate failure",
+                            severity="medium",
+                            side="RIGHT",
+                        )
+                    ]
+                )
+            raise LookupError("same-file independence failed")
+        raise AssertionError("unexpected stage")
+
+    config = cast(
+        RunnableConfig,
+        {"configurable": {"thread_id": "adversarial-thread", "__is_for_execution__": True}},
+    )
+    with (
+        patch(
+            "agent.reviewer_adversarial._cached_reviewer_team_defaults",
+            new_callable=AsyncMock,
+            return_value=(("team-main", "low"), ("team-sub", "low")),
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_review_profile_name",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_gateway_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "agent.reviewer_adversarial.get_team_fable_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("agent.reviewer_adversarial._make_model_or_defer", return_value=MagicMock()),
+        patch(
+            "agent.reviewer_adversarial._bounded_agent",
+            side_effect=lambda **_kwargs: next(stage_iter),
+        ),
+        patch(
+            "agent.reviewer_adversarial._prepare_context",
+            new_callable=AsyncMock,
+            return_value={
+                "work_dir": "/workspace",
+                "working_dir": "/workspace/repo",
+                "rendered_system_prompt": "prompt",
+                "stage_context": "context",
+                "diff_text": (
+                    "diff --git a/uncovered/major.py b/uncovered/major.py\n"
+                    "--- a/uncovered/major.py\n+++ b/uncovered/major.py\n"
+                    "@@ -1,2 +1,2 @@\n-old1\n-old2\n+new1\n+new2\n"
+                ),
+                "diff_line_set": {"uncovered/major.py": {"RIGHT": {1, 2}, "LEFT": {1, 2}}},
+                "diff_path": "/tmp/review.diff",
+                "pr_title": "change app",
+            },
+        ),
+        patch("agent.reviewer_adversarial._run_stage", side_effect=run_stage),
+        patch(
+            "agent.reviewer_adversarial.agent_tools.add_finding",
+            new_callable=AsyncMock,
+            return_value={"success": True, "finding_id": "f1"},
+        ) as add,
+        patch(
+            "agent.reviewer_adversarial.agent_tools.publish_review",
+            new_callable=AsyncMock,
+            return_value={"success": True, "review_id": 7},
+        ) as publish,
+        patch.object(
+            __import__(
+                "agent.reviewer_adversarial", fromlist=["settle_review_check_on_exit"]
+            ).settle_review_check_on_exit,
+            "aafter_agent",
+            new_callable=AsyncMock,
+        ),
+    ):
+        graph = await get_reviewer_adversarial_agent(config)
+        result = await graph.ainvoke({"messages": []})
+
+    assert result["gate_triggers"] == [
+        "uncovered-major-prefix",
+        "same-file-independence",
+    ]
+    assert [item["candidate_id"] for item in result["kept_candidates"]] == [
+        "c1",
+        "c2",
+        "g1",
+    ]
+    assert result["gate_candidates"] == []
+    assert result["gate_verdicts"] == []
+    assert publication_blocker(cast(Any, result)) is None
+    assert result["publication"]["review_id"] == 7
+    assert gate_calls == 2
+    assert add.await_count == 3
+    publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("has_adjudicated", "metadata", "writes_pending"),
     [
