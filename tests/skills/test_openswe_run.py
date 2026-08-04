@@ -1043,6 +1043,7 @@ def test_start_repo_directive_rejects_missing_or_conflicting_body(body: str, mes
         ("@openswe repo owner/hello- — Execute ABC-1.", "owner/hello"),
         ("@openswe repo owner/hello. — Execute ABC-1.", "owner/hello"),
         ("@openswe   repo owner/hello — Execute ABC-1.", "owner/hello"),
+        ("@openswe\trepo owner/hello — Execute ABC-1.", "owner/hello"),
     ],
 )
 def test_start_repo_guard_matches_authoritative_parser(body: str, declared_repo: str) -> None:
