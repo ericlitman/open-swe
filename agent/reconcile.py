@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,6 +19,7 @@ _MERGIFY_APP_SLUG = "mergify"
 _MERGIFY_PROTECTIONS_CHECK = "Mergify Merge Protections"
 _MERGIFY_QUEUE_CHECK = "Mergify Merge Queue"
 _MERGIFY_CHECK_NAMES = {_MERGIFY_PROTECTIONS_CHECK, _MERGIFY_QUEUE_CHECK}
+_QUEUE_STALL_THRESHOLD_MINUTES = 15
 
 _AUTO_MERGE_QUERY = """
 query AutoMergeReconcile($owner: String!, $repo: String!, $number: Int!) {
@@ -135,8 +137,40 @@ async def _graphql(
     return data
 
 
-async def _update_phase(client: Any, thread_id: str, **metadata: Any) -> None:
-    await client.threads.update(thread_id=thread_id, metadata=metadata)
+async def _update_phase(
+    client: Any,
+    thread_id: str,
+    *,
+    current_metadata: dict[str, Any],
+    phase: str,
+    now: datetime,
+    **metadata: Any,
+) -> None:
+    previous_since = current_metadata.get("auto_merge_phase_since")
+    parsed_since = _parse_created_at(previous_since)
+    phase_since = (
+        previous_since
+        if current_metadata.get("auto_merge_phase") == phase and parsed_since is not None
+        else now.isoformat()
+    )
+    phase_metadata = {
+        "auto_merge_phase": phase,
+        "auto_merge_phase_at": now.isoformat(),
+        "auto_merge_phase_since": phase_since,
+        **metadata,
+    }
+    if phase != "queued" and current_metadata.get("auto_merge_alert_reason"):
+        phase_metadata["auto_merge_alert_reason"] = ""
+    await client.threads.update(thread_id=thread_id, metadata=phase_metadata)
+
+
+def _queue_stall_threshold_minutes() -> int:
+    value = os.environ.get("AUTO_MERGE_QUEUE_STALL_MINUTES")
+    try:
+        threshold = int(value) if value is not None else _QUEUE_STALL_THRESHOLD_MINUTES
+    except (TypeError, ValueError):
+        return _QUEUE_STALL_THRESHOLD_MINUTES
+    return threshold if threshold > 0 else _QUEUE_STALL_THRESHOLD_MINUTES
 
 
 async def _mergify_checks(
@@ -218,6 +252,7 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
         "terminal": 0,
         "backend_unavailable": 0,
         "stale_head": 0,
+        "queue_stalled": 0,
         "errors": 0,
     }
     try:
@@ -272,8 +307,9 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
                     await _update_phase(
                         langgraph,
                         thread_id,
-                        auto_merge_phase=phase,
-                        auto_merge_phase_at=now.isoformat(),
+                        current_metadata=metadata,
+                        phase=phase,
+                        now=now,
                         auto_merge_reconcile=False,
                     )
                     counts[phase] += 1
@@ -294,8 +330,9 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
                     await _update_phase(
                         langgraph,
                         thread_id,
-                        auto_merge_phase="held",
-                        auto_merge_phase_at=now.isoformat(),
+                        current_metadata=metadata,
+                        phase="held",
+                        now=now,
                         auto_merge_head_sha=head_sha,
                     )
                     counts["held"] += 1
@@ -312,8 +349,9 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
                     await _update_phase(
                         langgraph,
                         thread_id,
-                        auto_merge_phase="backend_unavailable",
-                        auto_merge_phase_at=now.isoformat(),
+                        current_metadata=metadata,
+                        phase="backend_unavailable",
+                        now=now,
                         auto_merge_head_sha=head_sha,
                     )
                     counts["backend_unavailable"] += 1
@@ -323,18 +361,45 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
                     await _update_phase(
                         langgraph,
                         thread_id,
-                        auto_merge_phase=mergify_state,
-                        auto_merge_phase_at=now.isoformat(),
+                        current_metadata=metadata,
+                        phase=mergify_state,
+                        now=now,
                         auto_merge_head_sha=head_sha,
                     )
                     counts[mergify_state] += 1
                     continue
+                alert_metadata: dict[str, str] = {}
+                if mergify_state == "queued" and metadata.get("auto_merge_phase") == "queued":
+                    if metadata.get("auto_merge_head_sha") != head_sha:
+                        alert_metadata["auto_merge_phase_since"] = now.isoformat()
+                        if metadata.get("auto_merge_alert_reason"):
+                            alert_metadata["auto_merge_alert_reason"] = ""
+                    else:
+                        phase_since = _parse_created_at(metadata.get("auto_merge_phase_since"))
+                        if phase_since is not None:
+                            dwell_minutes = (now - phase_since).total_seconds() / 60
+                            if dwell_minutes > _queue_stall_threshold_minutes():
+                                alert_metadata = {
+                                    "auto_merge_alert_reason": "queue_stall_in_queue",
+                                    "auto_merge_alert_at": now.isoformat(),
+                                }
+                                counts["queue_stalled"] += 1
+                                logger.warning(
+                                    "Auto-merge reconcile: PR %s/%s#%s stalled in queue for %.1f "
+                                    "minutes",
+                                    owner,
+                                    repo,
+                                    number,
+                                    dwell_minutes,
+                                )
                 await _update_phase(
                     langgraph,
                     thread_id,
-                    auto_merge_phase=mergify_state,
-                    auto_merge_phase_at=now.isoformat(),
+                    current_metadata=metadata,
+                    phase=mergify_state,
+                    now=now,
                     auto_merge_head_sha=head_sha,
+                    **alert_metadata,
                 )
                 counts[mergify_state] += 1
         except Exception:
