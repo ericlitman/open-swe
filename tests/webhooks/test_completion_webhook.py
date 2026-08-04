@@ -39,6 +39,20 @@ class _JoinClient(_FakeClient):
         self.runs = _JoinRuns(payload)
 
 
+class _ListRuns:
+    def __init__(self, runs: list[dict[str, Any]], payload: Any = None) -> None:
+        self.list = AsyncMock(return_value=runs)
+        self.join = AsyncMock(return_value=payload)
+
+
+class _ListClient(_FakeClient):
+    def __init__(
+        self, metadata: dict[str, Any], runs: list[dict[str, Any]], payload: Any = None
+    ) -> None:
+        super().__init__(metadata)
+        self.runs = _ListRuns(runs, payload)
+
+
 def _slack_metadata() -> dict[str, Any]:
     return {
         "source": "slack",
@@ -69,7 +83,10 @@ async def test_error_status_posts_slack_failure_reply(monkeypatch: pytest.Monkey
     assert args[1] == "123.45"
     assert "<https://ui/t1|Open SWE Web>" in args[2]
     assert client.threads.updates == [
-        {"failure_reply_posted_run_id": "run-1", "failure_reply_posted_run_ids": ["run-1"]}
+        {
+            "failure_reply_posted_run_id": "run-1",
+            "failure_reply_posted_run_ids": ["run-1"],
+        }
     ]
 
 
@@ -157,6 +174,15 @@ async def test_run_failure_cause_collapses_whitespace_and_truncates() -> None:
     assert cause is not None
     assert cause == ("Bad Request: detail " + "x" * 400)[:300]
     assert len(cause) == 300
+
+
+@pytest.mark.asyncio
+async def test_run_failure_cause_returns_none_for_empty_error_and_message() -> None:
+    client = _JoinClient({}, {"__error__": {"error": None, "message": None}})
+
+    cause = await completion._run_failure_cause(client, "t1", "run-1")
+
+    assert cause is None
 
 
 @pytest.mark.asyncio
@@ -423,6 +449,377 @@ async def test_later_failed_run_posts_even_if_prior_run_replied(
             "failure_reply_posted_run_ids": ["run-1", "run-2"],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_consecutive_failures_escalate_on_second_distinct_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_client = _FakeClient(_slack_metadata())
+    monkeypatch.setattr(completion, "langgraph_client", lambda: first_client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    first_result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+    )
+
+    assert first_result["status"] == "ok"
+    first_await_args = reply.await_args
+    assert first_await_args is not None
+    first_text = first_await_args.args[2]
+    assert "consecutive runs" not in first_text
+
+    metadata = _slack_metadata()
+    metadata.update(
+        {
+            "failure_reply_posted_run_id": "run-1",
+            "failure_reply_posted_run_ids": ["run-1"],
+        }
+    )
+    second_client = _ListClient(
+        metadata,
+        [
+            {
+                "run_id": "run-2",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:05Z",
+            },
+            {
+                "run_id": "run-1",
+                "status": "timeout",
+                "created_at": "2026-01-01T00:00:04Z",
+            },
+        ],
+        {"__error__": {"error": "BadRequestError", "message": "poisoned context"}},
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: second_client)
+    reply.reset_mock()
+
+    second_result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-2", "status": "error"}
+    )
+
+    assert second_result["status"] == "ok"
+    second_await_args = reply.await_args
+    assert second_await_args is not None
+    second_text = second_await_args.args[2]
+    assert "2 consecutive runs" in second_text
+    assert "Cause: BadRequestError: poisoned context." in second_text
+    assert second_client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-2",
+            "failure_reply_posted_run_ids": ["run-1", "run-2"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_same_run_id_redelivery_remains_deduplicated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = _slack_metadata()
+    metadata["failure_reply_posted_run_ids"] = ["run-1"]
+    client = _FakeClient(metadata)
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+    )
+
+    assert result == {"status": "ignored", "reason": "failure reply already posted for run"}
+    reply.assert_not_called()
+    assert client.threads.updates == []
+
+
+@pytest.mark.asyncio
+async def test_success_between_failures_ends_the_streak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ListClient(
+        _slack_metadata(),
+        [
+            {
+                "run_id": "run-3",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:05Z",
+            },
+            {
+                "run_id": "run-2",
+                "status": "success",
+                "created_at": "2026-01-01T00:00:04Z",
+            },
+            {
+                "run_id": "run-1",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:03Z",
+            },
+        ],
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-3", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    assert "consecutive runs" not in await_args.args[2]
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-3",
+            "failure_reply_posted_run_ids": ["run-3"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_completing_run_below_success_does_not_extend_streak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ListClient(
+        _slack_metadata(),
+        [
+            {
+                "run_id": "run-3",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:05Z",
+            },
+            {
+                "run_id": "run-2",
+                "status": "success",
+                "created_at": "2026-01-01T00:00:04Z",
+            },
+            {
+                "run_id": "run-1",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:03Z",
+            },
+        ],
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    assert "consecutive runs" not in await_args.args[2]
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-1",
+            "failure_reply_posted_run_ids": ["run-1"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_run_is_neutral_in_failure_streak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ListClient(
+        _slack_metadata(),
+        [
+            {
+                "run_id": "run-3",
+                "status": "timeout",
+                "created_at": "2026-01-01T00:00:05Z",
+            },
+            {
+                "run_id": "run-2",
+                "status": "interrupted",
+                "created_at": "2026-01-01T00:00:04Z",
+            },
+            {
+                "run_id": "run-1",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:03Z",
+            },
+        ],
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-3", "status": "timeout"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    assert "2 consecutive runs" in await_args.args[2]
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-3",
+            "failure_reply_posted_run_ids": ["run-3"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_completing_run_with_stale_running_status_counts_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ListClient(
+        _slack_metadata(),
+        [
+            {
+                "run_id": "run-2",
+                "status": "running",
+                "created_at": "2026-01-01T00:00:05Z",
+            },
+            {
+                "run_id": "run-1",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:04Z",
+            },
+        ],
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-2", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    assert "2 consecutive runs" in await_args.args[2]
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-2",
+            "failure_reply_posted_run_ids": ["run-2"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_completing_run_absent_from_history_counts_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ListClient(
+        _slack_metadata(),
+        [
+            {
+                "run_id": "run-1",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:04Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-2", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    assert "2 consecutive runs" in await_args.args[2]
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-2",
+            "failure_reply_posted_run_ids": ["run-2"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_history_failure_falls_back_to_generic_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ListClient(_slack_metadata(), [])
+    client.runs.list.side_effect = RuntimeError("history unavailable")
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    assert "consecutive runs" not in await_args.args[2]
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-1",
+            "failure_reply_posted_run_ids": ["run-1"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_history_is_sorted_before_counting_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ListClient(
+        _slack_metadata(),
+        [
+            {
+                "run_id": "run-1",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:03Z",
+            },
+            {
+                "run_id": "run-3",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:05Z",
+            },
+            {
+                "run_id": "run-2",
+                "status": "success",
+                "created_at": "2026-01-01T00:00:04Z",
+            },
+        ],
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-3", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    assert "consecutive runs" not in await_args.args[2]
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-3",
+            "failure_reply_posted_run_ids": ["run-3"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_success_does_not_write_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeClient(_slack_metadata())
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    assert client.threads.updates == []
 
 
 @pytest.mark.asyncio

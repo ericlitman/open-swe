@@ -91,6 +91,22 @@ def _failure_text(status: str, dashboard_url: str | None = None, cause: str | No
     return text
 
 
+def _dead_thread_text(
+    status: str, streak: int, dashboard_url: str | None = None, cause: str | None = None
+) -> str:
+    reason = "timed out" if status == "timeout" else "hit an unexpected error"
+    text = (
+        f"🛑 This thread has failed {streak} consecutive runs and may be unrecoverable — "
+        f"the latest run {reason}. Reset the thread before sending another message to "
+        "re-dispatch."
+    )
+    if cause:
+        text += f" Cause: {cause}."
+    if dashboard_url:
+        text += f" You can view the error in <{dashboard_url}|Open SWE Web>."
+    return text
+
+
 async def _settle_failed_reviewer_check(thread_id: str, metadata: dict[str, Any]) -> None:
     """Best-effort cleanup for reviewer checks left open by graph failures."""
     if metadata.get("kind") != REVIEWER_THREAD_KIND:
@@ -149,6 +165,8 @@ async def _run_failure_cause(client: Any, thread_id: str, run_id: str) -> str | 
             return None
         error = err.get("error")
         message = err.get("message")
+        if not error and message is None:
+            return None
         cause = f"{error}: {message}" if error else str(message)
         return re.sub(r"\s+", " ", cause).strip()[:300]
     except Exception:  # noqa: BLE001
@@ -159,6 +177,42 @@ async def _run_failure_cause(client: Any, thread_id: str, run_id: str) -> str | 
             exc_info=True,
         )
         return None
+
+
+async def _consecutive_failures(client: Any, thread_id: str, completed_run_id: str | None) -> int:
+    try:
+        runs = await client.runs.list(thread_id, limit=10)
+        ordered_runs = sorted(
+            runs,
+            key=lambda run: _run_value(run, "created_at") or "",
+            reverse=True,
+        )
+        listed_ids = {_run_value(run, "run_id") or _run_value(run, "id") for run in ordered_runs}
+        streak = 0
+        for run in ordered_runs:
+            listed_run_id = _run_value(run, "run_id") or _run_value(run, "id")
+            if completed_run_id is not None and listed_run_id == completed_run_id:
+                streak += 1
+                continue
+
+            status = _run_value(run, "status")
+            status = status.lower() if isinstance(status, str) else None
+            if status in _TERMINAL_FAILURE_STATUSES:
+                streak += 1
+            elif status == "success":
+                break
+
+        if completed_run_id is not None and completed_run_id not in listed_ids:
+            streak += 1
+        return streak
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "run-complete: could not derive consecutive failures for %s/%s",
+            thread_id,
+            completed_run_id,
+            exc_info=True,
+        )
+        return 1
 
 
 async def _latest_run_info(client: Any, thread_id: str) -> tuple[str | None, str | None, bool]:
@@ -281,12 +335,19 @@ async def _post_failure_reply(
     metadata: dict[str, Any],
     status: str,
     cause: str | None = None,
+    streak: int = 0,
 ) -> bool:
     """Post a failure reply to the run's originating channel. Best-effort."""
     source = metadata.get("source")
     ctx = metadata.get("source_context")
     ctx = ctx if isinstance(ctx, dict) else {}
-    text = _failure_text(status, cause=cause)
+
+    def _text(dashboard_url: str | None = None) -> str:
+        if streak >= 2:
+            return _dead_thread_text(status, streak, dashboard_url, cause)
+        return _failure_text(status, dashboard_url, cause)
+
+    text = _text()
 
     slack_thread = ctx.get("slack_thread")
     if source == "slack" or isinstance(slack_thread, dict):
@@ -294,7 +355,7 @@ async def _post_failure_reply(
             channel_id = slack_thread.get("channel_id")
             thread_ts = slack_thread.get("thread_ts")
             if channel_id and thread_ts:
-                slack_text = _failure_text(status, dashboard_thread_url(thread_id), cause)
+                slack_text = _text(dashboard_thread_url(thread_id))
                 return await post_slack_thread_reply(channel_id, thread_ts, slack_text)
         return False
 
@@ -411,16 +472,19 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         return {"status": "ignored", "reason": "failure reply already posted for run"}
 
     cause = await _run_failure_cause(client, thread_id, run_id) if run_id is not None else None
-    posted = await _post_failure_reply(thread_id, metadata, status, cause)
+    streak = await _consecutive_failures(client, thread_id, run_id)
+
+    posted = await _post_failure_reply(thread_id, metadata, status, cause, streak)
     if not posted:
         if deferred_error is not None:
             raise deferred_error
         return {"status": "ignored", "reason": "no reply posted"}
 
+    reply_metadata = _failure_reply_metadata(metadata, run_id)
     try:
         await client.threads.update(
             thread_id=thread_id,
-            metadata=_failure_reply_metadata(metadata, run_id),
+            metadata=reply_metadata,
         )
     except Exception:  # noqa: BLE001
         logger.warning("run-complete: could not flag thread %s", thread_id, exc_info=True)
