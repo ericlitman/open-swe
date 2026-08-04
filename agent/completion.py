@@ -179,6 +179,21 @@ async def _run_failure_cause(client: Any, thread_id: str, run_id: str) -> str | 
         return None
 
 
+async def _run_created_at(client: Any, thread_id: str, run_id: str) -> str | None:
+    try:
+        run = await client.runs.get(thread_id, run_id)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "run-complete: could not inspect run created_at for %s/%s",
+            thread_id,
+            run_id,
+            exc_info=True,
+        )
+        return None
+    created_at = _run_value(run, "created_at")
+    return created_at if isinstance(created_at, str) and created_at else None
+
+
 async def _latest_run_info(client: Any, thread_id: str) -> tuple[str | None, str | None, bool]:
     try:
         runs = await client.runs.list(thread_id, limit=1)
@@ -417,14 +432,23 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
             if isinstance(stored_streak, int) and stored_streak != 0:
                 should_reset = True
                 if run_id is not None:
-                    _, latest_run_id, latest_known = await _latest_run_info(client, thread_id)
-                    if latest_known and latest_run_id is not None and latest_run_id != run_id:
+                    success_created_at = await _run_created_at(client, thread_id, run_id)
+                    failure_created_at = metadata.get("failure_streak_last_run_created_at")
+                    if (
+                        success_created_at is not None
+                        and isinstance(failure_created_at, str)
+                        and success_created_at < failure_created_at
+                    ):
                         should_reset = False
                 if should_reset:
                     try:
                         await client.threads.update(
                             thread_id=thread_id,
-                            metadata={"failure_streak": 0, "failure_streak_last_run_id": None},
+                            metadata={
+                                "failure_streak": 0,
+                                "failure_streak_last_run_id": None,
+                                "failure_streak_last_run_created_at": None,
+                            },
                         )
                     except Exception:  # noqa: BLE001
                         logger.warning(
@@ -464,9 +488,11 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         stored_streak = stored_streak if isinstance(stored_streak, int) else 0
         if run_id != metadata.get("failure_streak_last_run_id"):
             streak = stored_streak + 1
+            run_created_at = await _run_created_at(client, thread_id, run_id)
             streak_update = {
                 "failure_streak": streak,
                 "failure_streak_last_run_id": run_id,
+                "failure_streak_last_run_created_at": run_created_at,
             }
         else:
             streak = stored_streak

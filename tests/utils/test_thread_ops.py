@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -55,10 +56,10 @@ class _StubRuns:
         self.calls.append(("list", {"thread_id": thread_id, "limit": limit}))
         return self._runs[:limit]
 
-    async def cancel(self, thread_id: str, run_id: str) -> None:
+    async def cancel(self, thread_id: str, run_id: str, *, wait: bool = False) -> None:
         if self.call_order is not None:
             self.call_order.append("cancel")
-        self.calls.append(("cancel", (thread_id, run_id)))
+        self.calls.append(("cancel", (thread_id, run_id, wait)))
         if self.cancel_error is not None:
             raise self.cancel_error
 
@@ -168,7 +169,7 @@ async def test_reset_cancels_running_latest_run_before_delete() -> None:
 
     assert runs.calls == [
         ("list", {"thread_id": "tid", "limit": 1}),
-        ("cancel", ("tid", "run-9")),
+        ("cancel", ("tid", "run-9", True)),
     ]
     assert call_order == ["list", "cancel", "delete", "create"]
 
@@ -185,8 +186,29 @@ async def test_reset_continues_when_active_run_cancel_fails() -> None:
     )
 
     assert result["thread_id"] == "tid"
-    assert ("cancel", ("tid", "run-9")) in runs.calls
+    assert ("cancel", ("tid", "run-9", True)) in runs.calls
     assert ("delete", "tid") in threads.calls
+
+
+@pytest.mark.asyncio
+async def test_reset_continues_when_active_run_cancel_times_out() -> None:
+    threads = _StubThreads({"thread_id": "tid", "metadata": {"source": "slack"}})
+    runs = _StubRuns(
+        [{"id": "run-9", "status": "pending"}],
+        cancel_error=asyncio.TimeoutError(),  # noqa: UP041
+    )
+
+    result = await thread_ops.reset_thread_preserving_metadata(
+        "tid", client=_StubClient(threads, runs)
+    )
+
+    assert result["thread_id"] == "tid"
+    assert ("cancel", ("tid", "run-9", True)) in runs.calls
+    assert ("delete", "tid") in threads.calls
+    assert (
+        "create",
+        {"thread_id": "tid", "metadata": {"source": "slack"}},
+    ) in threads.calls
 
 
 @pytest.mark.asyncio

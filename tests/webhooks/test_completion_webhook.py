@@ -39,6 +39,17 @@ class _JoinClient(_FakeClient):
         self.runs = _JoinRuns(payload)
 
 
+class _GetRunRuns:
+    def __init__(self, run: dict[str, Any]) -> None:
+        self.get = AsyncMock(return_value=run)
+
+
+class _GetRunClient(_FakeClient):
+    def __init__(self, metadata: dict[str, Any], run: dict[str, Any]) -> None:
+        super().__init__(metadata)
+        self.runs = _GetRunRuns(run)
+
+
 class _ListRuns:
     def __init__(self, runs: list[dict[str, Any]]) -> None:
         self.list = AsyncMock(return_value=runs)
@@ -85,6 +96,7 @@ async def test_error_status_posts_slack_failure_reply(monkeypatch: pytest.Monkey
             "failure_reply_posted_run_ids": ["run-1"],
             "failure_streak": 1,
             "failure_streak_last_run_id": "run-1",
+            "failure_streak_last_run_created_at": None,
         }
     ]
 
@@ -448,6 +460,7 @@ async def test_later_failed_run_posts_even_if_prior_run_replied(
             "failure_reply_posted_run_ids": ["run-1", "run-2"],
             "failure_streak": 1,
             "failure_streak_last_run_id": "run-2",
+            "failure_streak_last_run_created_at": None,
         }
     ]
 
@@ -503,6 +516,7 @@ async def test_consecutive_failures_escalate_on_second_distinct_run(
             "failure_reply_posted_run_ids": ["run-1", "run-2"],
             "failure_streak": 2,
             "failure_streak_last_run_id": "run-2",
+            "failure_streak_last_run_created_at": None,
         }
     ]
 
@@ -534,61 +548,117 @@ async def test_same_run_id_redelivery_does_not_increment_streak(
 
 
 @pytest.mark.asyncio
-async def test_success_resets_failure_streak(monkeypatch: pytest.MonkeyPatch) -> None:
-    metadata = _slack_metadata()
-    metadata.update({"failure_streak": 3, "failure_streak_last_run_id": "run-2"})
-    client = _FakeClient(metadata)
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-3", "status": "success"}
-    )
-
-    assert result["status"] == "ignored"
-    assert client.threads.updates == [{"failure_streak": 0, "failure_streak_last_run_id": None}]
-
-
-@pytest.mark.asyncio
-async def test_stale_success_for_non_latest_run_does_not_reset_streak(
+async def test_failure_increment_stores_created_at_and_success_reset_clears_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     metadata = _slack_metadata()
-    metadata.update({"failure_streak": 3, "failure_streak_last_run_id": "run-2"})
-    client = _ListClient(metadata, [{"run_id": "run-3", "status": "running"}])
+    client = _GetRunClient(metadata, {"run_id": "run-f", "created_at": "2026-01-01T00:00:05Z"})
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", AsyncMock(return_value=True))
+
+    failed_result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-f", "status": "error"}
+    )
+
+    assert failed_result["status"] == "ok"
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-f",
+            "failure_reply_posted_run_ids": ["run-f"],
+            "failure_streak": 1,
+            "failure_streak_last_run_id": "run-f",
+            "failure_streak_last_run_created_at": "2026-01-01T00:00:05Z",
+        }
+    ]
+
+    metadata.update(client.threads.updates[-1])
+    client.threads.updates.clear()
+    client.runs.get.return_value = {
+        "run_id": "run-s",
+        "created_at": "2026-01-01T00:00:10Z",
+    }
 
     result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-2", "status": "success"}
+        {"thread_id": "t1", "run_id": "run-s", "status": "success"}
     )
 
     assert result["status"] == "ignored"
-    client.runs.list.assert_awaited_once_with("t1", limit=1)
+    assert client.threads.updates == [
+        {
+            "failure_streak": 0,
+            "failure_streak_last_run_id": None,
+            "failure_streak_last_run_created_at": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_success_older_than_counted_failure_does_not_reset_streak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = _slack_metadata()
+    metadata.update(
+        {
+            "failure_streak": 3,
+            "failure_streak_last_run_id": "run-f",
+            "failure_streak_last_run_created_at": "2026-01-01T00:00:10Z",
+        }
+    )
+    client = _GetRunClient(metadata, {"run_id": "run-a", "created_at": "2026-01-01T00:00:05Z"})
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-a", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    client.runs.get.assert_awaited_once_with("t1", "run-a")
     assert client.threads.updates == []
 
 
 @pytest.mark.asyncio
-async def test_success_for_latest_run_resets_streak(monkeypatch: pytest.MonkeyPatch) -> None:
-    metadata = _slack_metadata()
-    metadata.update({"failure_streak": 3, "failure_streak_last_run_id": "run-2"})
-    client = _ListClient(metadata, [{"run_id": "run-3", "status": "success"}])
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-3", "status": "success"}
-    )
-
-    assert result["status"] == "ignored"
-    assert client.threads.updates == [{"failure_streak": 0, "failure_streak_last_run_id": None}]
-
-
-@pytest.mark.asyncio
-async def test_success_reset_fails_open_when_latest_run_unknown(
+async def test_success_newer_than_counted_failure_resets_streak(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     metadata = _slack_metadata()
-    metadata.update({"failure_streak": 3, "failure_streak_last_run_id": "run-2"})
-    client = _ListClient(metadata, [])
-    client.runs.list.side_effect = RuntimeError("runs unavailable")
+    metadata.update(
+        {
+            "failure_streak": 3,
+            "failure_streak_last_run_id": "run-f",
+            "failure_streak_last_run_created_at": "2026-01-01T00:00:05Z",
+        }
+    )
+    client = _GetRunClient(metadata, {"run_id": "run-a", "created_at": "2026-01-01T00:00:10Z"})
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-a", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    assert client.threads.updates == [
+        {
+            "failure_streak": 0,
+            "failure_streak_last_run_id": None,
+            "failure_streak_last_run_created_at": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_success_reset_fails_open_when_created_at_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = _slack_metadata()
+    metadata.update(
+        {
+            "failure_streak": 3,
+            "failure_streak_last_run_id": "run-f",
+            "failure_streak_last_run_created_at": "2026-01-01T00:00:05Z",
+        }
+    )
+    client = _GetRunClient(metadata, {})
+    client.runs.get.side_effect = RuntimeError("run unavailable")
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
 
     result = await completion.handle_run_completion(
@@ -596,7 +666,13 @@ async def test_success_reset_fails_open_when_latest_run_unknown(
     )
 
     assert result["status"] == "ignored"
-    assert client.threads.updates == [{"failure_streak": 0, "failure_streak_last_run_id": None}]
+    assert client.threads.updates == [
+        {
+            "failure_streak": 0,
+            "failure_streak_last_run_id": None,
+            "failure_streak_last_run_created_at": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio

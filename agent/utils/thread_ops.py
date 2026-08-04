@@ -9,6 +9,7 @@ run that's already in flight" path (``thread_api.send_dashboard_message``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -82,7 +83,9 @@ async def reset_thread_preserving_metadata(
             and isinstance(run_id, str)
             and run_id
         ):
-            await active_client.runs.cancel(thread_id, run_id)
+            await asyncio.wait_for(
+                active_client.runs.cancel(thread_id, run_id, wait=True), timeout=30
+            )
     except Exception:  # noqa: BLE001
         logger.debug("Failed to cancel active run before resetting thread %s", thread_id)
 
