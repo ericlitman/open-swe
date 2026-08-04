@@ -522,6 +522,11 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
         return {
             "kind": webhook_common.REVIEWER_THREAD_KIND,
             "review_check_run_id": 42,
+            "review_check_pending_result": {
+                "conclusion": "success",
+                "title": "Found 1 potential issue",
+                "summary": "Open SWE surfaced 1 potential issue.",
+            },
         }
 
     async def fake_get_token_with_expiry(**_kwargs: object) -> tuple[str, str]:
@@ -619,6 +624,9 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     assert "review_check_run_id" not in run_metadata
     settled_check = cast(dict[str, object], captured["settled_check"])
     assert settled_check["expected_check_run_id"] == 42
+    assert settled_check["conclusion"] == "success"
+    assert settled_check["title"] == "Found 1 potential issue"
+    assert settled_check["summary"] == "Open SWE surfaced 1 potential issue."
     assert captured["graph"] == "reviewer"
     assert captured["selector"] == {
         "re_review": True,

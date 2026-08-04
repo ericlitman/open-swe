@@ -6,12 +6,12 @@ object (``common.X``) so tests that monkeypatch them keep working.
 
 import re
 import uuid
-from typing import Any
+from typing import Any, cast, get_args
 
 from ..dashboard.autofix_state import set_pr_autofix_disabled
 from ..review.findings import FindingInteraction, ReviewerPRMeta, ReviewerSlackThread
 from ..review.publish import settle_review_check_run
-from ..utils.github_checks import incomplete_review_check_result
+from ..utils.github_checks import CheckConclusion, incomplete_review_check_result
 from ..utils.github_comments import GitHubAuthError
 from ..utils.slack import GitHubPrRef
 from . import common
@@ -42,7 +42,13 @@ async def _settle_review_check_before_finding_reply(
     deferred = metadata.get("review_check_deferred_result")
     if isinstance(deferred, dict) and deferred.get("review_check_run_id") == check_run_id:
         return
-    conclusion, title, summary = incomplete_review_check_result()
+    pending = metadata.get("review_check_pending_result")
+    if isinstance(pending, dict) and pending.get("conclusion") in get_args(CheckConclusion):
+        conclusion = cast(CheckConclusion, pending["conclusion"])
+        title = str(pending.get("title") or "Review completed")
+        summary = str(pending.get("summary") or "")
+    else:
+        conclusion, title, summary = incomplete_review_check_result()
     try:
         await settle_review_check_run(
             thread_id=thread_id,
