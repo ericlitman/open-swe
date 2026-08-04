@@ -152,6 +152,17 @@ async def test_agent_configures_sol_to_terra_max_fallback(
 
 
 @pytest.mark.asyncio
+async def test_agent_includes_context_overflow_promotion_middleware() -> None:
+    captured = await _capture_create_deep_agent_kwargs()
+    middleware = captured["middleware"]
+    assert isinstance(middleware, list)
+    names = [type(item).__name__ for item in middleware]
+
+    assert names.count("ContextOverflowPromotionMiddleware") == 1
+    assert names.index("ToolErrorMiddleware") < names.index("ContextOverflowPromotionMiddleware")
+
+
+@pytest.mark.asyncio
 async def test_agent_is_built_with_a_backend_for_eviction_and_summarization() -> None:
     captured = await _capture_create_deep_agent_kwargs()
     # The backend is what enables deepagents' auto-wired FilesystemMiddleware

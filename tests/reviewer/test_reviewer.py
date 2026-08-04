@@ -261,6 +261,41 @@ async def test_reviewer_resolves_app_installation_token_at_run_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reviewer_includes_context_overflow_promotion_middleware() -> None:
+    config: RunnableConfig = {
+        "configurable": {
+            "__is_for_execution__": True,
+            "thread_id": "reviewer-context-overflow",
+            "repo": {"owner": "acme", "name": "repo"},
+            "source": "slack",
+            "review_requested": True,
+        },
+        "metadata": {},
+    }
+
+    with (
+        patch(
+            "agent.reviewer.ensure_sandbox_for_thread",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
+        ),
+        patch(
+            "agent.reviewer.aresolve_sandbox_work_dir",
+            new_callable=AsyncMock,
+            return_value="/workspace",
+        ),
+        patch("agent.reviewer.make_model", return_value=MagicMock()),
+        patch("agent.reviewer.create_deep_agent", return_value=_DummyAgent()) as create_agent,
+    ):
+        await reviewer.get_reviewer_agent(config)
+
+    middleware = create_agent.call_args.kwargs["middleware"]
+    names = [type(item).__name__ for item in middleware]
+    assert names.count("ContextOverflowPromotionMiddleware") == 1
+    assert names.index("ToolErrorMiddleware") < names.index("ContextOverflowPromotionMiddleware")
+
+
+@pytest.mark.asyncio
 async def test_reviewer_reuses_app_token_for_sandbox_proxy() -> None:
     config: RunnableConfig = {
         "configurable": {
