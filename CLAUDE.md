@@ -76,22 +76,23 @@ The main stack in `agent/server.py:get_agent` is wired in this order:
 3. `SanitizeToolInputsMiddleware`.
 4. `ModelCallLimitMiddleware` with `exit_behavior="end"`.
 5. `ToolErrorMiddleware`.
-6. `SubdirAgentsReadMiddleware` appends applicable ancestor `AGENTS.md` instructions to file reads.
-7. `ToolRetryMiddleware` retries the `task` tool only.
-8. `ToolArtifactMiddleware` handles oversized tool outputs/artifacts.
-9. `PullRequestCreationGuardMiddleware` blocks shell/API fallbacks that would bypass attributed `open_pull_request` creation.
-10. `SourceCompletionGuardMiddleware` records when a successful PR open was not followed by a source-channel reply; it does not open a PR or post the reply itself.
-11. `refresh_github_proxy_before_model`.
-12. `check_message_queue_before_model` injects queued dashboard/source messages and pending review auto-fix events.
-13. `SlackAssistantStatusMiddleware`.
-14. `TimeoutWrapupMiddleware`.
-15. `notify_step_limit_reached`.
-16. Optional `ModelFallbackMiddleware`.
-17. `PlanModeMiddleware` (always installed and state-aware; its model/tool restrictions are conditional).
-18. `SanitizeFireworksMessagesMiddleware`.
-19. `SanitizeThinkingBlocksMiddleware`.
+6. `ContextOverflowPromotionMiddleware` re-raises unrecognized provider context-overflow 400s as `ContextOverflowError` so the deepagents summarization fallback compacts and retries.
+7. `SubdirAgentsReadMiddleware` appends applicable ancestor `AGENTS.md` instructions to file reads.
+8. `ToolRetryMiddleware` retries the `task` tool only.
+9. `ToolArtifactMiddleware` handles oversized tool outputs/artifacts.
+10. `PullRequestCreationGuardMiddleware` blocks shell/API fallbacks that would bypass attributed `open_pull_request` creation.
+11. `SourceCompletionGuardMiddleware` records when a successful PR open was not followed by a source-channel reply; it does not open a PR or post the reply itself.
+12. `refresh_github_proxy_before_model`.
+13. `check_message_queue_before_model` injects queued dashboard/source messages and pending review auto-fix events.
+14. `SlackAssistantStatusMiddleware`.
+15. `TimeoutWrapupMiddleware`.
+16. `notify_step_limit_reached`.
+17. Optional `ModelFallbackMiddleware`.
+18. `PlanModeMiddleware` (always installed and state-aware; its model/tool restrictions are conditional).
+19. `SanitizeFireworksMessagesMiddleware`.
+20. `SanitizeThinkingBlocksMiddleware`.
 
-The stock reviewer stack in `agent/reviewer.py` is: `PrepareReviewerRunMiddleware`, `SanitizeToolInputsMiddleware`, `ModelCallLimitMiddleware`, `ToolErrorMiddleware`, `refresh_github_proxy_before_model`, `check_message_queue_before_model`, `SlackAssistantStatusMiddleware`, `TimeoutWrapupMiddleware`, optional profile-driven `ExcludeToolsMiddleware`, `SanitizeFireworksMessagesMiddleware`, `SanitizeThinkingBlocksMiddleware`, `RepairOrphanedToolCallsMiddleware`, and `settle_review_check_on_exit`.
+The stock reviewer stack in `agent/reviewer.py` is: `PrepareReviewerRunMiddleware`, `SanitizeToolInputsMiddleware`, `ModelCallLimitMiddleware`, `ToolErrorMiddleware`, `ContextOverflowPromotionMiddleware`, `refresh_github_proxy_before_model`, `check_message_queue_before_model`, `SlackAssistantStatusMiddleware`, `TimeoutWrapupMiddleware`, optional profile-driven `ExcludeToolsMiddleware`, `SanitizeFireworksMessagesMiddleware`, `SanitizeThinkingBlocksMiddleware`, `RepairOrphanedToolCallsMiddleware`, and `settle_review_check_on_exit`.
 
 No after-agent middleware creates a PR. The model must commit, push, call `open_pull_request`, and notify the source. Auto-merge eligibility is evaluated during run preparation and PR creation; `open_pull_request` records eligible intent, while scheduler reconciliation observes Mergify state. The PR creation guard only prevents unattributed fallback creation paths.
 
