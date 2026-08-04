@@ -2506,6 +2506,8 @@ def test_post_watch_context_uses_phase_defaults(
         "interval_seconds": 60.0,
         "timeout_minutes": timeout,
         "state_path": str(state_path),
+        "output_path": str(tmp_path / "watch-output.jsonl"),
+        "error_path": str(tmp_path / "watch-error.log"),
     }
 
 
@@ -2517,6 +2519,8 @@ def _expected_watch(tmp_path: Path) -> dict[str, object]:
         "interval_seconds": 60.0,
         "timeout_minutes": 90.0,
         "state_path": str(tmp_path / "watch.json"),
+        "output_path": str(tmp_path / "watch-output.jsonl"),
+        "error_path": str(tmp_path / "watch-error.log"),
     }
 
 
@@ -2541,8 +2545,9 @@ def test_post_action_verifies_matching_live_watch(
     }
 
 
-def test_post_action_rearms_and_reports_watch_parameters(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("tty", [False, True])
+def test_post_action_rearm_stream_redirection_is_tty_conditional(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tty: bool
 ) -> None:
     expected = _expected_watch(tmp_path)
     state = {**expected, "status": "ready", "token": "token-1"}
@@ -2563,6 +2568,8 @@ def test_post_action_rearms_and_reports_watch_parameters(
         spawned.append(kwargs)
         return Process()
 
+    monkeypatch.setattr(run.sys.stdout, "isatty", lambda: tty, raising=False)
+    monkeypatch.setattr(run.sys.stderr, "isatty", lambda: tty, raising=False)
     monkeypatch.setattr(run.subprocess, "Popen", popen)
     monkeypatch.setattr(run.time, "monotonic", lambda: 0.0)
 
@@ -2572,14 +2579,27 @@ def test_post_action_rearms_and_reports_watch_parameters(
         "interval_seconds": 60.0,
         "timeout_minutes": 90.0,
     }
-    assert "stdout" not in spawned[0]
-    assert "stderr" not in spawned[0]
+    stdout = spawned[0]["stdout"]
+    stderr = spawned[0]["stderr"]
+    if tty:
+        assert stdout is None
+        assert stderr is None
+    else:
+        assert isinstance(stdout, io.TextIOWrapper)
+        assert isinstance(stderr, io.TextIOWrapper)
+        assert stdout.name == expected["output_path"]
+        assert stderr.name == expected["error_path"]
+        assert stdout.closed is True
+        assert stderr.closed is True
 
 
 def test_post_action_fails_closed_when_watch_exits_before_ready(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     expected = _expected_watch(tmp_path)
+    error_path = expected["error_path"]
+    assert isinstance(error_path, str)
+    Path(error_path).write_text("stale error from a previous arm\n")
 
     class Process:
         pid = 42
@@ -2587,9 +2607,15 @@ def test_post_action_fails_closed_when_watch_exits_before_ready(
         def poll(self) -> int:
             return 1
 
+    def popen(*args, **kwargs):
+        kwargs["stderr"].write("latest error\n\n")
+        kwargs["stderr"].flush()
+        return Process()
+
+    monkeypatch.setattr(run.sys.stderr, "isatty", lambda: False, raising=False)
     monkeypatch.setattr(run, "_watch_lock_held", lambda path: False)
     monkeypatch.setattr(run, "_read_json_object", lambda path: None)
-    monkeypatch.setattr(run.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(run.subprocess, "Popen", popen)
     monkeypatch.setattr(run, "dogfood", lambda *args, **kwargs: None)
 
     with pytest.raises(run.RunError) as raised:
@@ -2599,6 +2625,8 @@ def test_post_action_fails_closed_when_watch_exits_before_ready(
     assert "action was posted and handed off" in message
     assert "no live delivery watch could be verified" in message
     assert "interval 60s, timeout 90m" in message
+    assert "watch process exited with status 1; last stderr: latest error" in message
+    assert "stale error from a previous arm" not in message
 
 
 def test_posted_comment_propagates_unwatched_failure_after_handoff(

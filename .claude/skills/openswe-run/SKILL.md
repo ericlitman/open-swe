@@ -203,7 +203,7 @@ A Linear comment on the issue lands in the running agent's mid-run queue:
 as `start`, then verify or re-arm a background watch before returning success. Approval, comment,
 and nudge use the delivery phase; rejection uses the plan phase. A matching active watch is
 reported as `verified`; a replacement is reported as `rearmed`, with its interval and timeout.
-The managed watch inherits the posting terminal, so later wake JSON remains visible to the supervising caller. Pass `--repo owner/repo` when continuing a run without its original local dogfood log; otherwise the repository is recovered from the anchored dispatch record.
+The managed watch inherits each posting stream only when it is a TTY; non-TTY wake output and errors are retained in sidecar files beside the run log so piped or captured callers see EOF promptly. Pass `--repo owner/repo` when continuing a run without its original local dogfood log; otherwise the repository is recovered from the anchored dispatch record.
 
 Stall rule: a liveness wake (`run_stalled`, threshold 30 minutes) gets **one** nudge —
 `scripts/openswe-run nudge --ticket OSWE-123 --minutes 30` —
