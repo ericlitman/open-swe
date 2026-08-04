@@ -59,13 +59,32 @@ async def reset_thread_preserving_metadata(
     preserved: dict[str, Any] = {}
     dropped: list[str] = []
     for key, value in metadata.items():
-        if key.startswith("failure_reply_posted") or key in {
+        if key in {
             "failure_streak",
             "failure_streak_last_run_id",
-        }:
+        } or key.startswith("latest_run_"):
             dropped.append(key)
         else:
             preserved[key] = value
+
+    try:
+        runs = await active_client.runs.list(thread_id, limit=1)
+        latest = runs[0] if runs else None
+        if isinstance(latest, dict):
+            status = latest.get("status")
+            run_id = latest.get("run_id") or latest.get("id")
+        else:
+            status = getattr(latest, "status", None)
+            run_id = getattr(latest, "run_id", None) or getattr(latest, "id", None)
+        if (
+            isinstance(status, str)
+            and status.lower() in {"pending", "running"}
+            and isinstance(run_id, str)
+            and run_id
+        ):
+            await active_client.runs.cancel(thread_id, run_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to cancel active run before resetting thread %s", thread_id)
 
     await active_client.threads.delete(thread_id)
     await active_client.threads.create(thread_id=thread_id, metadata=preserved)

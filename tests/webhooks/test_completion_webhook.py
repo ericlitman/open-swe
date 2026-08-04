@@ -39,6 +39,17 @@ class _JoinClient(_FakeClient):
         self.runs = _JoinRuns(payload)
 
 
+class _ListRuns:
+    def __init__(self, runs: list[dict[str, Any]]) -> None:
+        self.list = AsyncMock(return_value=runs)
+
+
+class _ListClient(_FakeClient):
+    def __init__(self, metadata: dict[str, Any], runs: list[dict[str, Any]]) -> None:
+        super().__init__(metadata)
+        self.runs = _ListRuns(runs)
+
+
 def _slack_metadata() -> dict[str, Any]:
     return {
         "source": "slack",
@@ -527,6 +538,57 @@ async def test_success_resets_failure_streak(monkeypatch: pytest.MonkeyPatch) ->
     metadata = _slack_metadata()
     metadata.update({"failure_streak": 3, "failure_streak_last_run_id": "run-2"})
     client = _FakeClient(metadata)
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-3", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    assert client.threads.updates == [{"failure_streak": 0, "failure_streak_last_run_id": None}]
+
+
+@pytest.mark.asyncio
+async def test_stale_success_for_non_latest_run_does_not_reset_streak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = _slack_metadata()
+    metadata.update({"failure_streak": 3, "failure_streak_last_run_id": "run-2"})
+    client = _ListClient(metadata, [{"run_id": "run-3", "status": "running"}])
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-2", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    client.runs.list.assert_awaited_once_with("t1", limit=1)
+    assert client.threads.updates == []
+
+
+@pytest.mark.asyncio
+async def test_success_for_latest_run_resets_streak(monkeypatch: pytest.MonkeyPatch) -> None:
+    metadata = _slack_metadata()
+    metadata.update({"failure_streak": 3, "failure_streak_last_run_id": "run-2"})
+    client = _ListClient(metadata, [{"run_id": "run-3", "status": "success"}])
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-3", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    assert client.threads.updates == [{"failure_streak": 0, "failure_streak_last_run_id": None}]
+
+
+@pytest.mark.asyncio
+async def test_success_reset_fails_open_when_latest_run_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = _slack_metadata()
+    metadata.update({"failure_streak": 3, "failure_streak_last_run_id": "run-2"})
+    client = _ListClient(metadata, [])
+    client.runs.list.side_effect = RuntimeError("runs unavailable")
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
 
     result = await completion.handle_run_completion(

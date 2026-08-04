@@ -8,9 +8,16 @@ from agent.utils import thread_ops
 
 
 class _StubThreads:
-    def __init__(self, thread: dict[str, Any] | None = None, *, missing: bool = False) -> None:
+    def __init__(
+        self,
+        thread: dict[str, Any] | None = None,
+        *,
+        missing: bool = False,
+        call_order: list[str] | None = None,
+    ) -> None:
         self.thread = thread
         self.missing = missing
+        self.call_order = call_order
         self.calls: list[tuple[str, Any]] = []
 
     async def get(self, thread_id: str) -> dict[str, Any] | None:
@@ -19,15 +26,47 @@ class _StubThreads:
         return self.thread
 
     async def delete(self, thread_id: str) -> None:
+        if self.call_order is not None:
+            self.call_order.append("delete")
         self.calls.append(("delete", thread_id))
 
     async def create(self, *, thread_id: str, metadata: dict[str, Any]) -> None:
+        if self.call_order is not None:
+            self.call_order.append("create")
         self.calls.append(("create", {"thread_id": thread_id, "metadata": metadata}))
 
 
+class _StubRuns:
+    def __init__(
+        self,
+        runs: list[dict[str, Any]] | None = None,
+        *,
+        cancel_error: Exception | None = None,
+        call_order: list[str] | None = None,
+    ) -> None:
+        self._runs = runs or []
+        self.cancel_error = cancel_error
+        self.call_order = call_order
+        self.calls: list[tuple[str, Any]] = []
+
+    async def list(self, thread_id: str, *, limit: int) -> list[dict[str, Any]]:
+        if self.call_order is not None:
+            self.call_order.append("list")
+        self.calls.append(("list", {"thread_id": thread_id, "limit": limit}))
+        return self._runs[:limit]
+
+    async def cancel(self, thread_id: str, run_id: str) -> None:
+        if self.call_order is not None:
+            self.call_order.append("cancel")
+        self.calls.append(("cancel", (thread_id, run_id)))
+        if self.cancel_error is not None:
+            raise self.cancel_error
+
+
 class _StubClient:
-    def __init__(self, threads: _StubThreads) -> None:
+    def __init__(self, threads: _StubThreads, runs: _StubRuns | None = None) -> None:
         self.threads = threads
+        self.runs = runs or _StubRuns()
 
 
 @pytest.mark.asyncio
@@ -41,6 +80,7 @@ async def test_reset_thread_preserves_metadata_and_drops_failure_tracking() -> N
         "failure_reply_posted_run_ids": ["run-1", "run-2"],
         "failure_streak": 2,
         "failure_streak_last_run_id": "run-2",
+        "latest_run_status": "running",
     }
     threads = _StubThreads({"thread_id": "tid", "metadata": metadata})
 
@@ -50,22 +90,114 @@ async def test_reset_thread_preserves_metadata_and_drops_failure_tracking() -> N
         "source": "slack",
         "source_context": {"slack_thread": {"channel_id": "C1"}},
         "plan": {"status": "approved"},
+        "failure_reply_posted": True,
+        "failure_reply_posted_run_id": "run-2",
+        "failure_reply_posted_run_ids": ["run-1", "run-2"],
     }
     assert result == {
         "thread_id": "tid",
-        "preserved_keys": ["plan", "source", "source_context"],
-        "dropped_keys": [
+        "preserved_keys": [
             "failure_reply_posted",
             "failure_reply_posted_run_id",
             "failure_reply_posted_run_ids",
+            "plan",
+            "source",
+            "source_context",
+        ],
+        "dropped_keys": [
             "failure_streak",
             "failure_streak_last_run_id",
+            "latest_run_status",
         ],
     }
     assert threads.calls == [
         ("delete", "tid"),
         ("create", {"thread_id": "tid", "metadata": preserved}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_reset_thread_preserves_failure_reply_dedupe_and_drops_run_status_keys() -> None:
+    metadata = {
+        "source": "slack",
+        "failure_reply_posted": True,
+        "failure_reply_posted_run_id": "run-2",
+        "failure_reply_posted_run_ids": ["run-1", "run-2"],
+        "failure_streak": 2,
+        "failure_streak_last_run_id": "run-2",
+        "latest_run_id": "run-2",
+        "latest_run_status": "running",
+    }
+    threads = _StubThreads({"thread_id": "tid", "metadata": metadata})
+
+    result = await thread_ops.reset_thread_preserving_metadata("tid", client=_StubClient(threads))
+
+    preserved = {
+        "source": "slack",
+        "failure_reply_posted": True,
+        "failure_reply_posted_run_id": "run-2",
+        "failure_reply_posted_run_ids": ["run-1", "run-2"],
+    }
+    assert result == {
+        "thread_id": "tid",
+        "preserved_keys": [
+            "failure_reply_posted",
+            "failure_reply_posted_run_id",
+            "failure_reply_posted_run_ids",
+            "source",
+        ],
+        "dropped_keys": [
+            "failure_streak",
+            "failure_streak_last_run_id",
+            "latest_run_id",
+            "latest_run_status",
+        ],
+    }
+    assert threads.calls[-1] == ("create", {"thread_id": "tid", "metadata": preserved})
+
+
+@pytest.mark.asyncio
+async def test_reset_cancels_running_latest_run_before_delete() -> None:
+    call_order: list[str] = []
+    threads = _StubThreads(
+        {"thread_id": "tid", "metadata": {"source": "slack"}}, call_order=call_order
+    )
+    runs = _StubRuns([{"run_id": "run-9", "status": "running"}], call_order=call_order)
+
+    await thread_ops.reset_thread_preserving_metadata("tid", client=_StubClient(threads, runs))
+
+    assert runs.calls == [
+        ("list", {"thread_id": "tid", "limit": 1}),
+        ("cancel", ("tid", "run-9")),
+    ]
+    assert call_order == ["list", "cancel", "delete", "create"]
+
+
+@pytest.mark.asyncio
+async def test_reset_continues_when_active_run_cancel_fails() -> None:
+    threads = _StubThreads({"thread_id": "tid", "metadata": {"source": "slack"}})
+    runs = _StubRuns(
+        [{"id": "run-9", "status": "pending"}], cancel_error=RuntimeError("cancel failed")
+    )
+
+    result = await thread_ops.reset_thread_preserving_metadata(
+        "tid", client=_StubClient(threads, runs)
+    )
+
+    assert result["thread_id"] == "tid"
+    assert ("cancel", ("tid", "run-9")) in runs.calls
+    assert ("delete", "tid") in threads.calls
+
+
+@pytest.mark.asyncio
+async def test_reset_does_not_cancel_finished_latest_run() -> None:
+    threads = _StubThreads({"thread_id": "tid", "metadata": {"source": "slack"}})
+    runs = _StubRuns([{"run_id": "run-9", "status": "success"}])
+
+    await thread_ops.reset_thread_preserving_metadata("tid", client=_StubClient(threads, runs))
+
+    assert runs.calls == [("list", {"thread_id": "tid", "limit": 1})]
+    assert ("delete", "tid") in threads.calls
 
 
 @pytest.mark.asyncio

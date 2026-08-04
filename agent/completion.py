@@ -415,17 +415,23 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         if status == "success":
             stored_streak = metadata.get("failure_streak")
             if isinstance(stored_streak, int) and stored_streak != 0:
-                try:
-                    await client.threads.update(
-                        thread_id=thread_id,
-                        metadata={"failure_streak": 0, "failure_streak_last_run_id": None},
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "run-complete: could not reset failure streak for %s",
-                        thread_id,
-                        exc_info=True,
-                    )
+                should_reset = True
+                if run_id is not None:
+                    _, latest_run_id, latest_known = await _latest_run_info(client, thread_id)
+                    if latest_known and latest_run_id is not None and latest_run_id != run_id:
+                        should_reset = False
+                if should_reset:
+                    try:
+                        await client.threads.update(
+                            thread_id=thread_id,
+                            metadata={"failure_streak": 0, "failure_streak_last_run_id": None},
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "run-complete: could not reset failure streak for %s",
+                            thread_id,
+                            exc_info=True,
+                        )
         if deferred_error is not None:
             raise deferred_error
         return {
