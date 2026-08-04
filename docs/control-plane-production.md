@@ -143,12 +143,15 @@ fi
 ```
 
 Copy [deploy/compose.yaml](../deploy/compose.yaml) to `"$OPS_DIR/compose.yaml"` and pin
-the ops copy's host specifics: set `env_file` to the absolute `$CURRENT/.env` path and
-set the api service's `image:` to the tag you build below (the repo copy stays
-parameterized; the live studio2 copy pins `open-swe-cp-api:7bda79c2`). Build the image
-once, from the rendered Dockerfile, with the same tag the compose file names —
-`open-swe-control-plane-api:local` is the default the repo compose and
-`make production-image` agree on:
+the ops copy's host specifics: set `env_file` to the absolute `$CURRENT/.env` path. The
+api service's `image:` stays `open-swe-control-plane-api:local` — since the image-attested
+release flow (studio2-ops PR #15, 2026-08-04), `release-build <sha>` itself renders the
+Dockerfile from the release's venv and builds the per-sha tag `open-swe-cp-api:<sha>`,
+and `release-activate` refuses a missing sha image, retags it to `:local` immediately
+before the service kickstarts, and asserts the running container's digest matches after
+health. Superseded: earlier revisions of this document had the ops compose pin a per-sha
+tag directly and had the operator build the image manually with the commands below — the
+manual form remains only for the initial cutover on a host without studio2-ops:
 
 ```bash
 cd "$CURRENT" && .venv/bin/langgraph dockerfile "$OPS_DIR/generated.Dockerfile"
