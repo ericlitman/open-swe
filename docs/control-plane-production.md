@@ -143,12 +143,20 @@ fi
 ```
 
 Copy [deploy/compose.yaml](../deploy/compose.yaml) to `"$OPS_DIR/compose.yaml"` and pin
-the ops copy's host specifics: set `env_file` to the absolute `$CURRENT/.env` path and
-set the api service's `image:` to the tag you build below (the repo copy stays
-parameterized; the live studio2 copy pins `open-swe-cp-api:7bda79c2`). Build the image
-once, from the rendered Dockerfile, with the same tag the compose file names —
-`open-swe-control-plane-api:local` is the default the repo compose and
-`make production-image` agree on:
+the ops copy's host specifics: set `env_file` to the absolute `$CURRENT/.env` path. The
+api service's `image:` stays `open-swe-control-plane-api:local` — since the image-attested
+release flow (studio2-ops PR #15, 2026-08-04), `release-build <sha>` itself renders the
+Dockerfile from the release's venv and builds the per-sha tag `open-swe-cp-api:<sha>`,
+and `release-activate` refuses a missing sha image, retags it to `:local` immediately
+before the service kickstarts, and asserts the running container's digest matches after
+health. That supersedes the per-sha compose pin earlier revisions of this document
+described — but only for post-cutover releases: the initial cutover's port-2030 staging
+step below starts Compose before any `release-activate` has run, so `:local` does not
+exist yet on any host, managed or not. For that first staging pass, either run the manual
+build below (it tags `:local` directly) or, on a studio2-ops-managed host that already
+ran `release-build <sha>`, retag its attested image explicitly — in the service user's
+Docker context, since the Colima daemon and the per-sha image belong to `_openswectl`:
+`sudo -n -u _openswectl env HOME="$SERVICE_HOME" PATH="$PATH" docker tag open-swe-cp-api:<sha> open-swe-control-plane-api:local`.
 
 ```bash
 cd "$CURRENT" && .venv/bin/langgraph dockerfile "$OPS_DIR/generated.Dockerfile"
