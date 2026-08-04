@@ -115,12 +115,13 @@ The first sample suppresses historical transitions; persistent terminal, conflic
 - `run_stalled`
 - `review_absent`
 - `merge_conflict`
+- `merge_queue_stalled`
 - `terminal_merged`
 - `terminal_closed`
 - `terminal_run_error`
 - `unhandled_condition`
 
-`pr_opened` and `review_complete` stay quiet when GitHub reports auto-merge already armed. Historical PR creation and completed reviews stay quiet on restart, while an already-conflicted PR and an open PR with neither a published Open SWE review nor an in-progress or queued current-head `Open SWE Review` check after `--review-absent-seconds` (default 900) wake immediately. Draft review-absence summaries include the ready-for-review recovery hint. Acknowledgements, normal progress, successful recoveries, queue entry/position changes, and explicit `@openswe` operator actions stay quiet. Plan, blocker, and ticket-matching terminal closeout comments remain actionable regardless of Linear author identity. `--known-ids-file` resumes comment progress across restarts, and `--until-wake` exits successfully after persisting the first emitted wake.
+`pr_opened` and `review_complete` stay quiet when GitHub reports auto-merge already armed. Historical PR creation and completed reviews stay quiet on restart, while an already-conflicted PR and an open PR with neither a published Open SWE review nor an in-progress or queued current-head `Open SWE Review` check after `--review-absent-seconds` (default 900) wake immediately. Persistent review absence is watermarked by PR head so an immediate re-watch does not repeat identical evidence. Thread metadata carrying `auto_merge_alert_reason=queue_stall_in_queue` wakes as `merge_queue_stalled`; it is alert-only and follows the recovery runbook. Draft review-absence summaries include the ready-for-review recovery hint. Acknowledgements, normal progress, successful recoveries, queue entry/position changes, and explicit `@openswe` operator actions stay quiet. Plan, blocker, and ticket-matching terminal closeout comments remain actionable regardless of Linear author identity. `--known-ids-file` resumes comment progress across restarts, and `--until-wake` exits successfully after persisting the first emitted wake.
 
 **Sharp edge:** the `Open SWE Auto-fix` check conclusion is always neutral by design; the outcome lives in the check's `output.title`, shown as its title in review-related wake summaries.
 

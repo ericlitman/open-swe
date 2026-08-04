@@ -2718,3 +2718,110 @@ def test_same_thread_rows_never_count_as_sibling_divergence() -> None:
 
     assert not rows[1]["sibling_divergence"]
     assert "divergence_from" not in rows[1]
+
+
+def test_mastra_13_failure_replies_replay_as_terminal_run_errors() -> None:
+    recorded = fixture("mastra-13-failure-comments.json")
+
+    events = wave.comments_to_events(
+        recorded["comments"], recorded["session_user_id"], set(recorded["known_ids"])
+    )
+    result = wave.replay_events(events, recorded["session_user_id"])
+
+    assert events == recorded["events"]
+    assert [wake["poll_id"] for wake in result["wakes"]] == [
+        "2026-08-03T06:25:39Z",
+        "2026-08-03T07:28:28Z",
+        "2026-08-03T08:31:43Z",
+    ]
+    assert [wake["wake_node"] for wake in result["wakes"]] == [
+        "terminal_run_error",
+        "terminal_run_error",
+        "terminal_run_error",
+    ]
+    assert "Cause:" not in result["wakes"][0]["evidence"][0]["reply_text"]
+    assert "Cause:" in result["wakes"][1]["evidence"][0]["reply_text"]
+    assert result["wakes"][1]["evidence"][0]["reply_text"] == recorded["comments"][1]["body"]
+
+
+def test_review_absent_condition_is_watermarked_across_rewatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    watermark = tmp_path / "known.json"
+    baseline = _watch_snapshot("OPEN", observed_at="2026-08-04T12:30:00Z")
+    baseline["pr"].update(
+        {
+            "number": 53,
+            "headRefOid": "head-53",
+            "createdAt": "2026-08-04T12:00:00Z",
+            "mergeStateStatus": "CLEAN",
+        }
+    )
+    baseline["review_ids"] = []
+    current = deepcopy(baseline)
+    current["observed_at"] = "2026-08-04T12:31:00Z"
+    snapshots = iter([baseline, baseline, current])
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: deepcopy(next(snapshots)))
+    monkeypatch.setattr(wave, "monitor_recovery", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(wave, "emit", lambda payload, **_kwargs: emitted.append(payload))
+
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark), until_wake=True)) == 0
+    assert [item["wake_node"] for item in emitted] == ["review_absent"]
+    assert "condition:review_absent:53:head-53" in json.loads(watermark.read_text())
+
+    emitted.clear()
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark), iterations=1)) == 0
+    assert emitted == []
+
+
+def test_queue_stall_metadata_wakes_once_with_alert_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    watermark = tmp_path / "known.json"
+    snapshot = _watch_snapshot("OPEN", observed_at="2026-08-04T12:30:00Z")
+    snapshot["pr"].update({"number": 122, "headRefOid": "head-122"})
+    snapshot["pr_number"] = 122
+    snapshot["langgraph"]["thread"]["metadata"] = {
+        "auto_merge_alert_reason": "queue_stall_in_queue",
+        "auto_merge_alert_at": "2026-08-04T12:29:00Z",
+    }
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: deepcopy(snapshot))
+    monkeypatch.setattr(wave, "emit", lambda payload, **_kwargs: emitted.append(payload))
+
+    assert wave.cmd_watch(_watch_args(known_ids_file=str(watermark), until_wake=True)) == 0
+
+    assert [item["wake_node"] for item in emitted] == ["merge_queue_stalled"]
+    evidence = emitted[0]["evidence"][0]
+    assert evidence["reason"] == "queue_stall_in_queue"
+    assert evidence["alert_at"] == "2026-08-04T12:29:00Z"
+    assert evidence["pr_number"] == 122
+    assert evidence["head_sha"] == "head-122"
+    assert "condition:queue_stall_in_queue:122:head-122" in json.loads(watermark.read_text())
+
+
+def test_watch_ready_file_is_written_only_after_a_quiet_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ready = tmp_path / "ready.json"
+    snapshot = _watch_snapshot(None, observed_at="baseline")
+    snapshots = iter([snapshot, deepcopy(snapshot)])
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: next(snapshots))
+    monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
+
+    assert wave.cmd_watch(_watch_args(ready_file=str(ready), iterations=1)) == 0
+    assert json.loads(ready.read_text())["ready"] is True
+
+
+def test_watch_ready_file_is_not_written_when_baseline_already_wakes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ready = tmp_path / "ready.json"
+    snapshot = _watch_snapshot("MERGED", observed_at="baseline")
+    monkeypatch.setattr(wave, "live_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(wave, "emit", lambda *_args, **_kwargs: None)
+
+    assert wave.cmd_watch(_watch_args(ready_file=str(ready), until_wake=True, pr_number=53)) == 0
+    assert not ready.exists()

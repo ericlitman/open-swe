@@ -28,6 +28,7 @@ WAKE_NODES = (
     "run_stalled",
     "review_absent",
     "merge_conflict",
+    "merge_queue_stalled",
     "terminal_merged",
     "terminal_closed",
     "terminal_run_error",
@@ -871,6 +872,7 @@ def _event_node(event: dict[str, Any]) -> str | None:
         "run_stalled": "run_stalled",
         "review_absent": "review_absent",
         "merge_conflict": "merge_conflict",
+        "queue_stall_in_queue": "merge_queue_stalled",
         "merged": "terminal_merged",
         "closed": "terminal_closed",
         "run_error": "terminal_run_error",
@@ -1041,17 +1043,18 @@ def comments_to_events(
             kind = terminal_kind
         elif "wasn't able to finish" in lower or "unexpected error" in lower:
             kind = "run_error"
-        events.append(
-            {
-                "source": "linear",
-                "poll_id": comment.get("createdAt") or comment_id,
-                "kind": kind,
-                "comment_id": comment_id,
-                "author_id": user.get("id"),
-                "summary": " ".join(body.split())[:300],
-                "session_user_id": session_user_id,
-            }
-        )
+        event = {
+            "source": "linear",
+            "poll_id": comment.get("createdAt") or comment_id,
+            "kind": kind,
+            "comment_id": comment_id,
+            "author_id": user.get("id"),
+            "summary": " ".join(body.split())[:300],
+            "session_user_id": session_user_id,
+        }
+        if kind == "run_error":
+            event["reply_text"] = body
+        events.append(event)
     return events
 
 
@@ -1087,18 +1090,28 @@ def advance_known_ids(
     observed = {str(item.get("id")) for item in comments if item.get("id")}
     if not until_wake or not wakes:
         known_ids.update(observed)
-        return
-    actionable = {
-        str(event.get("comment_id"))
-        for event in comment_events
-        if event.get("comment_id") and _event_node(event) is not None
-    }
-    known_ids.update(observed - actionable)
-    for event in wakes[0].get("evidence") or []:
-        if event.get("comment_id"):
-            known_ids.add(str(event["comment_id"]))
-        if event.get("known_id"):
-            known_ids.add(str(event["known_id"]))
+        emitted_wakes = wakes
+        conditions_only = True
+    else:
+        actionable = {
+            str(event.get("comment_id"))
+            for event in comment_events
+            if event.get("comment_id") and _event_node(event) is not None
+        }
+        known_ids.update(observed - actionable)
+        emitted_wakes = wakes[:1]
+        conditions_only = False
+    for wake in emitted_wakes:
+        for event in wake.get("evidence") or []:
+            if event.get("comment_id"):
+                known_ids.add(str(event["comment_id"]))
+            marker = str(event.get("known_id") or "")
+            if (
+                marker
+                and _event_node(event) == wake.get("wake_node")
+                and (not conditions_only or marker.startswith("condition:"))
+            ):
+                known_ids.add(marker)
 
 
 def terminal_pr_state_event(
@@ -1159,6 +1172,22 @@ def merge_conflict_event(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _condition_known_id(kind: str, snapshot: dict[str, Any]) -> str:
+    pr = snapshot.get("pr") or {}
+    number = snapshot.get("pr_number") or pr.get("number") or "unknown"
+    head_sha = pr.get("headRefOid") or "unknown"
+    return f"condition:{kind}:{number}:{head_sha}"
+
+
+def _sync_condition_known_id(known_ids: set[str], kind: str, event: dict[str, Any] | None) -> bool:
+    prefix = f"condition:{kind}:"
+    active = str(event.get("known_id")) if event else None
+    known_ids.difference_update(
+        marker for marker in known_ids if marker.startswith(prefix) and marker != active
+    )
+    return bool(active and active in known_ids)
+
+
 def review_absent_event(
     snapshot: dict[str, Any], review_absent_seconds: float
 ) -> dict[str, Any] | None:
@@ -1190,6 +1219,26 @@ def review_absent_event(
         "kind": "review_absent",
         "source": "github",
         "summary": _with_autofix_title(summary, snapshot),
+        "known_id": _condition_known_id("review_absent", snapshot),
+    }
+
+
+def queue_stall_event(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = (snapshot.get("langgraph", {}).get("thread") or {}).get("metadata") or {}
+    reason = str(metadata.get("auto_merge_alert_reason") or "")
+    if reason != "queue_stall_in_queue":
+        return None
+    pr = snapshot.get("pr") or {}
+    number = snapshot.get("pr_number") or pr.get("number")
+    return {
+        "kind": "queue_stall_in_queue",
+        "source": "langgraph",
+        "summary": f"PR #{number} is stalled in the merge queue",
+        "known_id": _condition_known_id("queue_stall_in_queue", snapshot),
+        "reason": reason,
+        "alert_at": metadata.get("auto_merge_alert_at"),
+        "pr_number": number,
+        "head_sha": pr.get("headRefOid"),
     }
 
 
@@ -2020,9 +2069,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if conflict_event:
         baseline_events.append(conflict_event)
     absent_event = review_absent_event(previous, args.review_absent_seconds)
-    review_absent_emitted = False
-    if absent_event:
+    review_absent_emitted = _sync_condition_known_id(known_ids, "review_absent", absent_event)
+    if absent_event and not review_absent_emitted:
         baseline_events.append(absent_event)
+    queue_event = queue_stall_event(previous)
+    queue_stall_emitted = _sync_condition_known_id(known_ids, "queue_stall_in_queue", queue_event)
+    if queue_event and not queue_stall_emitted:
+        baseline_events.append(queue_event)
     if baseline_events:
         poll_id = str(previous.get("observed_at") or "baseline")
         result = replay_events(assign_poll_id(baseline_events, poll_id), viewer_id)
@@ -2036,8 +2089,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 terminal_states_emitted.add("CLOSED")
             elif wake["wake_node"] == "review_absent":
                 review_absent_emitted = True
+            elif wake["wake_node"] == "merge_queue_stalled":
+                queue_stall_emitted = True
             if until_wake:
                 return 0
+    ready_file = getattr(args, "ready_file", None)
+    if ready_file:
+        _atomic_write_json(
+            Path(ready_file), {"ready": True, "observed_at": previous.get("observed_at")}
+        )
     iterations = 0
     last_recovery_fingerprint: str | None = None
     active_unhandled: set[str] = set()
@@ -2070,8 +2130,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     events.append(linear_terminal)
                 events.extend(snapshot_transition_events(previous, current))
                 absent_event = review_absent_event(current, args.review_absent_seconds)
+                review_absent_emitted = _sync_condition_known_id(
+                    known_ids, "review_absent", absent_event
+                )
                 if absent_event and not review_absent_emitted:
                     events.append(absent_event)
+                queue_event = queue_stall_event(current)
+                queue_stall_emitted = _sync_condition_known_id(
+                    known_ids, "queue_stall_in_queue", queue_event
+                )
+                if queue_event and not queue_stall_emitted:
+                    events.append(queue_event)
                 stale = liveness_event(previous, current, args.run_stall_seconds)
                 if stale:
                     events.append(stale)
@@ -2154,6 +2223,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         terminal_states_emitted.add("CLOSED")
                     elif wake["wake_node"] == "review_absent":
                         review_absent_emitted = True
+                    elif wake["wake_node"] == "merge_queue_stalled":
+                        queue_stall_emitted = True
                     if until_wake:
                         return 0
                 previous = current
@@ -2260,6 +2331,7 @@ def parser() -> argparse.ArgumentParser:
     watch.add_argument("--apply", action="store_true")
     watch.add_argument("--session-user-id")
     watch.add_argument("--known-ids-file")
+    watch.add_argument("--ready-file")
     watch.add_argument("--until-wake", action="store_true")
     watch.add_argument("--interval", type=float, default=60)
     watch.add_argument("--iterations", type=int, default=0)
