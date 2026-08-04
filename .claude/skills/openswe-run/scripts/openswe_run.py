@@ -33,6 +33,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import deque
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -272,6 +273,8 @@ def post_watch_context(ticket: str, action: str, repo: str | None = None) -> dic
         "interval_seconds": WATCH_INTERVAL_SECONDS,
         "timeout_minutes": PHASE_TIMEOUT_MINUTES[phase],
         "state_path": str(state_path),
+        "output_path": str(state_path.with_name(f"{state_path.stem}-output.jsonl")),
+        "error_path": str(state_path.with_name(f"{state_path.stem}-error.log")),
     }
 
 
@@ -334,12 +337,25 @@ def ensure_post_watch(expected: dict) -> dict:
         str(ready_path),
     ]
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        start_new_session=True,
-    )
+    with ExitStack() as stack:
+        stdout = (
+            None
+            if sys.stdout.isatty()
+            else stack.enter_context(Path(expected["output_path"]).open("a"))
+        )
+        stderr = (
+            None
+            if sys.stderr.isatty()
+            else stack.enter_context(Path(expected["error_path"]).open("a"))
+        )
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+            start_new_session=True,
+        )
     deadline = time.monotonic() + WATCH_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         state = _read_json_object(state_path)
@@ -363,6 +379,14 @@ def ensure_post_watch(expected: dict) -> dict:
     detail = (
         f"watch process exited with status {process.poll()}" if process.poll() is not None else ""
     )
+    if detail:
+        try:
+            lines = Path(expected["error_path"]).read_text().splitlines()
+        except OSError:
+            lines = []
+        last_stderr = next((line for line in reversed(lines) if line.strip()), None)
+        if last_stderr:
+            detail += f"; last stderr: {last_stderr}"
     dogfood(
         expected["ticket"],
         "error",
@@ -1444,7 +1468,7 @@ def _emit_wake(ticket: str, wake: dict, source: str) -> None:
     dogfood(
         ticket, "wake", f"{wake.get('wake_node')} via {source}: {wake.get('summary', '')[:200]}"
     )
-    print(json.dumps(wake, sort_keys=True, default=str))
+    print(json.dumps(wake, sort_keys=True, default=str), flush=True)
 
 
 def watch_timeout_min(args: argparse.Namespace) -> float:
