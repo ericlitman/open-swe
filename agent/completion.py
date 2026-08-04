@@ -187,13 +187,12 @@ async def _consecutive_failures(client: Any, thread_id: str, completed_run_id: s
             key=lambda run: _run_value(run, "created_at") or "",
             reverse=True,
         )
+        listed_ids = {_run_value(run, "run_id") or _run_value(run, "id") for run in ordered_runs}
         streak = 0
-        completed_run_found = False
         for run in ordered_runs:
             listed_run_id = _run_value(run, "run_id") or _run_value(run, "id")
             if completed_run_id is not None and listed_run_id == completed_run_id:
                 streak += 1
-                completed_run_found = True
                 continue
 
             status = _run_value(run, "status")
@@ -203,7 +202,7 @@ async def _consecutive_failures(client: Any, thread_id: str, completed_run_id: s
             elif status == "success":
                 break
 
-        if completed_run_id is not None and not completed_run_found:
+        if completed_run_id is not None and completed_run_id not in listed_ids:
             streak += 1
         return streak
     except Exception:  # noqa: BLE001

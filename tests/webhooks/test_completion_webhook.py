@@ -579,6 +579,50 @@ async def test_success_between_failures_ends_the_streak(
 
 
 @pytest.mark.asyncio
+async def test_completing_run_below_success_does_not_extend_streak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ListClient(
+        _slack_metadata(),
+        [
+            {
+                "run_id": "run-3",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:05Z",
+            },
+            {
+                "run_id": "run-2",
+                "status": "success",
+                "created_at": "2026-01-01T00:00:04Z",
+            },
+            {
+                "run_id": "run-1",
+                "status": "error",
+                "created_at": "2026-01-01T00:00:03Z",
+            },
+        ],
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    assert "consecutive runs" not in await_args.args[2]
+    assert client.threads.updates == [
+        {
+            "failure_reply_posted_run_id": "run-1",
+            "failure_reply_posted_run_ids": ["run-1"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_interrupted_run_is_neutral_in_failure_streak(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
