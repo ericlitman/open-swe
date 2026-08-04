@@ -1160,6 +1160,71 @@ async def test_resolve_dashboard_thread_enforces_ownership(monkeypatch) -> None:
     assert exc_info.value.status_code == 404
 
 
+async def test_reset_dashboard_thread_enforces_ownership(monkeypatch) -> None:
+    class FakeThreads:
+        async def get(self, thread_id: str) -> dict[str, object]:
+            return {
+                "thread_id": thread_id,
+                "metadata": {"source": "dashboard", "github_login": "owner"},
+            }
+
+    class FakeClient:
+        threads = FakeThreads()
+
+    monkeypatch.setattr(thread_api, "langgraph_client", lambda: FakeClient())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await thread_api.reset_dashboard_thread("tid", "intruder")
+
+    assert exc_info.value.status_code == 404
+
+
+async def test_reset_dashboard_thread_returns_404_for_missing_thread(monkeypatch) -> None:
+    class FakeThreads:
+        async def get(self, thread_id: str) -> dict[str, object]:
+            return {
+                "thread_id": thread_id,
+                "metadata": {"source": "dashboard", "github_login": "octocat"},
+            }
+
+    class FakeClient:
+        threads = FakeThreads()
+
+    monkeypatch.setattr(thread_api, "langgraph_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        thread_api,
+        "reset_thread_preserving_metadata",
+        AsyncMock(side_effect=ValueError("missing")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await thread_api.reset_dashboard_thread("tid", "octocat")
+
+    assert exc_info.value.status_code == 404
+
+
+async def test_reset_dashboard_thread_returns_helper_result(monkeypatch) -> None:
+    class FakeThreads:
+        async def get(self, thread_id: str) -> dict[str, object]:
+            return {
+                "thread_id": thread_id,
+                "metadata": {"source": "dashboard", "github_login": "octocat"},
+            }
+
+    class FakeClient:
+        threads = FakeThreads()
+
+    sentinel = {"thread_id": "tid", "preserved_keys": ["source"], "dropped_keys": []}
+    reset = AsyncMock(return_value=sentinel)
+    monkeypatch.setattr(thread_api, "langgraph_client", lambda: FakeClient())
+    monkeypatch.setattr(thread_api, "reset_thread_preserving_metadata", reset)
+
+    result = await thread_api.reset_dashboard_thread("tid", "octocat")
+
+    assert result is sentinel
+    reset.assert_awaited_once_with("tid")
+
+
 async def test_enrich_run_start_command_unresolves_thread(monkeypatch) -> None:
     updates: list[dict[str, object]] = []
 
@@ -1586,6 +1651,19 @@ async def test_admin_cancel_thread_route_delegates_without_owner_identity(monkey
 
     assert result == {"id": "thread-1", "status": "interrupted"}
     cancel.assert_awaited_once_with("thread-1")
+
+
+async def test_reset_thread_route_delegates(monkeypatch) -> None:
+    sentinel = {"thread_id": "thread-1", "preserved_keys": [], "dropped_keys": []}
+    reset = AsyncMock(return_value=sentinel)
+    monkeypatch.setattr(routes, "reset_dashboard_thread", reset)
+
+    result = await routes.api_reset_thread(
+        "thread-1", session={"sub": "octocat", "email": "o@example.com"}
+    )
+
+    assert result is sentinel
+    reset.assert_awaited_once_with("thread-1", "octocat", email="o@example.com")
 
 
 def test_admin_cancel_thread_dependency_rejects_non_admin(monkeypatch) -> None:

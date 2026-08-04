@@ -91,6 +91,22 @@ def _failure_text(status: str, dashboard_url: str | None = None, cause: str | No
     return text
 
 
+def _dead_thread_text(
+    status: str, streak: int, dashboard_url: str | None = None, cause: str | None = None
+) -> str:
+    reason = "timed out" if status == "timeout" else "hit an unexpected error"
+    text = (
+        f"🛑 This thread has failed {streak} consecutive runs and may be unrecoverable — "
+        f"the latest run {reason}. Reset the thread before sending another message to "
+        "re-dispatch."
+    )
+    if cause:
+        text += f" Cause: {cause}."
+    if dashboard_url:
+        text += f" You can view the error in <{dashboard_url}|Open SWE Web>."
+    return text
+
+
 async def _settle_failed_reviewer_check(thread_id: str, metadata: dict[str, Any]) -> None:
     """Best-effort cleanup for reviewer checks left open by graph failures."""
     if metadata.get("kind") != REVIEWER_THREAD_KIND:
@@ -149,6 +165,8 @@ async def _run_failure_cause(client: Any, thread_id: str, run_id: str) -> str | 
             return None
         error = err.get("error")
         message = err.get("message")
+        if not error and message is None:
+            return None
         cause = f"{error}: {message}" if error else str(message)
         return re.sub(r"\s+", " ", cause).strip()[:300]
     except Exception:  # noqa: BLE001
@@ -281,12 +299,19 @@ async def _post_failure_reply(
     metadata: dict[str, Any],
     status: str,
     cause: str | None = None,
+    streak: int = 0,
 ) -> bool:
     """Post a failure reply to the run's originating channel. Best-effort."""
     source = metadata.get("source")
     ctx = metadata.get("source_context")
     ctx = ctx if isinstance(ctx, dict) else {}
-    text = _failure_text(status, cause=cause)
+
+    def _text(dashboard_url: str | None = None) -> str:
+        if streak >= 2:
+            return _dead_thread_text(status, streak, dashboard_url, cause)
+        return _failure_text(status, dashboard_url, cause)
+
+    text = _text()
 
     slack_thread = ctx.get("slack_thread")
     if source == "slack" or isinstance(slack_thread, dict):
@@ -294,7 +319,7 @@ async def _post_failure_reply(
             channel_id = slack_thread.get("channel_id")
             thread_ts = slack_thread.get("thread_ts")
             if channel_id and thread_ts:
-                slack_text = _failure_text(status, dashboard_thread_url(thread_id), cause)
+                slack_text = _text(dashboard_thread_url(thread_id))
                 return await post_slack_thread_reply(channel_id, thread_ts, slack_text)
         return False
 
@@ -387,6 +412,20 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         deferred_settled = False
         deferred_error = RuntimeError("Deferred review check settlement failed")
     if status not in _TERMINAL_FAILURE_STATUSES:
+        if status == "success":
+            stored_streak = metadata.get("failure_streak")
+            if isinstance(stored_streak, int) and stored_streak != 0:
+                try:
+                    await client.threads.update(
+                        thread_id=thread_id,
+                        metadata={"failure_streak": 0, "failure_streak_last_run_id": None},
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "run-complete: could not reset failure streak for %s",
+                        thread_id,
+                        exc_info=True,
+                    )
         if deferred_error is not None:
             raise deferred_error
         return {
@@ -411,16 +450,34 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         return {"status": "ignored", "reason": "failure reply already posted for run"}
 
     cause = await _run_failure_cause(client, thread_id, run_id) if run_id is not None else None
-    posted = await _post_failure_reply(thread_id, metadata, status, cause)
+
+    streak = 0
+    streak_update: dict[str, Any] | None = None
+    if run_id is not None:
+        stored_streak = metadata.get("failure_streak")
+        stored_streak = stored_streak if isinstance(stored_streak, int) else 0
+        if run_id != metadata.get("failure_streak_last_run_id"):
+            streak = stored_streak + 1
+            streak_update = {
+                "failure_streak": streak,
+                "failure_streak_last_run_id": run_id,
+            }
+        else:
+            streak = stored_streak
+
+    posted = await _post_failure_reply(thread_id, metadata, status, cause, streak)
     if not posted:
         if deferred_error is not None:
             raise deferred_error
         return {"status": "ignored", "reason": "no reply posted"}
 
+    reply_metadata = _failure_reply_metadata(metadata, run_id)
+    if streak_update:
+        reply_metadata.update(streak_update)
     try:
         await client.threads.update(
             thread_id=thread_id,
-            metadata=_failure_reply_metadata(metadata, run_id),
+            metadata=reply_metadata,
         )
     except Exception:  # noqa: BLE001
         logger.warning("run-complete: could not flag thread %s", thread_id, exc_info=True)

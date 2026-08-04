@@ -42,6 +42,40 @@ async def get_thread_active_status(thread_id: str) -> bool | None:
         return None
 
 
+async def reset_thread_preserving_metadata(
+    thread_id: str, *, client: Any | None = None
+) -> dict[str, Any]:
+    """Delete and recreate a thread, preserving metadata except failure-tracking keys."""
+    active_client = client if client is not None else langgraph_client()
+    try:
+        thread = await active_client.threads.get(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Thread {thread_id} does not exist") from exc
+    if not isinstance(thread, dict):
+        raise ValueError(f"Thread {thread_id} does not exist")
+    metadata = thread.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+
+    preserved: dict[str, Any] = {}
+    dropped: list[str] = []
+    for key, value in metadata.items():
+        if key.startswith("failure_reply_posted") or key in {
+            "failure_streak",
+            "failure_streak_last_run_id",
+        }:
+            dropped.append(key)
+        else:
+            preserved[key] = value
+
+    await active_client.threads.delete(thread_id)
+    await active_client.threads.create(thread_id=thread_id, metadata=preserved)
+    return {
+        "thread_id": thread_id,
+        "preserved_keys": sorted(preserved),
+        "dropped_keys": sorted(dropped),
+    }
+
+
 async def queue_message_for_thread(
     thread_id: str, message_content: str | list[dict[str, Any]] | dict[str, Any]
 ) -> bool:

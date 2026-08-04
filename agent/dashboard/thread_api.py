@@ -33,6 +33,7 @@ from ..utils.thread_ops import (
     langgraph_client,
     langgraph_url,
     queue_message_for_thread,
+    reset_thread_preserving_metadata,
 )
 from .agent_overrides import normalize_profile_overrides
 from .options import (
@@ -1459,6 +1460,16 @@ async def delete_dashboard_thread(thread_id: str, login: str, *, email: str | No
             logger.debug("Could not cancel run %s for thread %s", run_id, thread_id, exc_info=True)
 
     await client.threads.delete(thread_id)
+
+
+async def reset_dashboard_thread(
+    thread_id: str, login: str, *, email: str | None = None
+) -> dict[str, Any]:
+    await _authorized_thread(thread_id, login, email=email)
+    try:
+        return await reset_thread_preserving_metadata(thread_id)
+    except ValueError as exc:
+        raise HTTPException(404, "thread not found") from exc
 
 
 async def resolve_dashboard_thread(

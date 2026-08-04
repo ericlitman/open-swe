@@ -174,6 +174,7 @@ from .thread_api import (
     proxy_dashboard_thread_history,
     proxy_dashboard_thread_run_cancel,
     proxy_dashboard_thread_stream_events,
+    reset_dashboard_thread,
     resolve_dashboard_thread,
     send_dashboard_message,
     stream_dashboard_thread,
@@ -1671,6 +1672,14 @@ async def api_delete_thread(
 ) -> Response:
     await delete_dashboard_thread(thread_id, session["sub"], email=session.get("email"))
     return Response(status_code=204)
+
+
+@router.post("/threads/{thread_id}/reset")
+async def api_reset_thread(
+    thread_id: str,
+    session: dict[str, Any] = _SESSION_DEP,
+) -> dict[str, Any]:
+    return await reset_dashboard_thread(thread_id, session["sub"], email=session.get("email"))
 
 
 @router.get("/threads/{thread_id}/state")
