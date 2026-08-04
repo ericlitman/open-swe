@@ -130,12 +130,26 @@ async def _review_check_id_for_run(client: Any, thread_id: str, run_id: str | No
 
 
 async def _settle_failed_reviewer_check(
-    thread_id: str, metadata: dict[str, Any], *, owned_check_run_id: int | None
+    thread_id: str,
+    metadata: dict[str, Any],
+    *,
+    completed_run_id: str | None,
+    owned_check_run_id: int | None,
 ) -> None:
     """Best-effort cleanup for a full-review check owned by a terminal run."""
     if metadata.get("kind") != REVIEWER_THREAD_KIND:
         return
     if not isinstance(owned_check_run_id, int):
+        return
+    current_reviewer_run_id = metadata.get("current_reviewer_run_id")
+    if (
+        metadata.get("review_check_run_id") == owned_check_run_id
+        and isinstance(completed_run_id, str)
+        and completed_run_id
+        and isinstance(current_reviewer_run_id, str)
+        and current_reviewer_run_id
+        and current_reviewer_run_id != completed_run_id
+    ):
         return
     pr = metadata.get("pr")
     if not isinstance(pr, dict):
@@ -486,10 +500,19 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         deferred_error = RuntimeError("Deferred review check settlement failed")
     owned_check_run_id = None
     if status == "interrupted" or status in _TERMINAL_FAILURE_STATUSES:
-        owned_check_run_id = await _review_check_id_for_run(client, thread_id, run_id)
+        if run_id is None:
+            tracked_check_run_id = metadata.get("review_check_run_id")
+            owned_check_run_id = (
+                tracked_check_run_id if isinstance(tracked_check_run_id, int) else None
+            )
+        else:
+            owned_check_run_id = await _review_check_id_for_run(client, thread_id, run_id)
     if status == "interrupted":
         await _settle_failed_reviewer_check(
-            thread_id, metadata, owned_check_run_id=owned_check_run_id
+            thread_id,
+            metadata,
+            completed_run_id=run_id,
+            owned_check_run_id=owned_check_run_id,
         )
     if status not in _TERMINAL_FAILURE_STATUSES:
         if deferred_error is not None:
@@ -502,7 +525,12 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
                 else f"no deferred review check for status: {status}"
             ),
         }
-    await _settle_failed_reviewer_check(thread_id, metadata, owned_check_run_id=owned_check_run_id)
+    await _settle_failed_reviewer_check(
+        thread_id,
+        metadata,
+        completed_run_id=run_id,
+        owned_check_run_id=owned_check_run_id,
+    )
     if run_id is None:
         # Payloads without run ids fall back to the old per-thread flag; run-scoped
         # dedupe intentionally does not read it so future runs can still report.

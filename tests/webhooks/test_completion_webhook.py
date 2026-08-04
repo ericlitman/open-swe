@@ -1305,3 +1305,52 @@ async def test_finding_reply_completion_cannot_settle_full_review_check(
 
     token.assert_not_awaited()
     settle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_reviewer_failure_without_run_id_settles_tracked_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "kind": "reviewer",
+        "review_check_run_id": 42,
+        "pr": {"owner": "acme", "name": "widgets"},
+    }
+    client = _FakeClient(metadata, {})
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
+    )
+    settle = AsyncMock()
+    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+
+    await completion.handle_run_completion({"thread_id": "t1", "status": "error"})
+
+    settle.assert_awaited_once()
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["expected_check_run_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_interrupted_run_does_not_settle_check_transferred_to_explicit_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "kind": "reviewer",
+        "review_check_run_id": 42,
+        "current_reviewer_run_id": "run-explicit",
+        "pr": {"owner": "acme", "name": "widgets"},
+    }
+    client = _FakeClient(metadata, {"review_check_run_id": 42})
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    token = AsyncMock(return_value="token")
+    settle = AsyncMock()
+    monkeypatch.setattr(completion, "get_github_app_installation_token", token)
+    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+
+    await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-auto", "status": "interrupted"}
+    )
+
+    token.assert_not_awaited()
+    settle.assert_not_awaited()
