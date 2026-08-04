@@ -176,11 +176,11 @@ async def _settle_failed_reviewer_check(
             if metadata.get("review_check_run_id") == owned_check_run_id
             else None
         )
-        if isinstance(pending, dict) and pending.get("conclusion") in {
-            "success",
-            "neutral",
-            "failure",
-        }:
+        if (
+            isinstance(pending, dict)
+            and pending.get("review_check_run_id") == owned_check_run_id
+            and pending.get("conclusion") in {"success", "neutral", "failure"}
+        ):
             conclusion = pending["conclusion"]
             title = str(pending.get("title") or "Review completed")
             summary = str(pending.get("summary") or "")

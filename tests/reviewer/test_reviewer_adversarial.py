@@ -1694,7 +1694,10 @@ async def test_late_gate_failure_publishes_latest_consistent_kept_set() -> None:
             False,
             {
                 "review_check_run_id": 41,
-                "review_check_pending_result": {"summary": "existing pending"},
+                "review_check_pending_result": {
+                    "review_check_run_id": 41,
+                    "summary": "existing pending",
+                },
             },
             False,
         ),
@@ -1845,6 +1848,7 @@ async def test_gate_exception_falls_back_or_settles_without_leaking_failure_tail
             await_args = set_metadata.await_args
             assert await_args is not None
             pending = await_args.kwargs["extra"]["review_check_pending_result"]
+            assert pending["review_check_run_id"] == 41
             assert "Failure class: pre-publish gate failed." in pending["summary"]
             assert secret not in pending["summary"]
         else:

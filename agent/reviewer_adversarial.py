@@ -739,7 +739,10 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                         isinstance(deferred, dict)
                         and deferred.get("review_check_run_id") == check_run_id
                     )
-                    and not isinstance(pending, dict)
+                    and not (
+                        isinstance(pending, dict)
+                        and pending.get("review_check_run_id") == check_run_id
+                    )
                     and failure_class in _ADVERSARIAL_FAILURE_CLASSES
                 ):
                     conclusion, title, summary = incomplete_review_check_result()
@@ -747,6 +750,7 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                         cast(str, thread_id),
                         extra={
                             "review_check_pending_result": {
+                                "review_check_run_id": check_run_id,
                                 "conclusion": conclusion,
                                 "title": title,
                                 "summary": f"{summary} Failure class: {failure_class}.",

@@ -473,6 +473,7 @@ async def test_settle_review_check_run_keeps_id_on_patch_failure(
             "thread_id": "t1",
             "extra": {
                 "review_check_pending_result": {
+                    "review_check_run_id": 42,
                     "conclusion": "success",
                     "title": "t",
                     "summary": "s",
@@ -480,6 +481,44 @@ async def test_settle_review_check_run_keeps_id_on_patch_failure(
             },
         }
     ]
+
+
+async def test_expected_check_failure_persists_owned_check_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviewer_publish,
+        "get_thread_metadata",
+        AsyncMock(return_value={"review_check_run_id": 42}),
+    )
+    monkeypatch.setattr(
+        reviewer_publish, "complete_review_check_run", AsyncMock(return_value=False)
+    )
+    set_metadata = AsyncMock()
+    monkeypatch.setattr(reviewer_publish, "set_reviewer_thread_metadata", set_metadata)
+
+    await reviewer_publish.settle_review_check_run(
+        thread_id="t1",
+        owner="acme",
+        repo="widgets",
+        token="tok",
+        conclusion="failure",
+        title="Review failed",
+        summary="failed",
+        expected_check_run_id=42,
+    )
+
+    set_metadata.assert_awaited_once_with(
+        "t1",
+        extra={
+            "review_check_pending_result": {
+                "review_check_run_id": 42,
+                "conclusion": "failure",
+                "title": "Review failed",
+                "summary": "failed",
+            }
+        },
+    )
 
 
 async def test_expected_check_settlement_targets_and_clears_owned_check(

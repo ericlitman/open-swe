@@ -523,6 +523,7 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
             "kind": webhook_common.REVIEWER_THREAD_KIND,
             "review_check_run_id": 42,
             "review_check_pending_result": {
+                "review_check_run_id": 42,
                 "conclusion": "success",
                 "title": "Found 1 potential issue",
                 "summary": "Open SWE surfaced 1 potential issue.",
@@ -633,6 +634,43 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
         "finding_reply": True,
         "explicit_request": False,
     }
+
+
+def test_finding_reply_ignores_pending_result_from_superseded_check(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_settle_review_check_run(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
+    monkeypatch.setattr(
+        github_webhooks,
+        "incomplete_review_check_result",
+        lambda: ("failure", "Review did not complete", "incomplete"),
+    )
+
+    asyncio.run(
+        github_webhooks._settle_review_check_before_finding_reply(
+            thread_id="thread-1",
+            metadata={
+                "review_check_run_id": 42,
+                "review_check_pending_result": {
+                    "review_check_run_id": 41,
+                    "conclusion": "success",
+                    "title": "Old result",
+                    "summary": "stale",
+                },
+            },
+            owner="langchain-ai",
+            repo="open-swe",
+            token="token",
+        )
+    )
+
+    assert captured["expected_check_run_id"] == 42
+    assert captured["conclusion"] == "failure"
+    assert captured["title"] == "Review did not complete"
 
 
 def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(monkeypatch) -> None:

@@ -491,6 +491,7 @@ async def settle_review_check_run(
                     thread_id,
                     extra={
                         "review_check_pending_result": {
+                            "review_check_run_id": expected_check_run_id,
                             "conclusion": conclusion,
                             "title": title,
                             "summary": summary,
@@ -542,6 +543,7 @@ async def settle_review_check_run(
             thread_id,
             extra={
                 "review_check_pending_result": {
+                    "review_check_run_id": check_run_id,
                     "conclusion": conclusion,
                     "title": title,
                     "summary": summary,

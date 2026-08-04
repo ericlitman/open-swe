@@ -80,7 +80,11 @@ async def settle_review_check_on_exit(
         # completed publish or an adversarial typed failure. Retry that outcome
         # instead of replacing it with a generic incomplete-review result.
         pending = metadata.get("review_check_pending_result") if owns_current_check else None
-        if isinstance(pending, dict) and pending.get("conclusion") in get_args(CheckConclusion):
+        if (
+            isinstance(pending, dict)
+            and pending.get("review_check_run_id") == check_run_id
+            and pending.get("conclusion") in get_args(CheckConclusion)
+        ):
             conclusion = cast(CheckConclusion, pending["conclusion"])
             title = str(pending.get("title") or "Review completed")
             summary = str(pending.get("summary") or "")

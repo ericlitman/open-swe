@@ -43,7 +43,11 @@ async def _settle_review_check_before_finding_reply(
     if isinstance(deferred, dict) and deferred.get("review_check_run_id") == check_run_id:
         return
     pending = metadata.get("review_check_pending_result")
-    if isinstance(pending, dict) and pending.get("conclusion") in get_args(CheckConclusion):
+    if (
+        isinstance(pending, dict)
+        and pending.get("review_check_run_id") == check_run_id
+        and pending.get("conclusion") in get_args(CheckConclusion)
+    ):
         conclusion = cast(CheckConclusion, pending["conclusion"])
         title = str(pending.get("title") or "Review completed")
         summary = str(pending.get("summary") or "")

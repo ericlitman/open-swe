@@ -295,6 +295,7 @@ async def test_reviewer_error_preserves_pending_check_result(
         "kind": "reviewer",
         "review_check_run_id": 42,
         "review_check_pending_result": {
+            "review_check_run_id": 42,
             "conclusion": "success",
             "title": "Found 1 potential issue",
             "summary": "Open SWE surfaced 1 potential issue.",
