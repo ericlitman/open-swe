@@ -14,6 +14,7 @@ from langchain.agents.middleware import AgentState
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.constants import CONFIG_KEY_CHECKPOINTER, Send
 from langgraph.graph.state import RunnableConfig
 from langgraph.runtime import Runtime
 from pydantic import Field
@@ -1551,6 +1552,77 @@ async def test_bounded_finder_agent_calls_its_model_and_returns_structured_outpu
         assert isinstance(structured, FinderOutput), str(spec["name"])
         assert model.invocations, f"{spec['name']} finder never called its model"
         assert "FinderOutput" in model.bound_tool_names, str(spec["name"])
+
+
+@pytest.mark.asyncio
+async def test_stage_subagent_ignores_spine_checkpointer_and_thread(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from deepagents.backends import StateBackend
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    from agent.review.adversarial import AdversarialState, FinderOutput
+
+    caplog.set_level(logging.WARNING)
+    specs = _finder_specs(cast(BaseChatModel, _StubToolCallModel(response_tool="FinderOutput")))
+    spec = next(spec for spec in specs if spec["name"] == "correctness")
+    model = cast(_StubToolCallModel, spec["model"])
+    finder_graph = _bounded_agent(
+        model=cast(BaseChatModel, model),
+        response_format=FinderOutput,
+        backend=StateBackend(),
+        tools=cast(list[Any], spec.get("tools", [])),
+        middleware=[
+            *cast(list[Any], spec.get("middleware", [])),
+            ExcludeToolsMiddleware(excluded=frozenset({"task"})),
+        ],
+    )
+    saver = InMemorySaver()
+    config = cast(
+        RunnableConfig,
+        {
+            "configurable": {
+                "thread_id": "adversarial-spine-replica",
+                "checkpoint_ns": "",
+                CONFIG_KEY_CHECKPOINTER: saver,
+            }
+        },
+    )
+    observed: dict[str, Any] = {}
+
+    async def prepare(state: AdversarialState) -> dict[str, Any]:
+        del state
+        return {"finders_expected": ["correctness", "security"]}
+
+    def fanout(state: dict[str, Any]) -> list[Send]:
+        return [Send("find", {"finder_name": name}) for name in state["finders_expected"]]
+
+    async def find(state: AdversarialState) -> dict[str, Any]:
+        data = cast(dict[str, Any], state)
+        name = data["finder_name"]
+        try:
+            observed[name] = await _run_stage(finder_graph, "review the diff", config)
+        except Exception as exc:
+            observed[name] = exc
+        return {"finder_results": [{"finder": name, "candidates": [], "error": None}]}
+
+    builder = StateGraph(AdversarialState)
+    builder.add_node("prepare", prepare)
+    builder.add_node("find", find)
+    builder.add_edge(START, "prepare")
+    builder.add_conditional_edges("prepare", fanout)
+    builder.add_edge("find", END)
+    spine = builder.compile()
+
+    await spine.ainvoke({}, config=config, durability="sync")
+
+    assert set(observed) == {"correctness", "security"}
+    assert all(isinstance(result, FinderOutput) for result in observed.values()), (
+        f"observed={observed!r}; logs={caplog.text}"
+    )
+    assert "Ignoring unknown node name find in pending sends" not in caplog.text
+    assert model.invocations
 
 
 @pytest.mark.asyncio
