@@ -2825,3 +2825,15 @@ def test_watch_ready_file_is_not_written_when_baseline_already_wakes(
 
     assert wave.cmd_watch(_watch_args(ready_file=str(ready), until_wake=True, pr_number=53)) == 0
     assert not ready.exists()
+
+
+def test_stale_condition_marker_is_removed_without_mutating_during_iteration() -> None:
+    known_ids = {
+        "comment-1",
+        "condition:review_absent:53:old-head",
+        "condition:review_absent:53:older-head",
+    }
+    event = {"known_id": "condition:review_absent:53:new-head"}
+
+    assert wave._sync_condition_known_id(known_ids, "review_absent", event) is False
+    assert known_ids == {"comment-1"}

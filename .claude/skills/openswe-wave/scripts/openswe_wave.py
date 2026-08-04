@@ -1182,9 +1182,8 @@ def _condition_known_id(kind: str, snapshot: dict[str, Any]) -> str:
 def _sync_condition_known_id(known_ids: set[str], kind: str, event: dict[str, Any] | None) -> bool:
     prefix = f"condition:{kind}:"
     active = str(event.get("known_id")) if event else None
-    known_ids.difference_update(
-        marker for marker in known_ids if marker.startswith(prefix) and marker != active
-    )
+    stale = {marker for marker in known_ids if marker.startswith(prefix) and marker != active}
+    known_ids.difference_update(stale)
     return bool(active and active in known_ids)
 
 

@@ -251,9 +251,9 @@ def _watch_lock_held(state_path: Path) -> bool:
 
 def _run_repo(ticket: str) -> str:
     path = log_path(ticket)
-    pattern = re.compile(r"\[cmd\] dispatched \S+ to ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) ")
+    pattern = re.compile(r"^- \S+ \[cmd\] dispatched \S+ to ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) ")
     for line in reversed(path.read_text().splitlines()):
-        match = pattern.search(line)
+        match = pattern.match(line)
         if match:
             return match.group(1)
     raise RunError(
@@ -262,18 +262,16 @@ def _run_repo(ticket: str) -> str:
     )
 
 
-def post_watch_context(ticket: str, action: str) -> dict:
+def post_watch_context(ticket: str, action: str, repo: str | None = None) -> dict:
     phase = WATCH_ACTION_PHASE[action]
     state_path = watch_state_path(ticket)
     return {
         "ticket": ticket.upper(),
-        "repo": _run_repo(ticket),
+        "repo": repo or _run_repo(ticket),
         "phase": phase,
         "interval_seconds": WATCH_INTERVAL_SECONDS,
         "timeout_minutes": PHASE_TIMEOUT_MINUTES[phase],
         "state_path": str(state_path),
-        "output_path": str(state_path.with_name(f"{state_path.stem}-output.jsonl")),
-        "error_path": str(state_path.with_name(f"{state_path.stem}-error.log")),
     }
 
 
@@ -336,18 +334,12 @@ def ensure_post_watch(expected: dict) -> dict:
         str(ready_path),
     ]
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    with (
-        Path(expected["output_path"]).open("a") as stdout,
-        Path(expected["error_path"]).open("a") as stderr,
-    ):
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout,
-            stderr=stderr,
-            text=True,
-            start_new_session=True,
-        )
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
     deadline = time.monotonic() + WATCH_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         state = _read_json_object(state_path)
@@ -368,11 +360,9 @@ def ensure_post_watch(expected: dict) -> dict:
         except ProcessLookupError:
             pass
     ready_path.unlink(missing_ok=True)
-    detail = ""
-    try:
-        detail = Path(expected["error_path"]).read_text().splitlines()[-1]
-    except (OSError, IndexError):
-        pass
+    detail = (
+        f"watch process exited with status {process.poll()}" if process.poll() is not None else ""
+    )
     dogfood(
         expected["ticket"],
         "error",
@@ -1697,7 +1687,7 @@ def _post_prepared(
     guard_body_hygiene(body)
     guard_placeholders(args.ticket, body, getattr(args, "force", False))
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
-    watch_context = post_watch_context(args.ticket, action)
+    watch_context = post_watch_context(args.ticket, action, getattr(args, "repo", None))
     final = _post_with_handoff(action, args.ticket, issue["id"], body, thread_id)
     watch = ensure_post_watch(watch_context)
     dogfood(
@@ -1745,7 +1735,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
     if len(identifiers) > 1:
         guard_bundle_membership(body, identifiers)
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
-    watch_context = post_watch_context(args.ticket, "approval")
+    watch_context = post_watch_context(args.ticket, "approval", getattr(args, "repo", None))
     state = set_plan_status(thread_id, "approved", plan_mode=False)
     dogfood(
         args.ticket,
@@ -1800,7 +1790,7 @@ def cmd_reject(args: argparse.Namespace) -> int:
         args.ticket, body, False if len(identifiers) > 1 else getattr(args, "force", False)
     )
     thread_id = import_wave_module().derive_linear_thread_id(issue["id"])
-    watch_context = post_watch_context(args.ticket, "rejection")
+    watch_context = post_watch_context(args.ticket, "rejection", getattr(args, "repo", None))
     # Send the record back to revising, as the dashboard's reject endpoint does.
     # Without this a rejection posted after an approval would leave the plan
     # approved, and the resulting run would arm auto-merge on a rejected plan.
@@ -2060,6 +2050,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     approve = sub.add_parser("approve", help="post plan approval (requires --adjudicated)")
     approve.add_argument("--ticket", required=True)
+    approve.add_argument("--repo")
     approve.add_argument("--body-file", required=True)
     approve.add_argument("--adjudicated", action="store_true")
     approve.add_argument("--force", action="store_true")
@@ -2067,18 +2058,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     reject = sub.add_parser("reject", help="post plan rejection with corrections")
     reject.add_argument("--ticket", required=True)
+    reject.add_argument("--repo")
     reject.add_argument("--body-file", required=True)
     reject.add_argument("--force", action="store_true")
     reject.set_defaults(func=cmd_reject)
 
     comment = sub.add_parser("comment", help="post a mid-run message to the agent")
     comment.add_argument("--ticket", required=True)
+    comment.add_argument("--repo")
     comment.add_argument("--body-file", required=True)
     comment.add_argument("--force", action="store_true")
     comment.set_defaults(func=cmd_comment)
 
     nudge = sub.add_parser("nudge", help="post the one allowed stall nudge")
     nudge.add_argument("--ticket", required=True)
+    nudge.add_argument("--repo")
     nudge.add_argument("--minutes", type=int, default=30)
     nudge.set_defaults(func=cmd_nudge)
 
