@@ -173,8 +173,12 @@ def apply_independence(
         kept_ids = set(decision.keep_candidate_ids)
         if not kept_ids <= collision_ids:
             raise RuntimeError("same-file gate returned an unknown candidate ID")
-        if not decision.independent and len(kept_ids) > 1:
-            raise RuntimeError("non-independent findings may keep at most one candidate")
+        if not decision.independent and not kept_ids:
+            survivor = min(
+                (item for item in kept if item["candidate_id"] in collision_ids),
+                key=lambda item: (-SEVERITY_ORDER[item["severity"]], item["candidate_id"]),
+            )
+            kept_ids = {survivor["candidate_id"]}
         allowed.update(collision_ids if decision.independent else kept_ids)
     return [
         item

@@ -55,9 +55,9 @@ async def settle_review_check_on_exit(
         if not token:
             logger.warning("No GitHub token to settle stale review check on thread %s", thread_id)
             return None
-        # A pending result means publish_review DID finish but its completion
-        # PATCH failed transiently — retry with the real conclusion instead of
-        # misreporting a published review as failed.
+        # A pending result carries the intended terminal check outcome from a
+        # completed publish or an adversarial typed failure. Retry that outcome
+        # instead of replacing it with a generic incomplete-review result.
         pending = metadata.get("review_check_pending_result")
         if isinstance(pending, dict) and pending.get("conclusion") in get_args(CheckConclusion):
             conclusion = cast(CheckConclusion, pending["conclusion"])

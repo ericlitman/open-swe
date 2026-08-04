@@ -53,7 +53,13 @@ from .review.adversarial import (
     validate_verdicts,
 )
 from .review.diff import materialize_review_diff
-from .review.findings import REVIEW_FINDING_CAP, SEVERITY_ORDER, Severity
+from .review.findings import (
+    REVIEW_FINDING_CAP,
+    SEVERITY_ORDER,
+    Severity,
+    get_thread_metadata,
+    set_reviewer_thread_metadata,
+)
 from .reviewer import (
     REVIEW_STAGE_TOOL_NAMES,
     REVIEWER_EVAL_PROMPT_SUFFIX,
@@ -78,11 +84,22 @@ from .runtime import (
     graph_loaded_for_execution,
 )
 from .utils.agent_definitions import build_subagents, load_agent_definition
+from .utils.github_checks import incomplete_review_check_result
 from .utils.model import DEFAULT_LLM_REASONING, provider_model_kwargs
 from .utils.stage_profiles import resolve_stage_profile
 from .utils.tracing import REVIEW_TRACING_PROJECT, traced_graph_factory
 
 logger = logging.getLogger(__name__)
+_ADVERSARIAL_FAILURE_CLASSES = frozenset(
+    {
+        "prepare failed",
+        "finder fanout incomplete or failed",
+        "adjudication failed",
+        "pre-publish gate failed",
+        "record/publish failed",
+        "adjudication verdicts must cover every candidate ID exactly once",
+    }
+)
 RESERVED_SUBAGENT_TOOLS = frozenset(
     {
         "add_finding",
@@ -603,13 +620,12 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                         f"Run only these re-read checks: {rewalk}. Re-read diff "
                         f"{state.get('diff_path', '')} and checkout "
                         f"{state.get('working_dir', '')} with PR title "
-                        f"{state.get('pr_title', '')!r}. Review context: "
+                        f"{state.get('pr_title', '')!r}. Return only candidates and leave "
+                        "independence empty. Review context: "
                         f"{_judgment_context(state)}. Current confirmed candidates: {kept}.",
                         config,
                     ),
                 )
-                if output.independence:
-                    raise RuntimeError("re-read gate returned unexpected independence decisions")
                 additions = dedupe_candidates([item.model_dump() for item in output.candidates])
                 for index, item in enumerate(additions):
                     item["candidate_id"] = f"g{index + 1}"
@@ -641,13 +657,13 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                     await _run_stage(
                         gate_agent,
                         "Judge whether each same-file candidate group has independent failure "
-                        f"modes. Return no candidates. Review context: "
+                        "modes. Return no candidates and one independence decision per listed "
+                        "group. keep_candidate_ids must name survivors from that group and must "
+                        "not be empty for a non-independent group. Review context: "
                         f"{_judgment_context(state)}. Groups: {collisions}. Candidates: {kept}",
                         config,
                     ),
                 )
-                if output.candidates:
-                    raise RuntimeError("same-file gate cannot add candidates")
                 kept = apply_independence(kept, collisions, output.independence)
             return {
                 "gate_triggers": triggers,
@@ -656,6 +672,11 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                 "kept_candidates": kept,
             }
         except Exception as exc:
+            if kept:
+                logger.exception(
+                    "Pre-publish gate failed; publishing adjudicated candidates unchanged"
+                )
+                return {"gate_triggers": triggers, "kept_candidates": kept}
             return {"error": f"pre-publish gate failed: {exc}", "gate_triggers": triggers}
 
     async def record_publish(state: AdversarialState) -> dict[str, Any]:
@@ -706,6 +727,34 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                 error,
                 finder_errors or None,
             )
+            try:
+                metadata = await get_thread_metadata(cast(str, thread_id))
+                check_run_id = metadata.get("review_check_run_id")
+                deferred = metadata.get("review_check_deferred_result")
+                pending = metadata.get("review_check_pending_result")
+                failure_class = error.partition(":")[0]
+                if (
+                    isinstance(check_run_id, int)
+                    and not (
+                        isinstance(deferred, dict)
+                        and deferred.get("review_check_run_id") == check_run_id
+                    )
+                    and not isinstance(pending, dict)
+                    and failure_class in _ADVERSARIAL_FAILURE_CLASSES
+                ):
+                    conclusion, title, summary = incomplete_review_check_result()
+                    await set_reviewer_thread_metadata(
+                        cast(str, thread_id),
+                        extra={
+                            "review_check_pending_result": {
+                                "conclusion": conclusion,
+                                "title": title,
+                                "summary": f"{summary} Failure class: {failure_class}.",
+                            }
+                        },
+                    )
+            except Exception:
+                logger.exception("Failed to record adversarial review failure class")
         await settle_review_check_on_exit.aafter_agent(cast(AgentState, state), runtime)
         return {}
 
