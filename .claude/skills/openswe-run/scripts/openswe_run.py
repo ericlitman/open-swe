@@ -70,6 +70,7 @@ WAKE_TIMEOUT_EXIT = 3
 CHILD_FAILURE_EXIT = 4
 HANDOFF_TIMEOUT_SECONDS = 60.0
 HANDOFF_POLL_INTERVAL_SECONDS = 2.0
+LINEAR_REJECTION_POLL_INTERVAL_SECONDS = 10.0
 HANDOFF_SNAPSHOT_TIMEOUT_SECONDS = 10
 LINEAR_AGENT_ERROR_PREFIX = "❌ **Agent Error**"
 PHASE_TIMEOUT_MINUTES = {"plan": 30.0, "delivery": 90.0}
@@ -1316,9 +1317,8 @@ def _raise_if_dispatch_rejected(
         return
     try:
         rejection = _dispatch_rejection_message(issue_id, parent_comment_id)
-    except Exception:
-        _stop_handoff_process(process)
-        raise
+    except RunError:
+        return
     if rejection is not None:
         _stop_handoff_process(process)
         raise RunError(rejection)
@@ -1332,13 +1332,17 @@ def _await_handoff(
     parent_comment_id: str | None = None,
 ) -> dict:
     deadline = time.monotonic() + HANDOFF_TIMEOUT_SECONDS + 10
+    next_rejection_poll = 0.0
     while True:
-        _raise_if_dispatch_rejected(process, issue_id, parent_comment_id)
-        remaining = deadline - time.monotonic()
+        now = time.monotonic()
+        remaining = deadline - now
         if remaining <= 0:
             _raise_if_dispatch_rejected(process, issue_id, parent_comment_id)
             _stop_handoff_process(process)
             raise RunError(f"LangGraph handoff monitor overran for thread {thread_id}")
+        if now >= next_rejection_poll:
+            _raise_if_dispatch_rejected(process, issue_id, parent_comment_id)
+            next_rejection_poll = now + LINEAR_REJECTION_POLL_INTERVAL_SECONDS
         try:
             stdout, stderr = process.communicate(
                 timeout=min(HANDOFF_POLL_INTERVAL_SECONDS, remaining)

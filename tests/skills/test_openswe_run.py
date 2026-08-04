@@ -1335,6 +1335,101 @@ def test_handoff_timeout_checks_for_rejection_before_reporting_timeout(
     assert "LangGraph handoff timeout" not in message
 
 
+def test_handoff_rejection_poll_uses_slower_linear_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {"handoff": {"thread_status": "busy", "run_ids": ["run-1"]}}
+    clock = 0.0
+    attempts = 0
+    rejection_reads: list[float] = []
+
+    class Process:
+        returncode = 0
+
+        def communicate(self, timeout: float | None = None):
+            nonlocal attempts, clock
+            assert timeout is not None
+            attempts += 1
+            if attempts <= 6:
+                clock += timeout
+                raise subprocess.TimeoutExpired("handoff", timeout)
+            return run.HANDOFF_RESULT_SENTINEL + json.dumps(payload) + "\n", ""
+
+    monkeypatch.setattr(run.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(
+        run,
+        "find_dispatch_rejection",
+        lambda *args: rejection_reads.append(clock),
+    )
+
+    assert run._await_handoff(
+        Process(),
+        "thread-1",
+        issue_id="issue-1",
+        parent_comment_id="dispatch-1",
+    ) == {"thread_status": "busy", "run_ids": ["run-1"]}
+    assert rejection_reads == [0.0, 10.0, 12.0]
+
+
+def test_handoff_ignores_interim_linear_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {"handoff": {"thread_status": "busy", "run_ids": ["run-1"]}}
+
+    class Process:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return run.HANDOFF_RESULT_SENTINEL + json.dumps(payload) + "\n", ""
+
+    replies = iter([run.RunError("Linear request failed: temporary"), None])
+
+    def rejection(*args):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(run, "find_dispatch_rejection", rejection)
+
+    assert run._await_handoff(
+        Process(),
+        "thread-1",
+        issue_id="issue-1",
+        parent_comment_id="dispatch-1",
+    ) == {"thread_status": "busy", "run_ids": ["run-1"]}
+
+
+def test_handoff_final_linear_read_failure_preserves_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {"error": "LangGraph handoff timeout: missing thread"}
+
+    class Process:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return run.HANDOFF_RESULT_SENTINEL + json.dumps(payload) + "\n", ""
+
+    replies = iter([None, run.RunError("Linear request failed: temporary")])
+
+    def rejection(*args):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(run, "find_dispatch_rejection", rejection)
+
+    with pytest.raises(run.RunError, match="LangGraph handoff timeout: missing thread"):
+        run._await_handoff(
+            Process(),
+            "thread-1",
+            issue_id="issue-1",
+            parent_comment_id="dispatch-1",
+        )
+
+
 @pytest.mark.parametrize(
     ("command", "action", "status", "plan_mode"),
     [
