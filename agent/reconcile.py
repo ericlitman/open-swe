@@ -370,23 +370,26 @@ async def reconcile_auto_merge_prs() -> dict[str, int]:
                     continue
                 alert_metadata: dict[str, str] = {}
                 if mergify_state == "queued" and metadata.get("auto_merge_phase") == "queued":
-                    phase_since = _parse_created_at(metadata.get("auto_merge_phase_since"))
-                    if phase_since is not None:
-                        dwell_minutes = (now - phase_since).total_seconds() / 60
-                        if dwell_minutes > _queue_stall_threshold_minutes():
-                            alert_metadata = {
-                                "auto_merge_alert_reason": "queue_stall_in_queue",
-                                "auto_merge_alert_at": now.isoformat(),
-                            }
-                            counts["queue_stalled"] += 1
-                            logger.warning(
-                                "Auto-merge reconcile: PR %s/%s#%s stalled in queue for %.1f "
-                                "minutes",
-                                owner,
-                                repo,
-                                number,
-                                dwell_minutes,
-                            )
+                    if metadata.get("auto_merge_head_sha") != head_sha:
+                        alert_metadata["auto_merge_phase_since"] = now.isoformat()
+                    else:
+                        phase_since = _parse_created_at(metadata.get("auto_merge_phase_since"))
+                        if phase_since is not None:
+                            dwell_minutes = (now - phase_since).total_seconds() / 60
+                            if dwell_minutes > _queue_stall_threshold_minutes():
+                                alert_metadata = {
+                                    "auto_merge_alert_reason": "queue_stall_in_queue",
+                                    "auto_merge_alert_at": now.isoformat(),
+                                }
+                                counts["queue_stalled"] += 1
+                                logger.warning(
+                                    "Auto-merge reconcile: PR %s/%s#%s stalled in queue for %.1f "
+                                    "minutes",
+                                    owner,
+                                    repo,
+                                    number,
+                                    dwell_minutes,
+                                )
                 await _update_phase(
                     langgraph,
                     thread_id,

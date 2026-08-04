@@ -329,7 +329,15 @@ async def test_auto_merge_alerts_when_queue_dwell_exceeds_threshold(
 ) -> None:
     phase_since = (datetime.now(UTC) - timedelta(minutes=16)).isoformat()
     threads = _FakeThreads(
-        [[_auto_merge_thread(auto_merge_phase="queued", auto_merge_phase_since=phase_since)]]
+        [
+            [
+                _auto_merge_thread(
+                    auto_merge_phase="queued",
+                    auto_merge_phase_since=phase_since,
+                    auto_merge_head_sha="abc123",
+                )
+            ]
+        ]
     )
     _patch_auto_merge(
         monkeypatch,
@@ -354,7 +362,15 @@ async def test_auto_merge_does_not_alert_for_recent_queue_dwell(
 ) -> None:
     phase_since = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     threads = _FakeThreads(
-        [[_auto_merge_thread(auto_merge_phase="queued", auto_merge_phase_since=phase_since)]]
+        [
+            [
+                _auto_merge_thread(
+                    auto_merge_phase="queued",
+                    auto_merge_phase_since=phase_since,
+                    auto_merge_head_sha="abc123",
+                )
+            ]
+        ]
     )
     _patch_auto_merge(
         monkeypatch,
@@ -371,6 +387,41 @@ async def test_auto_merge_does_not_alert_for_recent_queue_dwell(
     assert written["auto_merge_phase_since"] == phase_since
     assert "auto_merge_alert_reason" not in written
     assert "auto_merge_alert_at" not in written
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_resets_queue_dwell_when_head_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_phase_since = (datetime.now(UTC) - timedelta(minutes=16)).isoformat()
+    threads = _FakeThreads(
+        [
+            [
+                _auto_merge_thread(
+                    auto_merge_phase="queued",
+                    auto_merge_phase_since=old_phase_since,
+                    auto_merge_head_sha="def456",
+                )
+            ]
+        ]
+    )
+    _patch_auto_merge(
+        monkeypatch,
+        threads,
+        checks=_checks(queue_status="in_progress", queue_conclusion=None),
+    )
+
+    counts = await reconcile.reconcile_auto_merge_prs()
+
+    assert counts["queue_stalled"] == 0
+    await_args = threads.update.await_args
+    assert await_args is not None
+    written = await_args.kwargs["metadata"]
+    assert "auto_merge_alert_reason" not in written
+    assert "auto_merge_alert_at" not in written
+    assert written["auto_merge_phase_since"] == written["auto_merge_phase_at"]
+    assert written["auto_merge_phase_since"] != old_phase_since
+    assert written["auto_merge_head_sha"] == "abc123"
 
 
 @pytest.mark.asyncio
@@ -478,6 +529,7 @@ async def test_auto_merge_queue_stall_threshold_env_override(
                 _auto_merge_thread(
                     auto_merge_phase="queued",
                     auto_merge_phase_since=(datetime.now(UTC) - timedelta(minutes=2)).isoformat(),
+                    auto_merge_head_sha="abc123",
                 )
             ]
         ]
@@ -507,6 +559,7 @@ async def test_auto_merge_queue_stall_threshold_invalid_env_falls_back(
                 _auto_merge_thread(
                     auto_merge_phase="queued",
                     auto_merge_phase_since=(datetime.now(UTC) - timedelta(minutes=2)).isoformat(),
+                    auto_merge_head_sha="abc123",
                 )
             ]
         ]
