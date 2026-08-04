@@ -14,7 +14,8 @@
     "."
   ],
   "dockerfile_lines": [
-    "ADD https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_linux_arm64.tar.gz /tmp/gh.tgz",
+    "# gh v2.62.0 linux_arm64 checksum from https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_checksums.txt; bump version and checksum together",
+    "ADD --checksum=sha256:a165413209aab98bfb1db9629b97bc9c59778d38bb7378a33a0363cf822e7965 https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_linux_arm64.tar.gz /tmp/gh.tgz",
     "RUN tar -xzf /tmp/gh.tgz -C /tmp && install -m 755 /tmp/gh_2.62.0_linux_arm64/bin/gh /usr/local/bin/gh-real && rm -rf /tmp/gh.tgz /tmp/gh_2.62.0_linux_arm64",
     "COPY deploy/sandbox-shims/gh-app-token /usr/local/bin/gh-app-token",
     "COPY deploy/sandbox-shims/gh /usr/local/bin/gh",

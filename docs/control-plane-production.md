@@ -310,7 +310,9 @@ could not push: no `gh`, no git credentials, a blocked thread at 03:09Z. `langgr
 amd64 hosts), the minting shims from [deploy/sandbox-shims/](../deploy/sandbox-shims/)
 (container ports of the OSWE-139 host shims; the `gh` wrapper fails closed on mint
 failure instead of falling through to ambient credentials), and a system git credential
-helper so plain `git push` authenticates as the App.
+helper so plain `git push` authenticates as the App. To bump `gh`, update the version in
+the adjacent comment, download, and install lines, then replace the checksum from that
+version's published `gh_<version>_checksums.txt`.
 
 Two related properties to keep in mind:
 
