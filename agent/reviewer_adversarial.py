@@ -352,6 +352,8 @@ def _bounded_agent(
         system_prompt=prompt,
         tools=tools or [],
         backend=backend,
+        # Stage sub-agents must not join the spine's persistence.
+        checkpointer=False,
         response_format=ToolStrategy(response_format),
         middleware=cast(list[AgentMiddleware[Any, Any, Any]], _stage_middleware(middleware)),
     )
