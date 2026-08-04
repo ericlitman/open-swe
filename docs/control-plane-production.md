@@ -154,8 +154,9 @@ described — but only for post-cutover releases: the initial cutover's port-203
 step below starts Compose before any `release-activate` has run, so `:local` does not
 exist yet on any host, managed or not. For that first staging pass, either run the manual
 build below (it tags `:local` directly) or, on a studio2-ops-managed host that already
-ran `release-build <sha>`, retag its attested image explicitly:
-`docker tag open-swe-cp-api:<sha> open-swe-control-plane-api:local`.
+ran `release-build <sha>`, retag its attested image explicitly — in the service user's
+Docker context, since the Colima daemon and the per-sha image belong to `_openswectl`:
+`sudo -n -u _openswectl env HOME="$SERVICE_HOME" PATH="$PATH" docker tag open-swe-cp-api:<sha> open-swe-control-plane-api:local`.
 
 ```bash
 cd "$CURRENT" && .venv/bin/langgraph dockerfile "$OPS_DIR/generated.Dockerfile"
