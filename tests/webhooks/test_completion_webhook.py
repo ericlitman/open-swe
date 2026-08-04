@@ -28,6 +28,17 @@ class _FakeClient:
         self.threads = _FakeThreads(metadata)
 
 
+class _JoinRuns:
+    def __init__(self, payload: Any = None) -> None:
+        self.join = AsyncMock(return_value=payload)
+
+
+class _JoinClient(_FakeClient):
+    def __init__(self, metadata: dict[str, Any], payload: Any = None) -> None:
+        super().__init__(metadata)
+        self.runs = _JoinRuns(payload)
+
+
 def _slack_metadata() -> dict[str, Any]:
     return {
         "source": "slack",
@@ -60,6 +71,92 @@ async def test_error_status_posts_slack_failure_reply(monkeypatch: pytest.Monkey
     assert client.threads.updates == [
         {"failure_reply_posted_run_id": "run-1", "failure_reply_posted_run_ids": ["run-1"]}
     ]
+
+
+@pytest.mark.asyncio
+async def test_error_status_posts_terminal_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _JoinClient(
+        _slack_metadata(),
+        {
+            "__error__": {
+                "error": "BadRequestError",
+                "message": "Error code: 400 - context_too_large",
+            }
+        },
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    client.runs.join.assert_awaited_once_with("t1", "run-1")
+    await_args = reply.await_args
+    assert await_args is not None
+    reply_text = await_args.args[2]
+    assert "Cause: BadRequestError: Error code: 400 - context_too_large" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_join_failure_keeps_generic_failure_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _JoinClient(_slack_metadata())
+    client.runs.join.side_effect = RuntimeError("join failed")
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(
+        completion, "dashboard_thread_url", lambda thread_id: f"https://ui/{thread_id}"
+    )
+    reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+    )
+
+    assert result["status"] == "ok"
+    await_args = reply.await_args
+    assert await_args is not None
+    reply_text = await_args.args[2]
+    assert reply_text == (
+        "⚠️ I wasn't able to finish that — the run hit an unexpected error. "
+        "Send another message and I'll pick it back up. "
+        "You can view the error in <https://ui/t1|Open SWE Web>."
+    )
+    assert "Cause:" not in reply_text
+
+
+@pytest.mark.asyncio
+async def test_success_status_does_not_join_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _JoinClient(_slack_metadata())
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": "success"}
+    )
+
+    assert result["status"] == "ignored"
+    client.runs.join.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_failure_cause_collapses_whitespace_and_truncates() -> None:
+    client = _JoinClient(
+        {},
+        {
+            "__error__": {
+                "error": "Bad\n  Request",
+                "message": "\t detail   " + "x" * 400,
+            }
+        },
+    )
+
+    cause = await completion._run_failure_cause(client, "t1", "run-1")
+
+    assert cause is not None
+    assert cause == ("Bad Request: detail " + "x" * 400)[:300]
+    assert len(cause) == 300
 
 
 @pytest.mark.asyncio
