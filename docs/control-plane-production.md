@@ -149,9 +149,13 @@ release flow (studio2-ops PR #15, 2026-08-04), `release-build <sha>` itself rend
 Dockerfile from the release's venv and builds the per-sha tag `open-swe-cp-api:<sha>`,
 and `release-activate` refuses a missing sha image, retags it to `:local` immediately
 before the service kickstarts, and asserts the running container's digest matches after
-health. Superseded: earlier revisions of this document had the ops compose pin a per-sha
-tag directly and had the operator build the image manually with the commands below — the
-manual form remains only for the initial cutover on a host without studio2-ops:
+health. That supersedes the per-sha compose pin earlier revisions of this document
+described — but only for post-cutover releases: the initial cutover's port-2030 staging
+step below starts Compose before any `release-activate` has run, so `:local` does not
+exist yet on any host, managed or not. For that first staging pass, either run the manual
+build below (it tags `:local` directly) or, on a studio2-ops-managed host that already
+ran `release-build <sha>`, retag its attested image explicitly:
+`docker tag open-swe-cp-api:<sha> open-swe-control-plane-api:local`.
 
 ```bash
 cd "$CURRENT" && .venv/bin/langgraph dockerfile "$OPS_DIR/generated.Dockerfile"
