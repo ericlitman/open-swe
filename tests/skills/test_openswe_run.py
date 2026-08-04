@@ -15,6 +15,11 @@ from typing import Any
 
 import pytest
 
+from agent.utils.comment_mentions import (
+    classify_comment_mention,
+    extract_adjacent_repo_directive,
+)
+
 ROOT = Path(__file__).parents[2]
 SKILL = ROOT / ".claude/skills/openswe-run"
 WAVE_SKILL = ROOT / ".claude/skills/openswe-wave"
@@ -1011,7 +1016,6 @@ def test_body_hygiene_rejects_ambiguous_directives(body: str) -> None:
     [
         ("@openswe repo owner/name — Execute ABC-1.", "owner/name"),
         ("@OpenSWE RePo:OWNER/NAME — Execute ABC-1.", "owner/name"),
-        ("@openswe repo owner/name- — Execute ABC-1.", "owner/name-"),
     ],
 )
 def test_start_repo_directive_accepts_matching_body(body: str, repo: str) -> None:
@@ -1026,15 +1030,33 @@ def test_start_repo_directive_accepts_matching_body(body: str, repo: str) -> Non
             "@openswe repo other/name — Execute ABC-1.",
             "does not match --repo",
         ),
-        (
-            "@openswe repo owner/name- — Execute ABC-1.",
-            "does not match --repo",
-        ),
     ],
 )
 def test_start_repo_directive_rejects_missing_or_conflicting_body(body: str, message: str) -> None:
     with pytest.raises(run.RunError, match=message):
         run.guard_start_repo_directive(body, "owner/name")
+
+
+@pytest.mark.parametrize(
+    ("body", "declared_repo"),
+    [
+        ("@openswe repo owner/hello- — Execute ABC-1.", "owner/hello"),
+        ("@openswe repo owner/hello. — Execute ABC-1.", "owner/hello"),
+        ("@openswe   repo owner/hello — Execute ABC-1.", "owner/hello"),
+    ],
+)
+def test_start_repo_guard_matches_authoritative_parser(body: str, declared_repo: str) -> None:
+    mention = classify_comment_mention(body, ("@openswe",))
+    parsed = extract_adjacent_repo_directive(body, mention)
+    assert parsed is not None
+    parsed_repo = "{}/{}".format(parsed["owner"], parsed["name"])
+    run.guard_body_hygiene(body)
+
+    if parsed_repo.casefold() == declared_repo.casefold():
+        run.guard_start_repo_directive(body, declared_repo)
+    else:
+        with pytest.raises(run.RunError, match="does not match --repo"):
+            run.guard_start_repo_directive(body, declared_repo)
 
 
 def test_force_cannot_bypass_body_hygiene(monkeypatch: pytest.MonkeyPatch) -> None:

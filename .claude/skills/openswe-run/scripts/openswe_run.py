@@ -97,7 +97,13 @@ INLINE_CODE_RE = re.compile(r"(?<![\\`])(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!
 DIRECTIVE_MENTION_RE = re.compile(r"@openswe\b", re.IGNORECASE)
 # Remove the repository-directive workaround when OSWE-166 closes.
 REPO_DIRECTIVE_RE = re.compile(
-    r"\brepo(?:\s+|:\s*)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b",
+    r"\brepo(?:\s+|:\s*)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?=$|[\s.,;:!?—–])",
+    re.IGNORECASE,
+)
+# Keep this grammar aligned with agent.utils.comment_mentions.extract_adjacent_repo_directive.
+ADJACENT_REPO_DIRECTIVE_RE = re.compile(
+    r"^@openswe[ \t]+(?P<directive>repo(?::|[ \t]+)"
+    r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))(?=$|[\s.,;:!?—–])",
     re.IGNORECASE,
 )
 
@@ -1050,12 +1056,8 @@ def guard_body_hygiene(body: str) -> None:
             "later or duplicate mentions are refused."
         )
     directives = list(REPO_DIRECTIVE_RE.finditer(body))
-    allowed = re.match(
-        r"^@openswe (repo(?:\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))\b",
-        body,
-        flags=re.IGNORECASE,
-    )
-    allowed_span = allowed.span(1) if allowed else None
+    allowed = ADJACENT_REPO_DIRECTIVE_RE.match(body)
+    allowed_span = allowed.span("directive") if allowed else None
     if any(match.span() != allowed_span for match in directives):
         raise RunError(
             "A repository directive is allowed only immediately after the first-line "
@@ -1064,11 +1066,7 @@ def guard_body_hygiene(body: str) -> None:
 
 
 def guard_start_repo_directive(body: str, repo: str) -> None:
-    match = re.match(
-        r"^@openswe repo(?:\s+|:)(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?=$|[\s.,;:!?—–])",
-        body,
-        flags=re.IGNORECASE,
-    )
+    match = ADJACENT_REPO_DIRECTIVE_RE.match(body)
     if match is None:
         raise RunError(
             "A custom start body must specify the resolved repository immediately after "
