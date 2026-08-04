@@ -1065,7 +1065,7 @@ def guard_body_hygiene(body: str) -> None:
 
 def guard_start_repo_directive(body: str, repo: str) -> None:
     match = re.match(
-        r"^@openswe repo(?:\s+|:)(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b",
+        r"^@openswe repo(?:\s+|:)(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?=$|[\s.,;:!?—–])",
         body,
         flags=re.IGNORECASE,
     )

@@ -1007,14 +1007,15 @@ def test_body_hygiene_rejects_ambiguous_directives(body: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "repo"),
     [
-        "@openswe repo owner/name — Execute ABC-1.",
-        "@OpenSWE RePo:OWNER/NAME — Execute ABC-1.",
+        ("@openswe repo owner/name — Execute ABC-1.", "owner/name"),
+        ("@OpenSWE RePo:OWNER/NAME — Execute ABC-1.", "owner/name"),
+        ("@openswe repo owner/name- — Execute ABC-1.", "owner/name-"),
     ],
 )
-def test_start_repo_directive_accepts_matching_body(body: str) -> None:
-    run.guard_start_repo_directive(body, "owner/name")
+def test_start_repo_directive_accepts_matching_body(body: str, repo: str) -> None:
+    run.guard_start_repo_directive(body, repo)
 
 
 @pytest.mark.parametrize(
@@ -1023,6 +1024,10 @@ def test_start_repo_directive_accepts_matching_body(body: str) -> None:
         ("@openswe Execute ABC-1.", "must specify the resolved repository"),
         (
             "@openswe repo other/name — Execute ABC-1.",
+            "does not match --repo",
+        ),
+        (
+            "@openswe repo owner/name- — Execute ABC-1.",
             "does not match --repo",
         ),
     ],
