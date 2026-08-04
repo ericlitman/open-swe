@@ -51,6 +51,7 @@ from .dashboard.team_settings import (
 )
 from .middleware import (
     BasePrepareRunMiddleware,
+    ContextOverflowPromotionMiddleware,
     ExcludeToolsMiddleware,
     RepairOrphanedToolCallsMiddleware,
     SanitizeFireworksMessagesMiddleware,
@@ -1518,6 +1519,7 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
                 SanitizeToolInputsMiddleware(),
                 ModelCallLimitMiddleware(run_limit=MODEL_CALL_RECURSION_LIMIT, exit_behavior="end"),
                 ToolErrorMiddleware(),
+                ContextOverflowPromotionMiddleware(),
                 refresh_github_proxy_before_model,
                 check_message_queue_before_model,
                 SlackAssistantStatusMiddleware(),
