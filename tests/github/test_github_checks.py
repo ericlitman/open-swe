@@ -158,6 +158,34 @@ async def test_complete_review_check_run_patches_completed(
     assert body["output"]["title"] == "Found 2 potential issues"
 
 
+async def test_fetch_review_check_run_status_returns_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github_checks.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.get_response = _FakeResponse({"status": "in_progress"})
+
+    status = await github_checks.fetch_review_check_run_status(
+        owner="acme", repo="widgets", check_run_id=42, token="tok"
+    )
+
+    assert status == "in_progress"
+    assert _FakeAsyncClient.last_get is not None
+    assert _FakeAsyncClient.last_get["url"].endswith("/repos/acme/widgets/check-runs/42")
+
+
+async def test_fetch_review_check_run_status_returns_none_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github_checks.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.get_response = _FakeResponse(error=True)
+
+    status = await github_checks.fetch_review_check_run_status(
+        owner="acme", repo="widgets", check_run_id=42, token="tok"
+    )
+
+    assert status is None
+
+
 async def test_fetch_pull_request_head_sha_returns_current_head(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -454,7 +482,7 @@ async def test_settle_review_check_run_keeps_id_on_patch_failure(
     ]
 
 
-async def test_expected_check_settlement_targets_held_check_without_clearing_current_id(
+async def test_expected_check_settlement_targets_and_clears_owned_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -490,13 +518,14 @@ async def test_expected_check_settlement_targets_held_check_without_clearing_cur
     set_metadata.assert_awaited_once_with(
         "t1",
         extra={
+            "review_check_run_id": None,
             "review_check_pending_result": None,
             "review_check_deferred_result": None,
         },
     )
 
 
-async def test_expected_check_settlement_skips_replacement_check(
+async def test_expected_check_settlement_completes_owned_check_not_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -520,5 +549,13 @@ async def test_expected_check_settlement_skips_replacement_check(
         expected_check_run_id=42,
     )
 
-    complete.assert_not_awaited()
+    complete.assert_awaited_once_with(
+        owner="acme",
+        repo="widgets",
+        check_run_id=42,
+        token="tok",
+        conclusion="success",
+        title="No issues found",
+        summary="done",
+    )
     set_metadata.assert_not_awaited()

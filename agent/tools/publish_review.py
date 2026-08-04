@@ -137,6 +137,11 @@ async def publish_review(
     pr_number = configurable.get("pr_number")
     head_sha = configurable.get("head_sha")
     is_re_review = bool(configurable.get("re_review"))
+    is_finding_reply = configurable.get("reviewer_event") == "finding_reply"
+    configured_check_run_id = configurable.get("review_check_run_id")
+    review_check_run_id = (
+        configured_check_run_id if isinstance(configured_check_run_id, int) else None
+    )
     raw_branch_name = configurable.get("branch_name")
     branch_name = raw_branch_name if isinstance(raw_branch_name, str) else ""
 
@@ -186,6 +191,8 @@ async def publish_review(
             severity_threshold=_cast_severity(severity_threshold),
             cap=REVIEW_FINDING_CAP,
             is_re_review=is_re_review,
+            is_finding_reply=is_finding_reply,
+            review_check_run_id=review_check_run_id,
             branch_name=branch_name,
             langgraph_run_id=_current_run_id(config),
             trace_link_config_override=configurable.get("review_trace_link_enabled"),
@@ -335,6 +342,7 @@ async def _settle_or_defer_review_check(
     title: str,
     summary: str,
     head_sha: str,
+    review_check_run_id: int | None = None,
 ) -> bool:
     (
         state,
@@ -367,6 +375,11 @@ async def _settle_or_defer_review_check(
             summary=final_summary,
             head_sha=head_sha,
             create_if_missing=True,
+            **(
+                {"expected_check_run_id": review_check_run_id}
+                if review_check_run_id is not None
+                else {}
+            ),
         )
         return False
     if state == "unknown" or implementation_thread_id is None:
@@ -380,11 +393,19 @@ async def _settle_or_defer_review_check(
             summary="Open SWE could not verify that PR-linked implementation work is complete.",
             head_sha=head_sha,
             create_if_missing=True,
+            **(
+                {"expected_check_run_id": review_check_run_id}
+                if review_check_run_id is not None
+                else {}
+            ),
         )
         return False
 
     metadata = await get_thread_metadata(thread_id)
-    check_run_id = metadata.get("review_check_run_id")
+    current_check_run_id = metadata.get("review_check_run_id")
+    check_run_id = review_check_run_id
+    if not isinstance(check_run_id, int):
+        check_run_id = current_check_run_id if isinstance(current_check_run_id, int) else None
     if not isinstance(check_run_id, int):
         await settle_review_check_run(
             thread_id=thread_id,
@@ -396,6 +417,18 @@ async def _settle_or_defer_review_check(
             summary=summary,
             head_sha=head_sha,
             create_if_missing=True,
+        )
+        return False
+    if review_check_run_id is not None and current_check_run_id != review_check_run_id:
+        await settle_review_check_run(
+            thread_id=thread_id,
+            owner=owner,
+            repo=repo,
+            token=token,
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+            expected_check_run_id=review_check_run_id,
         )
         return False
     deferred = {
@@ -471,6 +504,8 @@ async def _publish_review_async(
     severity_threshold: Severity,
     cap: int,
     is_re_review: bool,
+    is_finding_reply: bool = False,
+    review_check_run_id: int | None = None,
     branch_name: str = "",
     langgraph_run_id: str | None = None,
     trace_link_config_override: object = None,
@@ -556,22 +591,25 @@ async def _publish_review_async(
             token=token,
             findings=findings,
         )
-        await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
+        if not is_finding_reply:
+            await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
         await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
-        check_finding_count = await _review_check_finding_count(thread_id, 0)
-        conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
-        await _settle_or_defer_review_check(
-            thread_id=thread_id,
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            branch_name=branch_name,
-            token=token,
-            conclusion=conclusion,
-            title=check_title,
-            summary=check_summary,
-            head_sha=head_sha,
-        )
+        if not is_finding_reply:
+            check_finding_count = await _review_check_finding_count(thread_id, 0)
+            conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
+            await _settle_or_defer_review_check(
+                thread_id=thread_id,
+                owner=owner,
+                repo=repo,
+                pr_number=pr_number,
+                branch_name=branch_name,
+                token=token,
+                conclusion=conclusion,
+                title=check_title,
+                summary=check_summary,
+                head_sha=head_sha,
+                review_check_run_id=review_check_run_id,
+            )
         return {
             "success": True,
             "review_id": None,
@@ -746,22 +784,25 @@ async def _publish_review_async(
             surfaced_count=len(inline_comments),
         )
 
-    await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
+    if not is_finding_reply:
+        await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
     await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
-    check_finding_count = await _review_check_finding_count(thread_id, len(inline_comments))
-    conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
-    await _settle_or_defer_review_check(
-        thread_id=thread_id,
-        owner=owner,
-        repo=repo,
-        pr_number=pr_number,
-        branch_name=branch_name,
-        token=token,
-        conclusion=conclusion,
-        title=check_title,
-        summary=check_summary,
-        head_sha=head_sha,
-    )
+    if not is_finding_reply:
+        check_finding_count = await _review_check_finding_count(thread_id, len(inline_comments))
+        conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
+        await _settle_or_defer_review_check(
+            thread_id=thread_id,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            branch_name=branch_name,
+            token=token,
+            conclusion=conclusion,
+            title=check_title,
+            summary=check_summary,
+            head_sha=head_sha,
+            review_check_run_id=review_check_run_id,
+        )
     if review_id is not None and eligible_with_payload:
         await _maybe_dispatch_review_autofix(
             owner=owner,

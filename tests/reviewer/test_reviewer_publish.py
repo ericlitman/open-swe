@@ -1060,6 +1060,96 @@ async def test_publish_review_skips_duplicate_empty_summary_when_open_swe_alread
 
 
 @pytest.mark.asyncio
+async def test_finding_reply_empty_publish_does_not_advance_reviewed_head_or_settle_check() -> None:
+    from agent.tools.publish_review import _publish_review_async
+
+    set_metadata = AsyncMock()
+    settle = AsyncMock()
+    clear_started = AsyncMock()
+
+    with (
+        patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),
+        patch("agent.tools.publish_review.list_findings_async", AsyncMock(return_value=[])),
+        patch(
+            "agent.tools.publish_review.resolve_review_head_sha",
+            AsyncMock(return_value="newsha"),
+        ),
+        patch("agent.tools.publish_review.open_swe_review_exists", AsyncMock(return_value=True)),
+        patch("agent.tools.publish_review.post_pull_request_review", AsyncMock()) as post_review,
+        patch(
+            "agent.tools.publish_review._resolve_threads_for_resolved_findings",
+            AsyncMock(return_value=0),
+        ) as resolve_threads,
+        patch("agent.tools.publish_review.set_reviewer_thread_metadata", set_metadata),
+        patch("agent.tools.publish_review._settle_or_defer_review_check", settle),
+        patch("agent.tools.publish_review.clear_review_started_comment", clear_started),
+    ):
+        result = await _publish_review_async(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="oldsha",
+            token="t",
+            severity_threshold="medium",
+            cap=15,
+            is_re_review=True,
+            is_finding_reply=True,
+        )
+
+    assert result["skipped_empty_re_review"] is True
+    post_review.assert_not_awaited()
+    resolve_threads.assert_awaited_once()
+    set_metadata.assert_not_awaited()
+    settle.assert_not_awaited()
+    clear_started.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_finding_reply_publish_preserves_review_without_advancing_reviewed_head() -> None:
+    from agent.tools.publish_review import _publish_review_async
+
+    finding = _f(id="f_new", file="b.py", start_line=2, end_line=2, first_seen_sha="newsha")
+    post_review = AsyncMock(return_value={"id": 4242})
+    set_metadata = AsyncMock()
+    settle = AsyncMock()
+
+    with (
+        patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),
+        patch("agent.tools.publish_review.list_findings_async", AsyncMock(return_value=[finding])),
+        patch(
+            "agent.tools.publish_review.resolve_review_head_sha",
+            AsyncMock(return_value="newsha"),
+        ),
+        patch("agent.tools.publish_review.post_pull_request_review", post_review),
+        patch("agent.tools.publish_review.fetch_review_comments", AsyncMock(return_value=[])),
+        patch(
+            "agent.tools.publish_review._resolve_threads_for_resolved_findings",
+            AsyncMock(return_value=0),
+        ),
+        patch("agent.tools.publish_review.set_reviewer_thread_metadata", set_metadata),
+        patch("agent.tools.publish_review._settle_or_defer_review_check", settle),
+        patch("agent.tools.publish_review.clear_review_started_comment", AsyncMock()),
+    ):
+        result = await _publish_review_async(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="oldsha",
+            token="t",
+            severity_threshold="medium",
+            cap=15,
+            is_re_review=True,
+            is_finding_reply=True,
+            langgraph_run_id="run-x",
+        )
+
+    assert result["success"] is True
+    post_review.assert_awaited_once()
+    assert all("last_reviewed_sha" not in call.kwargs for call in set_metadata.await_args_list)
+    settle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_publish_review_uses_resolved_head_sha_for_commit_and_last_reviewed() -> None:
     """A push that landed mid-run updates the live head in thread metadata.
     publish_review must anchor the GitHub review to that head and advance
@@ -2497,6 +2587,38 @@ async def test_success_check_is_deferred_while_implementation_run_is_active() ->
     assert deferred_state["implementation_run_id"] == "run-fix-now"
     assert deferred_state["review_check_run_id"] == 42
     assert deferred_state["head_sha"] == "unchanged-head"
+
+
+@pytest.mark.asyncio
+async def test_publish_settles_owned_check_instead_of_replacement_check() -> None:
+    from agent.tools.publish_review import _settle_or_defer_review_check
+
+    settle = AsyncMock()
+    with (
+        patch(
+            "agent.tools.publish_review._implementation_run_state",
+            AsyncMock(return_value=("inactive", None, None, None)),
+        ),
+        patch("agent.tools.publish_review.settle_review_check_run", settle),
+    ):
+        deferred = await _settle_or_defer_review_check(
+            thread_id="reviewer-thread",
+            owner="o",
+            repo="r",
+            pr_number=77,
+            branch_name="feature",
+            token="token",
+            conclusion="success",
+            title="No issues found",
+            summary="done",
+            head_sha="head-a",
+            review_check_run_id=42,
+        )
+
+    assert deferred is False
+    settle.assert_awaited_once()
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["expected_check_run_id"] == 42
 
 
 @pytest.mark.asyncio

@@ -273,6 +273,8 @@ async def test_push_event_triggers_re_review_run_when_watching() -> None:
     args, kwargs = fake_client.runs.create.await_args
     assert args[1] == "reviewer"
     configurable = kwargs["config"]["configurable"]
+    assert configurable["review_check_run_id"] == 99
+    assert kwargs["config"]["metadata"]["review_check_run_id"] == 99
     assert configurable["re_review"] is True
     assert configurable["last_reviewed_sha"] == "oldsha"
     assert configurable["head_sha"] == "newsha"
@@ -300,6 +302,115 @@ async def test_push_event_triggers_re_review_run_when_watching() -> None:
         if "review_check_run_id" in (c.kwargs.get("extra") or {})
     ]
     assert 99 in check_id_writes
+
+
+@pytest.mark.asyncio
+async def test_autofix_reply_publish_does_not_suppress_new_head_full_review() -> None:
+    from agent.tools.publish_review import _publish_review_async
+
+    shared_metadata: dict[str, Any] = {
+        "kind": "reviewer",
+        "watch": True,
+        "last_reviewed_sha": "oldsha",
+        "head_sha": "newsha",
+    }
+
+    async def update_metadata(thread_id: str, **kwargs: Any) -> None:
+        del thread_id
+        shared_metadata.update({key: value for key, value in kwargs.items() if value is not None})
+
+    with (
+        patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),
+        patch("agent.tools.publish_review.list_findings_async", AsyncMock(return_value=[])),
+        patch(
+            "agent.tools.publish_review.resolve_review_head_sha",
+            AsyncMock(return_value="newsha"),
+        ),
+        patch(
+            "agent.tools.publish_review._open_swe_already_reviewed", AsyncMock(return_value=True)
+        ),
+        patch("agent.tools.publish_review.post_pull_request_review", AsyncMock()),
+        patch(
+            "agent.tools.publish_review._resolve_threads_for_resolved_findings",
+            AsyncMock(return_value=1),
+        ),
+        patch(
+            "agent.tools.publish_review.set_reviewer_thread_metadata",
+            AsyncMock(side_effect=update_metadata),
+        ),
+        patch("agent.tools.publish_review.clear_review_started_comment", AsyncMock()),
+        patch("agent.tools.publish_review._settle_or_defer_review_check", AsyncMock()) as settle,
+    ):
+        result = await _publish_review_async(
+            owner="lc",
+            repo="repo",
+            pr_number=7,
+            head_sha="oldsha",
+            token="t",
+            severity_threshold="medium",
+            cap=15,
+            is_re_review=True,
+            is_finding_reply=True,
+        )
+
+    assert result["skipped_empty_re_review"] is True
+    assert shared_metadata["last_reviewed_sha"] == "oldsha"
+    settle.assert_not_awaited()
+
+    payload = _push_payload(ref="refs/heads/feat-x", after="newsha")
+    pr = {
+        "number": 7,
+        "html_url": "https://github.com/lc/repo/pull/7",
+        "title": "T",
+        "head": {"sha": "newsha", "ref": "feat-x"},
+        "base": {"sha": "basesha", "ref": "main"},
+    }
+    fake_client = MagicMock()
+    fake_client.runs.create = AsyncMock()
+
+    with (
+        patch(
+            "agent.webhooks.common._is_repo_auto_review_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.webhooks.common.get_github_app_installation_token_with_expiry",
+            AsyncMock(return_value=("t", None)),
+        ),
+        patch(
+            "agent.webhooks.common._fetch_open_pr_for_branch",
+            AsyncMock(return_value=pr),
+        ),
+        patch(
+            "agent.webhooks.common._get_thread_metadata_safe",
+            AsyncMock(return_value=shared_metadata),
+        ),
+        patch(
+            "agent.webhooks.common._fetch_compare_diff",
+            AsyncMock(side_effect=["old diff", "new diff"]),
+        ),
+        patch(
+            "agent.webhooks.common._ensure_thread_exists_for_metadata",
+            AsyncMock(return_value=True),
+        ),
+        patch("agent.webhooks.common.set_reviewer_thread_metadata", AsyncMock()),
+        patch("agent.webhooks.common.create_review_check_run", AsyncMock(return_value=99)),
+        patch(
+            "agent.webhooks.common.reviewer_assistant_for_dispatch",
+            AsyncMock(return_value="reviewer"),
+        ),
+        patch("agent.webhooks.common.get_client", return_value=fake_client),
+    ):
+        await github_webhooks.process_github_push_event(payload)
+
+    fake_client.runs.create.assert_awaited_once()
+    assert fake_client.runs.create.await_args is not None
+    _, kwargs = fake_client.runs.create.await_args
+    configurable = kwargs["config"]["configurable"]
+    assert configurable["last_reviewed_sha"] == "oldsha"
+    assert configurable["head_sha"] == "newsha"
+    assert configurable["review_check_run_id"] == 99
+    assert kwargs["config"]["metadata"]["review_check_run_id"] == 99
 
 
 @pytest.mark.asyncio

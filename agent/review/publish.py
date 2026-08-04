@@ -467,8 +467,6 @@ async def settle_review_check_run(
     metadata = await get_thread_metadata(thread_id)
     check_run_id = metadata.get("review_check_run_id")
     if expected_check_run_id is not None:
-        if check_run_id != expected_check_run_id:
-            return True
         ok = await complete_review_check_run(
             owner=owner,
             repo=repo,
@@ -478,25 +476,27 @@ async def settle_review_check_run(
             title=title,
             summary=summary,
         )
-        if ok:
-            await set_reviewer_thread_metadata(
-                thread_id,
-                extra={
-                    "review_check_pending_result": None,
-                    "review_check_deferred_result": None,
-                },
-            )
-        else:
-            await set_reviewer_thread_metadata(
-                thread_id,
-                extra={
-                    "review_check_pending_result": {
-                        "conclusion": conclusion,
-                        "title": title,
-                        "summary": summary,
-                    }
-                },
-            )
+        if check_run_id == expected_check_run_id:
+            if ok:
+                await set_reviewer_thread_metadata(
+                    thread_id,
+                    extra={
+                        "review_check_run_id": None,
+                        "review_check_pending_result": None,
+                        "review_check_deferred_result": None,
+                    },
+                )
+            else:
+                await set_reviewer_thread_metadata(
+                    thread_id,
+                    extra={
+                        "review_check_pending_result": {
+                            "conclusion": conclusion,
+                            "title": title,
+                            "summary": summary,
+                        }
+                    },
+                )
         return ok
     if not isinstance(check_run_id, int):
         if not (

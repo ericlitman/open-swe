@@ -15,6 +15,14 @@ from ..utils.slack import GitHubPrRef
 from . import common
 
 
+def _review_run_metadata(check_run_id: int | None) -> dict[str, Any]:
+    """Attach the full-review check id to immutable run metadata."""
+    metadata: dict[str, Any] = dict(common._AGENT_VERSION_METADATA)
+    if check_run_id is not None:
+        metadata["review_check_run_id"] = check_run_id
+    return metadata
+
+
 def build_github_issue_prompt(
     repo_config: dict[str, str],
     issue_number: int,
@@ -310,6 +318,8 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         re_review=is_re_review,
         last_reviewed_sha=last_reviewed_sha,
     )
+    if check_run_id is not None:
+        configurable["review_check_run_id"] = check_run_id
     assistant_id = await common.reviewer_assistant_for_dispatch(
         re_review=is_re_review,
         finding_reply=False,
@@ -323,7 +333,7 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         configurable,
         source=source,
         assistant_id=assistant_id,
-        metadata=common._AGENT_VERSION_METADATA,
+        metadata=_review_run_metadata(check_run_id),
         client=langgraph_client,
     )
     await common._store_current_reviewer_run_id(thread_id, run)
@@ -629,6 +639,8 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         re_review=True,
         last_reviewed_sha=last_reviewed_sha if isinstance(last_reviewed_sha, str) else "",
     )
+    if check_run_id is not None:
+        configurable["review_check_run_id"] = check_run_id
     assistant_id = await common.reviewer_assistant_for_dispatch(
         re_review=True,
         finding_reply=False,
@@ -642,7 +654,7 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         configurable,
         source="github_push",
         assistant_id=assistant_id,
-        metadata=common._AGENT_VERSION_METADATA,
+        metadata=_review_run_metadata(check_run_id),
         client=langgraph_client,
     )
     await common._store_current_reviewer_run_id(thread_id, run)
