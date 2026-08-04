@@ -179,19 +179,41 @@ async def _run_failure_cause(client: Any, thread_id: str, run_id: str) -> str | 
         return None
 
 
-async def _run_created_at(client: Any, thread_id: str, run_id: str) -> str | None:
+async def _consecutive_failures(client: Any, thread_id: str, completed_run_id: str | None) -> int:
     try:
-        run = await client.runs.get(thread_id, run_id)
+        runs = await client.runs.list(thread_id, limit=10)
+        ordered_runs = sorted(
+            runs,
+            key=lambda run: _run_value(run, "created_at") or "",
+            reverse=True,
+        )
+        streak = 0
+        completed_run_found = False
+        for run in ordered_runs:
+            listed_run_id = _run_value(run, "run_id") or _run_value(run, "id")
+            if completed_run_id is not None and listed_run_id == completed_run_id:
+                streak += 1
+                completed_run_found = True
+                continue
+
+            status = _run_value(run, "status")
+            status = status.lower() if isinstance(status, str) else None
+            if status in _TERMINAL_FAILURE_STATUSES:
+                streak += 1
+            elif status == "success":
+                break
+
+        if completed_run_id is not None and not completed_run_found:
+            streak += 1
+        return streak
     except Exception:  # noqa: BLE001
         logger.debug(
-            "run-complete: could not inspect run created_at for %s/%s",
+            "run-complete: could not derive consecutive failures for %s/%s",
             thread_id,
-            run_id,
+            completed_run_id,
             exc_info=True,
         )
-        return None
-    created_at = _run_value(run, "created_at")
-    return created_at if isinstance(created_at, str) and created_at else None
+        return 1
 
 
 async def _latest_run_info(client: Any, thread_id: str) -> tuple[str | None, str | None, bool]:
@@ -427,35 +449,6 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         deferred_settled = False
         deferred_error = RuntimeError("Deferred review check settlement failed")
     if status not in _TERMINAL_FAILURE_STATUSES:
-        if status == "success":
-            stored_streak = metadata.get("failure_streak")
-            if isinstance(stored_streak, int) and stored_streak != 0:
-                should_reset = True
-                if run_id is not None:
-                    success_created_at = await _run_created_at(client, thread_id, run_id)
-                    failure_created_at = metadata.get("failure_streak_last_run_created_at")
-                    if (
-                        success_created_at is not None
-                        and isinstance(failure_created_at, str)
-                        and success_created_at < failure_created_at
-                    ):
-                        should_reset = False
-                if should_reset:
-                    try:
-                        await client.threads.update(
-                            thread_id=thread_id,
-                            metadata={
-                                "failure_streak": 0,
-                                "failure_streak_last_run_id": None,
-                                "failure_streak_last_run_created_at": None,
-                            },
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.warning(
-                            "run-complete: could not reset failure streak for %s",
-                            thread_id,
-                            exc_info=True,
-                        )
         if deferred_error is not None:
             raise deferred_error
         return {
@@ -480,22 +473,7 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         return {"status": "ignored", "reason": "failure reply already posted for run"}
 
     cause = await _run_failure_cause(client, thread_id, run_id) if run_id is not None else None
-
-    streak = 0
-    streak_update: dict[str, Any] | None = None
-    if run_id is not None:
-        stored_streak = metadata.get("failure_streak")
-        stored_streak = stored_streak if isinstance(stored_streak, int) else 0
-        if run_id != metadata.get("failure_streak_last_run_id"):
-            streak = stored_streak + 1
-            run_created_at = await _run_created_at(client, thread_id, run_id)
-            streak_update = {
-                "failure_streak": streak,
-                "failure_streak_last_run_id": run_id,
-                "failure_streak_last_run_created_at": run_created_at,
-            }
-        else:
-            streak = stored_streak
+    streak = await _consecutive_failures(client, thread_id, run_id)
 
     posted = await _post_failure_reply(thread_id, metadata, status, cause, streak)
     if not posted:
@@ -504,8 +482,6 @@ async def handle_run_completion(payload: dict[str, Any]) -> dict[str, str]:
         return {"status": "ignored", "reason": "no reply posted"}
 
     reply_metadata = _failure_reply_metadata(metadata, run_id)
-    if streak_update:
-        reply_metadata.update(streak_update)
     try:
         await client.threads.update(
             thread_id=thread_id,

@@ -81,6 +81,7 @@ async def test_reset_thread_preserves_metadata_and_drops_failure_tracking() -> N
         "failure_reply_posted_run_ids": ["run-1", "run-2"],
         "failure_streak": 2,
         "failure_streak_last_run_id": "run-2",
+        "failure_streak_last_run_created_at": "2026-01-01T00:00:05Z",
         "latest_run_status": "running",
     }
     threads = _StubThreads({"thread_id": "tid", "metadata": metadata})
@@ -107,6 +108,7 @@ async def test_reset_thread_preserves_metadata_and_drops_failure_tracking() -> N
         ],
         "dropped_keys": [
             "failure_streak",
+            "failure_streak_last_run_created_at",
             "failure_streak_last_run_id",
             "latest_run_status",
         ],

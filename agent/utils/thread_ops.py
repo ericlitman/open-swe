@@ -60,10 +60,7 @@ async def reset_thread_preserving_metadata(
     preserved: dict[str, Any] = {}
     dropped: list[str] = []
     for key, value in metadata.items():
-        if key in {
-            "failure_streak",
-            "failure_streak_last_run_id",
-        } or key.startswith("latest_run_"):
+        if key.startswith("failure_streak") or key.startswith("latest_run_"):
             dropped.append(key)
         else:
             preserved[key] = value
