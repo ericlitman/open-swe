@@ -668,11 +668,11 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
     pr_url = pr.get("html_url") or pr.get("url") or ""
     base_sha = pr.get("base", {}).get("sha", "")
     base_ref = pr.get("base", {}).get("ref", "")
-    head_sha = pr.get("head", {}).get("sha", after_sha)
+    head_sha = after_sha
     pr_title = pr.get("title", "")
-    if not isinstance(pr_number, int) or not base_sha or not head_sha:
+    if not isinstance(pr_number, int) or not base_sha:
         common.logger.warning(
-            "Push to %s/%s head=%s ignored: PR metadata missing number/base/head SHA",
+            "Push to %s/%s head=%s ignored: PR metadata missing number/base SHA",
             repo_config["owner"],
             repo_config["name"],
             head_ref,

@@ -528,6 +528,128 @@ async def test_finding_reply_then_push_full_review_advances_head_and_settles_che
 
 
 @pytest.mark.asyncio
+async def test_push_event_uses_payload_head_when_pr_fetch_is_stale() -> None:
+    payload = _push_payload(ref="refs/heads/feat-x", after="newsha")
+    pr = {
+        "number": 7,
+        "html_url": "https://github.com/lc/repo/pull/7",
+        "title": "T",
+        "head": {"sha": "stale-sha", "ref": "feat-x"},
+        "base": {"sha": "basesha", "ref": "main"},
+    }
+    fake_client = MagicMock()
+    dispatch_run = AsyncMock(return_value={"run_id": "run-2"})
+
+    with (
+        patch("agent.webhooks.common._is_repo_auto_review_enabled", AsyncMock(return_value=True)),
+        patch(
+            "agent.webhooks.common.get_github_app_installation_token_with_expiry",
+            AsyncMock(return_value=("t", None)),
+        ),
+        patch("agent.webhooks.common._fetch_open_pr_for_branch", AsyncMock(return_value=pr)),
+        patch(
+            "agent.webhooks.common._get_thread_metadata_safe",
+            AsyncMock(
+                return_value={
+                    "kind": "reviewer",
+                    "watch": True,
+                    "last_reviewed_sha": "oldsha",
+                }
+            ),
+        ),
+        patch(
+            "agent.webhooks.common._is_pr_diff_unchanged_since_last_review",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "agent.webhooks.common._ensure_thread_exists_for_metadata",
+            AsyncMock(return_value=True),
+        ),
+        patch("agent.webhooks.common.fetch_pr_review_threads", AsyncMock(return_value=[])),
+        patch("agent.webhooks.common.reconcile_findings_with_review_threads", AsyncMock()),
+        patch("agent.webhooks.common.set_reviewer_thread_metadata", AsyncMock()) as set_metadata,
+        patch(
+            "agent.webhooks.common.create_review_check_run", AsyncMock(return_value=99)
+        ) as create_check,
+        patch(
+            "agent.webhooks.common.reviewer_assistant_for_dispatch",
+            AsyncMock(return_value="reviewer"),
+        ),
+        patch("agent.webhooks.common.dispatch_agent_run", dispatch_run),
+        patch("agent.webhooks.common._store_current_reviewer_run_id", AsyncMock()),
+        patch("agent.webhooks.common.get_client", return_value=fake_client),
+    ):
+        await github_webhooks.process_github_push_event(payload)
+
+    create_check.assert_awaited_once()
+    assert create_check.await_args is not None
+    assert create_check.await_args.kwargs["head_sha"] == "newsha"
+    dispatch_run.assert_awaited_once()
+    assert dispatch_run.await_args is not None
+    configurable = dispatch_run.await_args.args[2]
+    assert configurable["head_sha"] == "newsha"
+    head_sha_writes = [
+        item.kwargs.get("head_sha")
+        for item in set_metadata.await_args_list
+        if item.kwargs.get("head_sha") is not None
+    ]
+    assert head_sha_writes == ["newsha"]
+
+
+@pytest.mark.asyncio
+async def test_push_event_new_payload_head_is_not_deduped_by_stale_pr_head() -> None:
+    payload = _push_payload(ref="refs/heads/feat-x", after="newsha")
+    pr = {
+        "number": 7,
+        "html_url": "https://github.com/lc/repo/pull/7",
+        "title": "T",
+        "head": {"sha": "oldsha", "ref": "feat-x"},
+        "base": {"sha": "basesha", "ref": "main"},
+    }
+    diff_unchanged = AsyncMock(return_value=True)
+
+    with (
+        patch("agent.webhooks.common._is_repo_auto_review_enabled", AsyncMock(return_value=True)),
+        patch(
+            "agent.webhooks.common.get_github_app_installation_token_with_expiry",
+            AsyncMock(return_value=("t", None)),
+        ),
+        patch("agent.webhooks.common._fetch_open_pr_for_branch", AsyncMock(return_value=pr)),
+        patch(
+            "agent.webhooks.common._get_thread_metadata_safe",
+            AsyncMock(
+                return_value={
+                    "kind": "reviewer",
+                    "watch": True,
+                    "last_reviewed_sha": "oldsha",
+                }
+            ),
+        ),
+        patch(
+            "agent.webhooks.common._is_pr_diff_unchanged_since_last_review",
+            diff_unchanged,
+        ),
+        patch("agent.webhooks.common.set_reviewer_thread_metadata", AsyncMock()) as set_metadata,
+        patch(
+            "agent.webhooks.common.create_review_check_run", AsyncMock(return_value=42)
+        ) as create_check,
+        patch("agent.webhooks.common.complete_review_check_run", AsyncMock()),
+    ):
+        await github_webhooks.process_github_push_event(payload)
+
+    diff_unchanged.assert_awaited_once()
+    assert diff_unchanged.await_args is not None
+    assert diff_unchanged.await_args.kwargs["head_sha"] == "newsha"
+    set_metadata.assert_awaited_once_with(
+        webhook_common.generate_reviewer_thread_id("lc", "repo", 7),
+        last_reviewed_sha="newsha",
+    )
+    create_check.assert_awaited_once()
+    assert create_check.await_args is not None
+    assert create_check.await_args.kwargs["head_sha"] == "newsha"
+
+
+@pytest.mark.asyncio
 async def test_push_event_idempotent_when_head_unchanged() -> None:
     payload = _push_payload(ref="refs/heads/feat-x", after="samesha")
     pr = {
