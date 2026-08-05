@@ -71,6 +71,8 @@ the ticket's three vectors open and is therefore explicitly rejected.
 
 ## Operational detection and recovery
 
+### Stale-head ordering vectors
+
 The characteristic symptom is the current PR head wearing an incomplete or failed
 `Open SWE Review` check while a review was published against an older head. This typically
 appears as a blocked merge with all unrelated required checks green. Correlating the reviewer
@@ -81,9 +83,20 @@ Recovery is to retrigger review for the current pull-request head. The current r
 check-ownership, and per-dispatch classification behavior then establishes a fresh current-head
 check and review.
 
+### Lifecycle vector
+
+The characteristic symptom is a closed or ineligible-draft pull request whose reviewer thread has
+`watch=true`, possibly with a review or check created after the lifecycle transition. This does not
+present as an older-head review and must not be recovered by retriggering review, which would launch
+another unwanted review and keep watching enabled.
+
+Recovery is to restore the intended lifecycle state by clearing the reviewer thread's watch flag.
+Treat any review or check produced after the close or ineligible-draft transition as noise on a pull
+request that should not have been reviewed.
+
 Reopen this decision if any of the following occurs:
 
-- one confirmed production occurrence of this signature;
+- one confirmed production occurrence of either signature;
 - evidence that its frequency or recovery cost is rising; or
 - the platform gains an appropriate ordering primitive, such as compare-and-set for thread
   metadata, that can enforce monotonic ownership without a new arbiter subsystem.
