@@ -6,13 +6,70 @@ object (``common.X``) so tests that monkeypatch them keep working.
 
 import re
 import uuid
-from typing import Any
+from typing import Any, cast, get_args
 
 from ..dashboard.autofix_state import set_pr_autofix_disabled
 from ..review.findings import FindingInteraction, ReviewerPRMeta, ReviewerSlackThread
+from ..review.publish import settle_review_check_run
+from ..utils.github_checks import CheckConclusion, incomplete_review_check_result
 from ..utils.github_comments import GitHubAuthError
 from ..utils.slack import GitHubPrRef
 from . import common
+
+
+def _review_run_metadata(check_run_id: int | None) -> dict[str, Any]:
+    """Attach the full-review check id to immutable run metadata."""
+    metadata: dict[str, Any] = dict(common._AGENT_VERSION_METADATA)
+    if check_run_id is not None:
+        metadata["review_check_run_id"] = check_run_id
+    return metadata
+
+
+async def _settle_review_check_before_finding_reply(
+    *,
+    thread_id: str,
+    metadata: dict[str, Any] | None,
+    owner: str,
+    repo: str,
+    token: str,
+) -> None:
+    """Settle the full-review check before a finding reply interrupts its owner."""
+    if not isinstance(metadata, dict):
+        return
+    check_run_id = metadata.get("review_check_run_id")
+    if not isinstance(check_run_id, int):
+        return
+    deferred = metadata.get("review_check_deferred_result")
+    if isinstance(deferred, dict) and deferred.get("review_check_run_id") == check_run_id:
+        return
+    pending = metadata.get("review_check_pending_result")
+    if (
+        isinstance(pending, dict)
+        and pending.get("review_check_run_id") == check_run_id
+        and pending.get("conclusion") in get_args(CheckConclusion)
+    ):
+        conclusion = cast(CheckConclusion, pending["conclusion"])
+        title = str(pending.get("title") or "Review completed")
+        summary = str(pending.get("summary") or "")
+    else:
+        conclusion, title, summary = incomplete_review_check_result()
+    try:
+        await settle_review_check_run(
+            thread_id=thread_id,
+            owner=owner,
+            repo=repo,
+            token=token,
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+            expected_check_run_id=check_run_id,
+        )
+    except Exception:
+        common.logger.warning(
+            "Could not settle review check before finding reply dispatch for %s",
+            thread_id,
+            exc_info=True,
+        )
 
 
 def build_github_issue_prompt(
@@ -131,6 +188,11 @@ async def trigger_pr_review_from_ref(
         return {"success": False, "error": "Could not create reviewer thread"}
     reviewer_metadata = await common._get_thread_metadata_safe(thread_id)
     explicit_request_requires_stock = reviewer_metadata is None
+    existing_check_run_id = (
+        reviewer_metadata.get("review_check_run_id")
+        if isinstance(reviewer_metadata, dict)
+        else None
+    )
     if (
         reviewer_metadata is not None
         and reviewer_metadata.get("kind") == common.REVIEWER_THREAD_KIND
@@ -182,6 +244,8 @@ async def trigger_pr_review_from_ref(
         slack_channel_id=slack_channel_id,
         slack_thread_ts=slack_thread_ts,
     )
+    if isinstance(existing_check_run_id, int):
+        configurable["review_check_run_id"] = existing_check_run_id
     assistant_id = await common.reviewer_assistant_for_dispatch(
         re_review=explicit_request_requires_stock,
         finding_reply=False,
@@ -197,7 +261,9 @@ async def trigger_pr_review_from_ref(
         configurable,
         source=source,
         assistant_id=assistant_id,
-        metadata=common._AGENT_VERSION_METADATA,
+        metadata=_review_run_metadata(
+            existing_check_run_id if isinstance(existing_check_run_id, int) else None
+        ),
         client=langgraph_client,
     )
     await common._store_current_reviewer_run_id(thread_id, run)
@@ -310,6 +376,8 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         re_review=is_re_review,
         last_reviewed_sha=last_reviewed_sha,
     )
+    if check_run_id is not None:
+        configurable["review_check_run_id"] = check_run_id
     assistant_id = await common.reviewer_assistant_for_dispatch(
         re_review=is_re_review,
         finding_reply=False,
@@ -323,7 +391,7 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         configurable,
         source=source,
         assistant_id=assistant_id,
-        metadata=common._AGENT_VERSION_METADATA,
+        metadata=_review_run_metadata(check_run_id),
         client=langgraph_client,
     )
     await common._store_current_reviewer_run_id(thread_id, run)
@@ -629,6 +697,8 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         re_review=True,
         last_reviewed_sha=last_reviewed_sha if isinstance(last_reviewed_sha, str) else "",
     )
+    if check_run_id is not None:
+        configurable["review_check_run_id"] = check_run_id
     assistant_id = await common.reviewer_assistant_for_dispatch(
         re_review=True,
         finding_reply=False,
@@ -642,7 +712,7 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         configurable,
         source="github_push",
         assistant_id=assistant_id,
-        metadata=common._AGENT_VERSION_METADATA,
+        metadata=_review_run_metadata(check_run_id),
         client=langgraph_client,
     )
     await common._store_current_reviewer_run_id(thread_id, run)
@@ -925,6 +995,14 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
             "finding_reply_author": reply_author,
             "finding_reply_body": reply_body,
         }
+    )
+    latest_metadata = await common._get_thread_metadata_safe(thread_id)
+    await _settle_review_check_before_finding_reply(
+        thread_id=thread_id,
+        metadata=latest_metadata,
+        owner=repo_config["owner"],
+        repo=repo_config["name"],
+        token=app_token,
     )
     assistant_id = await common.reviewer_assistant_for_dispatch(
         re_review=bool(configurable.get("re_review")),

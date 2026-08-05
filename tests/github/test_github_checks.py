@@ -158,6 +158,34 @@ async def test_complete_review_check_run_patches_completed(
     assert body["output"]["title"] == "Found 2 potential issues"
 
 
+async def test_fetch_review_check_run_status_returns_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github_checks.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.get_response = _FakeResponse({"status": "in_progress"})
+
+    status = await github_checks.fetch_review_check_run_status(
+        owner="acme", repo="widgets", check_run_id=42, token="tok"
+    )
+
+    assert status == "in_progress"
+    assert _FakeAsyncClient.last_get is not None
+    assert _FakeAsyncClient.last_get["url"].endswith("/repos/acme/widgets/check-runs/42")
+
+
+async def test_fetch_review_check_run_status_returns_none_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github_checks.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.get_response = _FakeResponse(error=True)
+
+    status = await github_checks.fetch_review_check_run_status(
+        owner="acme", repo="widgets", check_run_id=42, token="tok"
+    )
+
+    assert status is None
+
+
 async def test_fetch_pull_request_head_sha_returns_current_head(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -445,6 +473,7 @@ async def test_settle_review_check_run_keeps_id_on_patch_failure(
             "thread_id": "t1",
             "extra": {
                 "review_check_pending_result": {
+                    "review_check_run_id": 42,
                     "conclusion": "success",
                     "title": "t",
                     "summary": "s",
@@ -454,7 +483,45 @@ async def test_settle_review_check_run_keeps_id_on_patch_failure(
     ]
 
 
-async def test_expected_check_settlement_targets_held_check_without_clearing_current_id(
+async def test_expected_check_failure_persists_owned_check_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviewer_publish,
+        "get_thread_metadata",
+        AsyncMock(return_value={"review_check_run_id": 42}),
+    )
+    monkeypatch.setattr(
+        reviewer_publish, "complete_review_check_run", AsyncMock(return_value=False)
+    )
+    set_metadata = AsyncMock()
+    monkeypatch.setattr(reviewer_publish, "set_reviewer_thread_metadata", set_metadata)
+
+    await reviewer_publish.settle_review_check_run(
+        thread_id="t1",
+        owner="acme",
+        repo="widgets",
+        token="tok",
+        conclusion="failure",
+        title="Review failed",
+        summary="failed",
+        expected_check_run_id=42,
+    )
+
+    set_metadata.assert_awaited_once_with(
+        "t1",
+        extra={
+            "review_check_pending_result": {
+                "review_check_run_id": 42,
+                "conclusion": "failure",
+                "title": "Review failed",
+                "summary": "failed",
+            }
+        },
+    )
+
+
+async def test_expected_check_settlement_targets_and_clears_owned_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -490,13 +557,14 @@ async def test_expected_check_settlement_targets_held_check_without_clearing_cur
     set_metadata.assert_awaited_once_with(
         "t1",
         extra={
+            "review_check_run_id": None,
             "review_check_pending_result": None,
             "review_check_deferred_result": None,
         },
     )
 
 
-async def test_expected_check_settlement_skips_replacement_check(
+async def test_expected_check_settlement_completes_owned_check_not_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -520,5 +588,13 @@ async def test_expected_check_settlement_skips_replacement_check(
         expected_check_run_id=42,
     )
 
-    complete.assert_not_awaited()
+    complete.assert_awaited_once_with(
+        owner="acme",
+        repo="widgets",
+        check_run_id=42,
+        token="tok",
+        conclusion="success",
+        title="No issues found",
+        summary="done",
+    )
     set_metadata.assert_not_awaited()

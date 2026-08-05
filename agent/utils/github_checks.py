@@ -149,6 +149,23 @@ async def complete_review_check_run(
     return True
 
 
+async def fetch_review_check_run_status(
+    *, owner: str, repo: str, check_run_id: int, token: str
+) -> str | None:
+    """Fetch the current status of an Open SWE review check run."""
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/check-runs/{check_run_id}"
+    try:
+        async with github_client(token=token) as client:
+            response = await github_request(client, "GET", url)
+            response.raise_for_status()
+    except httpx.HTTPError:
+        logger.warning("Failed to fetch review check run %s on %s/%s", check_run_id, owner, repo)
+        return None
+    data = response.json()
+    status = data.get("status") if isinstance(data, dict) else None
+    return status if isinstance(status, str) else None
+
+
 async def fetch_pull_request_head_sha(
     *, owner: str, repo: str, pr_number: int, token: str
 ) -> str | None:

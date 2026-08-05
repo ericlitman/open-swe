@@ -18,7 +18,11 @@ from langgraph.runtime import Runtime
 
 from ..review.findings import get_thread_metadata
 from ..review.publish import settle_review_check_run
-from ..utils.github_checks import CheckConclusion, incomplete_review_check_result
+from ..utils.github_checks import (
+    CheckConclusion,
+    fetch_review_check_run_status,
+    incomplete_review_check_result,
+)
 from ..utils.github_token import get_github_token
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,8 @@ async def settle_review_check_on_exit(
     configurable = config.get("configurable", {})
     if not isinstance(configurable, dict):
         return None
+    if configurable.get("reviewer_event") == "finding_reply":
+        return None
     thread_id = configurable.get("thread_id")
     repo_config = configurable.get("repo")
     if not isinstance(thread_id, str) or not thread_id or not isinstance(repo_config, dict):
@@ -45,21 +51,40 @@ async def settle_review_check_on_exit(
 
     try:
         metadata = await get_thread_metadata(thread_id)
-        check_run_id = metadata.get("review_check_run_id")
-        if not isinstance(check_run_id, int):
+        current_check_run_id = metadata.get("review_check_run_id")
+        configured_check_run_id = configurable.get("review_check_run_id")
+        if isinstance(configured_check_run_id, int):
+            check_run_id = configured_check_run_id
+        elif isinstance(current_check_run_id, int):
+            check_run_id = current_check_run_id
+        else:
             return None
-        deferred = metadata.get("review_check_deferred_result")
+        owns_current_check = current_check_run_id == check_run_id
+        deferred = metadata.get("review_check_deferred_result") if owns_current_check else None
         if isinstance(deferred, dict) and deferred.get("review_check_run_id") == check_run_id:
             return None
         token = get_github_token()
         if not token:
             logger.warning("No GitHub token to settle stale review check on thread %s", thread_id)
             return None
+        if not owns_current_check:
+            check_status = await fetch_review_check_run_status(
+                owner=owner,
+                repo=repo,
+                check_run_id=check_run_id,
+                token=token,
+            )
+            if check_status != "in_progress":
+                return None
         # A pending result carries the intended terminal check outcome from a
         # completed publish or an adversarial typed failure. Retry that outcome
         # instead of replacing it with a generic incomplete-review result.
-        pending = metadata.get("review_check_pending_result")
-        if isinstance(pending, dict) and pending.get("conclusion") in get_args(CheckConclusion):
+        pending = metadata.get("review_check_pending_result") if owns_current_check else None
+        if (
+            isinstance(pending, dict)
+            and pending.get("review_check_run_id") == check_run_id
+            and pending.get("conclusion") in get_args(CheckConclusion)
+        ):
             conclusion = cast(CheckConclusion, pending["conclusion"])
             title = str(pending.get("title") or "Review completed")
             summary = str(pending.get("summary") or "")
@@ -73,6 +98,7 @@ async def settle_review_check_on_exit(
             conclusion=conclusion,
             title=title,
             summary=summary,
+            expected_check_run_id=check_run_id,
         )
         logger.info("Settled stale review check run for thread %s", thread_id)
     except Exception:

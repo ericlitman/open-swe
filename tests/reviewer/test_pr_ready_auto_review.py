@@ -198,6 +198,7 @@ async def test_pr_ready_for_review_uses_re_review_after_previous_review(
     set_metadata = _patch_dispatch_deps(monkeypatch, fake_client)
     selector = AsyncMock(wraps=webhook_common.reviewer_assistant_for_dispatch)
     monkeypatch.setattr(webhook_common, "reviewer_assistant_for_dispatch", selector)
+    monkeypatch.setattr(webhook_common, "create_review_check_run", AsyncMock(return_value=77))
     monkeypatch.setattr(
         webhook_common,
         "_get_thread_metadata_safe",
@@ -230,6 +231,8 @@ async def test_pr_ready_for_review_uses_re_review_after_previous_review(
         explicit_request=False,
     )
     configurable = kwargs["config"]["configurable"]
+    assert configurable["review_check_run_id"] == 77
+    assert kwargs["config"]["metadata"]["review_check_run_id"] == 77
     assert configurable["re_review"] is True
     assert configurable["last_reviewed_sha"] == "oldsha"
     assert configurable["head_sha"] == "headsha"

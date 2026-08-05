@@ -137,3 +137,107 @@ async def test_settle_review_check_on_exit_preserves_deferred_check() -> None:
 
     assert result is None
     settle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_settle_review_check_on_exit_skips_finding_reply() -> None:
+    state: AgentState = {"messages": []}
+    with (
+        patch(
+            "agent.middleware.settle_review_check.get_config",
+            return_value={
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "repo": {"owner": "acme", "name": "widgets"},
+                    "reviewer_event": "finding_reply",
+                }
+            },
+        ),
+        patch(
+            "agent.middleware.settle_review_check.get_thread_metadata",
+            new_callable=AsyncMock,
+        ) as get_metadata,
+        patch(
+            "agent.middleware.settle_review_check.settle_review_check_run",
+            new_callable=AsyncMock,
+        ) as settle,
+    ):
+        result = await settle_review_check_on_exit.aafter_agent(state, MagicMock())
+
+    assert result is None
+    get_metadata.assert_not_awaited()
+    settle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_settle_review_check_on_exit_targets_owned_check_not_replacement() -> None:
+    state: AgentState = {"messages": []}
+    with (
+        patch(
+            "agent.middleware.settle_review_check.get_config",
+            return_value={
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "repo": {"owner": "acme", "name": "widgets"},
+                    "review_check_run_id": 42,
+                }
+            },
+        ),
+        patch(
+            "agent.middleware.settle_review_check.get_thread_metadata",
+            new_callable=AsyncMock,
+            return_value={"review_check_run_id": 43},
+        ),
+        patch("agent.middleware.settle_review_check.get_github_token", return_value="token"),
+        patch(
+            "agent.middleware.settle_review_check.fetch_review_check_run_status",
+            new_callable=AsyncMock,
+            return_value="in_progress",
+        ),
+        patch(
+            "agent.middleware.settle_review_check.settle_review_check_run",
+            new_callable=AsyncMock,
+        ) as settle,
+    ):
+        result = await settle_review_check_on_exit.aafter_agent(state, MagicMock())
+
+    assert result is None
+    settle.assert_awaited_once()
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["expected_check_run_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_settle_review_check_on_exit_preserves_completed_owned_check() -> None:
+    state: AgentState = {"messages": []}
+    with (
+        patch(
+            "agent.middleware.settle_review_check.get_config",
+            return_value={
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "repo": {"owner": "acme", "name": "widgets"},
+                    "review_check_run_id": 42,
+                }
+            },
+        ),
+        patch(
+            "agent.middleware.settle_review_check.get_thread_metadata",
+            new_callable=AsyncMock,
+            return_value={"review_check_run_id": 43},
+        ),
+        patch("agent.middleware.settle_review_check.get_github_token", return_value="token"),
+        patch(
+            "agent.middleware.settle_review_check.fetch_review_check_run_status",
+            new_callable=AsyncMock,
+            return_value="completed",
+        ),
+        patch(
+            "agent.middleware.settle_review_check.settle_review_check_run",
+            new_callable=AsyncMock,
+        ) as settle,
+    ):
+        result = await settle_review_check_on_exit.aafter_agent(state, MagicMock())
+
+    assert result is None
+    settle.assert_not_awaited()

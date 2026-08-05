@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
+from agent import dispatch
 from agent.api.app import app
 from agent.tools import request_pr_review as request_pr_review_tool
 from agent.utils import slack as slack_utils
@@ -518,7 +519,16 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     captured: dict[str, object] = {}
 
     async def fake_get_thread_metadata_safe(_thread_id: str) -> dict[str, object]:
-        return {"kind": webhook_common.REVIEWER_THREAD_KIND}
+        return {
+            "kind": webhook_common.REVIEWER_THREAD_KIND,
+            "review_check_run_id": 42,
+            "review_check_pending_result": {
+                "review_check_run_id": 42,
+                "conclusion": "success",
+                "title": "Found 1 potential issue",
+                "summary": "Open SWE surfaced 1 potential issue.",
+            },
+        }
 
     async def fake_get_token_with_expiry(**_kwargs: object) -> tuple[str, str]:
         return "app-token", "2026-01-01T00:00:00Z"
@@ -544,12 +554,17 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     async def fake_store_current_run_id(_thread_id: str, _run: object) -> None:
         return None
 
+    async def fake_settle_review_check_run(**kwargs: object) -> bool:
+        captured["settled_check"] = kwargs
+        return True
+
     async def fake_reviewer_assistant_for_dispatch(**kwargs: object) -> str:
         captured["selector"] = kwargs
         return "reviewer"
 
     class _FakeRunsClient:
         async def create(self, thread_id: str, graph: str, **kwargs) -> dict[str, str]:
+            assert "settled_check" in captured
             captured["thread_id"] = thread_id
             captured["graph"] = graph
             captured["kwargs"] = kwargs
@@ -558,6 +573,7 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     class _FakeLangGraphClient:
         runs = _FakeRunsClient()
 
+    monkeypatch.setattr(dispatch, "COMPLETION_WEBHOOK_URL", None)
     monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
     monkeypatch.setattr(
         webhook_common, "get_github_app_installation_token_with_expiry", fake_get_token_with_expiry
@@ -568,6 +584,7 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     monkeypatch.setattr(webhook_common, "list_reviewer_findings", fake_list_findings)
     monkeypatch.setattr(webhook_common, "append_finding_interaction", fake_append_interaction)
     monkeypatch.setattr(webhook_common, "_store_current_reviewer_run_id", fake_store_current_run_id)
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
     monkeypatch.setattr(
         webhook_common,
         "reviewer_assistant_for_dispatch",
@@ -598,16 +615,62 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
 
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
+    assert "webhook" not in kwargs
     config = kwargs["config"]["configurable"]
     assert config["reviewer_event"] == "finding_reply"
     assert config["re_review"] is True
     assert config["finding_reply_id"] == "f_1"
+    assert "review_check_run_id" not in config
+    run_metadata = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["metadata"])
+    assert "review_check_run_id" not in run_metadata
+    settled_check = cast(dict[str, object], captured["settled_check"])
+    assert settled_check["expected_check_run_id"] == 42
+    assert settled_check["conclusion"] == "success"
+    assert settled_check["title"] == "Found 1 potential issue"
+    assert settled_check["summary"] == "Open SWE surfaced 1 potential issue."
     assert captured["graph"] == "reviewer"
     assert captured["selector"] == {
         "re_review": True,
         "finding_reply": True,
         "explicit_request": False,
     }
+
+
+def test_finding_reply_ignores_pending_result_from_superseded_check(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_settle_review_check_run(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
+    monkeypatch.setattr(
+        github_webhooks,
+        "incomplete_review_check_result",
+        lambda: ("failure", "Review did not complete", "incomplete"),
+    )
+
+    asyncio.run(
+        github_webhooks._settle_review_check_before_finding_reply(
+            thread_id="thread-1",
+            metadata={
+                "review_check_run_id": 42,
+                "review_check_pending_result": {
+                    "review_check_run_id": 41,
+                    "conclusion": "success",
+                    "title": "Old result",
+                    "summary": "stale",
+                },
+            },
+            owner="langchain-ai",
+            repo="open-swe",
+            token="token",
+        )
+    )
+
+    assert captured["expected_check_run_id"] == 42
+    assert captured["conclusion"] == "failure"
+    assert captured["title"] == "Review did not complete"
 
 
 def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(monkeypatch) -> None:
@@ -1303,6 +1366,7 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
             {
                 "kind": webhook_common.REVIEWER_THREAD_KIND,
                 "last_reviewed_sha": "previous-head",
+                "review_check_run_id": 42,
             },
             "reviewer",
             True,
@@ -1438,6 +1502,13 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(
     assert config["pr_number"] == 1244
     assert config["review_requested"] is True
     assert config["re_review"] is False
+    run_metadata = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["metadata"])
+    if isinstance(thread_metadata, dict) and thread_metadata.get("review_check_run_id") == 42:
+        assert config["review_check_run_id"] == 42
+        assert run_metadata["review_check_run_id"] == 42
+    else:
+        assert "review_check_run_id" not in config
+        assert "review_check_run_id" not in run_metadata
     assert captured["selector"] == {
         "re_review": semantic_re_review,
         "finding_reply": False,
