@@ -5,19 +5,19 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-_TOKEN_RE = re.compile(r"(token=)[^&#]*", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"((?:^|[?&])(?:token|code|state)=)[^&#]*", re.IGNORECASE)
 _REDACTED_LOGGERS = ("httpx", "langgraph_api.webhook", "langgraph_api.server", "asgi")
 _FILTER_MARKER = "_open_swe_webhook_token_redaction"
 
 
 def _contains_token(value: object, *, render_objects: bool) -> bool:
     if isinstance(value, str):
-        return "token=" in value.lower()
+        return _TOKEN_RE.search(value) is not None
     if isinstance(value, Mapping):
         return any(_contains_token(item, render_objects=render_objects) for item in value.values())
     if isinstance(value, (list, tuple)):
         return any(_contains_token(item, render_objects=render_objects) for item in value)
-    return render_objects and value is not None and "token=" in str(value).lower()
+    return render_objects and value is not None and _TOKEN_RE.search(str(value)) is not None
 
 
 def _redact_text(value: str) -> str:
@@ -37,7 +37,7 @@ def _redact_value(value: Any, *, render_objects: bool) -> Any:
         return tuple(_redact_value(item, render_objects=render_objects) for item in value)
     if render_objects and value is not None:
         rendered = str(value)
-        if "token=" in rendered.lower():
+        if _TOKEN_RE.search(rendered):
             return _redact_text(rendered)
     return value
 
@@ -56,7 +56,7 @@ def _redact_record_payload(
             _redact_value(record.msg, render_objects=False),
             _redact_value(record.args, render_objects=True),
         )
-    if isinstance(record.msg, str) and "token=" in record.msg.lower():
+    if isinstance(record.msg, str) and _TOKEN_RE.search(record.msg):
         return _redact_text(record.getMessage()), ()
     return (
         _redact_value(record.msg, render_objects=True),
