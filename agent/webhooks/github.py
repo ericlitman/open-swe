@@ -987,10 +987,10 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         branch_name=branch_name,
         repo_private=repo_private,
         re_review=True,
+        reviewer_event="finding_reply",
     )
     configurable.update(
         {
-            "reviewer_event": "finding_reply",
             "finding_reply_id": finding_id,
             "finding_reply_author": reply_author,
             "finding_reply_body": reply_body,

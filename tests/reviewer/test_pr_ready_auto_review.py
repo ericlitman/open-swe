@@ -54,9 +54,17 @@ def _patch_dispatch_deps(monkeypatch: pytest.MonkeyPatch, fake_client: MagicMock
 
 
 @pytest.mark.asyncio
-async def test_pr_ready_non_draft_triggers_run(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pr_ready_first_review_clears_finding_reply_for_adversarial_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpointed_config = {"reviewer_event": "finding_reply"}
+
+    async def create_run(*args: Any, **kwargs: Any) -> dict[str, str]:
+        checkpointed_config.update(kwargs["config"]["configurable"])
+        return {"run_id": "run-1"}
+
     fake_client = MagicMock()
-    fake_client.runs.create = AsyncMock()
+    fake_client.runs.create = AsyncMock(side_effect=create_run)
     _patch_dispatch_deps(monkeypatch, fake_client)
     selector = AsyncMock(wraps=webhook_common.reviewer_assistant_for_dispatch)
     monkeypatch.setattr(webhook_common, "reviewer_assistant_for_dispatch", selector)
@@ -80,6 +88,8 @@ async def test_pr_ready_non_draft_triggers_run(monkeypatch: pytest.MonkeyPatch) 
     )
     assert kwargs["config"]["configurable"]["source"] == "github"
     assert kwargs["config"]["configurable"]["pr_number"] == 7
+    assert kwargs["config"]["configurable"]["reviewer_event"] == ""
+    assert checkpointed_config["reviewer_event"] == ""
 
 
 @pytest.mark.asyncio
