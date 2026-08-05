@@ -129,10 +129,14 @@ Posts the standard dispatch comment (template embedded; see `references/run-temp
 Add `--scope/--boundaries/--verify` when the ticket needs sharper rails, or `--body-file` for
 a fully custom body. `--dry-run` prints the body without posting. Bodies with unfilled
 `<placeholders>` are refused. Every posted body must begin with exactly one case-insensitive
-`@openswe`; an optional case-insensitive `repo owner/name` or `repo:owner/name` directive may
-appear only immediately after that mention. `--force` cannot bypass this hygiene guard. Output includes `issue_id`, the
-derived `thread_id`, and the confirmed LangGraph handoff. A missing confirmation within about
-60 seconds exits non-zero with baseline and final thread/run evidence. `--dry-run` does not poll.
+`@openswe`; a repository directive may appear only immediately after that mention. A custom
+`start` body must include `repo owner/name` or `repo:owner/name` there and match `--repo`
+case-insensitively; missing or conflicting directives fail before posting, and matching bodies are
+posted unchanged. `--force` cannot bypass these guards. Output includes `issue_id`, the derived
+`thread_id`, and the confirmed LangGraph handoff. During confirmation, a parented Open SWE
+`Agent Error` reply takes precedence over success or timeout and exits non-zero with its reason and
+Linear comment URL. A missing confirmation within about 60 seconds otherwise exits non-zero with
+baseline and final thread/run evidence. `--dry-run` does not poll.
 
 ## 2. Watch (background, exit-on-wake)
 
