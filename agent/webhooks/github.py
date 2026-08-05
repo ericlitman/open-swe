@@ -309,22 +309,18 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         "author": (pull_request.get("user") or {}).get("login", ""),
     }
     last_reviewed_sha = ""
+    metadata: dict[str, Any] | None = None
     if payload.get("action") == "ready_for_review":
         metadata = await common._get_thread_metadata_safe(thread_id)
         if metadata is not None and metadata.get("kind") == common.REVIEWER_THREAD_KIND:
             existing_last_reviewed_sha = metadata.get("last_reviewed_sha")
             if isinstance(existing_last_reviewed_sha, str) and existing_last_reviewed_sha:
-                if existing_last_reviewed_sha == head_sha:
-                    await common.set_reviewer_thread_metadata(thread_id, pr=pr_meta, watch=True)
-                    common.logger.info(
-                        "Skipping ready_for_review auto-review for %s/%s#%s: "
-                        "head_sha unchanged from last_reviewed_sha",
-                        repo_config.get("owner"),
-                        repo_config.get("name"),
-                        pr_number,
-                    )
-                    return
                 last_reviewed_sha = existing_last_reviewed_sha
+    initial_check_run_id = (
+        metadata.get("review_check_run_id") if isinstance(metadata, dict) else None
+    )
+    if not isinstance(initial_check_run_id, int):
+        initial_check_run_id = None
 
     app_token, app_token_expires_at = await common._reviewer_token_for_repo(
         repo_config,
@@ -340,6 +336,125 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         return
 
     await common.set_reviewer_thread_metadata(thread_id, pr=pr_meta, watch=True, head_sha=head_sha)
+
+    current_pr = await common.fetch_github_pr_metadata(
+        GitHubPrRef(
+            owner=repo_config["owner"],
+            repo=repo_config["name"],
+            number=pr_number,
+            url=pr_url,
+        ),
+        token=app_token,
+    )
+    if current_pr is None:
+        common.logger.warning(
+            "First review for %s/%s#%s head=%s could not refresh PR metadata; "
+            "using webhook payload",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+        )
+    else:
+        pull_request = current_pr
+        if pull_request.get("state") == "closed":
+            await common.set_reviewer_thread_metadata(thread_id, watch=False)
+            common.logger.info(
+                "Skipping first review for %s/%s#%s: PR closed during startup",
+                repo_config["owner"],
+                repo_config["name"],
+                pr_number,
+            )
+            return
+        if pull_request.get("draft") and not await common._draft_review_enabled_for_author(
+            (pull_request.get("user") or {}).get("login", "")
+        ):
+            await common.set_reviewer_thread_metadata(thread_id, watch=False)
+            common.logger.info(
+                "Skipping first review for %s/%s#%s: PR became an ineligible draft during startup",
+                repo_config["owner"],
+                repo_config["name"],
+                pr_number,
+            )
+            return
+        pr_url = pull_request.get("html_url", "") or pull_request.get("url", "") or pr_url
+        branch_name = pull_request.get("head", {}).get("ref", "")
+        base_ref = pull_request.get("base", {}).get("ref", "")
+        base_sha = pull_request.get("base", {}).get("sha", "")
+        head_sha = pull_request.get("head", {}).get("sha", "")
+        pr_title = pull_request.get("title", "")
+        if not base_sha or not head_sha:
+            common.logger.warning(
+                "First review for %s/%s#%s head=%s not dispatched: refreshed PR metadata "
+                "is missing base/head SHA",
+                repo_config["owner"],
+                repo_config["name"],
+                pr_number,
+                head_sha or "<missing>",
+            )
+            return
+        pr_meta = {
+            "owner": repo_config["owner"],
+            "name": repo_config["name"],
+            "number": pr_number,
+            "url": pr_url,
+            "title": pr_title,
+            "head_ref": branch_name,
+            "base_ref": base_ref,
+            "author": (pull_request.get("user") or {}).get("login", ""),
+        }
+        await common.set_reviewer_thread_metadata(
+            thread_id, pr=pr_meta, watch=True, head_sha=head_sha
+        )
+
+    if payload.get("action") == "ready_for_review" and last_reviewed_sha == head_sha:
+        common.logger.info(
+            "Skipping ready_for_review auto-review for %s/%s#%s: "
+            "head_sha unchanged from last_reviewed_sha",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+        )
+        return
+
+    try:
+        dispatch_metadata = await common._get_thread_metadata_safe(thread_id, raise_on_error=True)
+    except Exception:
+        common.logger.warning(
+            "First review for %s/%s#%s head=%s not dispatched: could not confirm "
+            "reviewer thread metadata",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+            exc_info=True,
+        )
+        return
+    if (
+        dispatch_metadata is None
+        or dispatch_metadata.get("kind") != common.REVIEWER_THREAD_KIND
+        or dispatch_metadata.get("watch") is not True
+    ):
+        common.logger.info(
+            "First review for %s/%s#%s head=%s stood down: reviewer watch changed",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+        )
+        return
+    dispatch_head_sha = dispatch_metadata.get("head_sha")
+    dispatch_check_run_id = dispatch_metadata.get("review_check_run_id")
+    if dispatch_head_sha != head_sha or (dispatch_check_run_id != initial_check_run_id):
+        common.logger.info(
+            "First review for %s/%s#%s head=%s stood down: superseded by head=%s",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+            dispatch_head_sha,
+        )
+        return
 
     check_run_id = await common.create_review_check_run(
         owner=repo_config.get("owner", ""),
@@ -567,8 +682,19 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
     thread_id = common.generate_reviewer_thread_id(
         repo_config["owner"], repo_config["name"], pr_number
     )
-    metadata = await common._get_thread_metadata_safe(thread_id)
-    if metadata is None or metadata.get("kind") != common.REVIEWER_THREAD_KIND:
+    try:
+        metadata = await common._get_thread_metadata_safe(thread_id, raise_on_error=True)
+    except Exception:
+        common.logger.warning(
+            "Push to %s/%s#%s head=%s dropped: could not read reviewer thread metadata",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+            exc_info=True,
+        )
+        return
+    if metadata is None:
         common.logger.info(
             "Push to %s/%s#%s ignored: no reviewer thread for this PR. "
             "Trigger a first review (Slack `@open-swe review <url>` or request "
@@ -578,9 +704,36 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
             pr_number,
         )
         return
-    if not metadata.get("watch"):
+    if metadata.get("kind") != common.REVIEWER_THREAD_KIND:
+        if metadata.get("watch") is True:
+            common.logger.warning(
+                "Push to %s/%s#%s head=%s dropped: reviewer thread kind metadata is invalid",
+                repo_config["owner"],
+                repo_config["name"],
+                pr_number,
+                head_sha,
+            )
+        else:
+            common.logger.info(
+                "Push to %s/%s#%s ignored: no reviewer thread for this PR",
+                repo_config["owner"],
+                repo_config["name"],
+                pr_number,
+            )
+        return
+    watch = metadata.get("watch")
+    if watch is False:
         common.logger.info(
             "Push to %s ignored: reviewer thread %s is not watching", head_ref, thread_id
+        )
+        return
+    if watch is not True:
+        common.logger.warning(
+            "Push to %s/%s#%s head=%s dropped: reviewer thread watch metadata is invalid",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
         )
         return
 

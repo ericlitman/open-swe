@@ -1295,6 +1295,15 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
         async def create(self, **kwargs) -> None:
             captured["thread_create_kwargs"] = kwargs
 
+        async def get(self, _thread_id: str) -> dict[str, object]:
+            return {
+                "metadata": {
+                    "kind": "reviewer",
+                    "watch": True,
+                    "head_sha": "head-sha",
+                }
+            }
+
     class _FakeLangGraphClient:
         runs = _FakeRunsClient()
         threads = _FakeThreadsClient()
@@ -1313,7 +1322,19 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
         captured["status_comment_kwargs"] = kwargs
         return 1
 
+    async def fake_fetch_github_pr_metadata(
+        _pr_ref: GitHubPrRef, *, token: str
+    ) -> dict[str, object]:
+        assert token == "app-token"
+        return {
+            "number": 1244,
+            "html_url": "https://github.com/langchain-ai/open-swe/pull/1244",
+            "base": {"sha": "base-sha", "ref": "main"},
+            "head": {"sha": "head-sha", "ref": "feature-branch"},
+        }
+
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", fake_cache_github_token)
+    monkeypatch.setattr(webhook_common, "fetch_github_pr_metadata", fake_fetch_github_pr_metadata)
     monkeypatch.setattr(
         webhook_common, "set_reviewer_thread_metadata", fake_set_reviewer_thread_metadata
     )
