@@ -1070,6 +1070,7 @@ def _build_reviewer_configurable(
     branch_name: str,
     repo_private: bool | None = None,
     re_review: bool = False,
+    reviewer_event: str = "",
     last_reviewed_sha: str = "",
     slack_channel_id: str = "",
     slack_thread_ts: str = "",
@@ -1086,6 +1087,7 @@ def _build_reviewer_configurable(
         "head_sha": head_sha,
         "review_requested": True,
         "re_review": re_review,
+        "reviewer_event": reviewer_event,
     }
     if branch_name:
         configurable["branch_name"] = branch_name
