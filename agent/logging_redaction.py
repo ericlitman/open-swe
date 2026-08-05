@@ -5,7 +5,14 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-_TOKEN_RE = re.compile(r"((?:^|[?&])(?:token|code|state)=)[^&#]*", re.IGNORECASE)
+_TOKEN_RE = re.compile(
+    r"((?:^|[?&])(?:"
+    r"(?:t|%74)(?:o|%6f)(?:k|%6b)(?:e|%65)(?:n|%6e)|"
+    r"(?:c|%63)(?:o|%6f)(?:d|%64)(?:e|%65)|"
+    r"(?:s|%73)(?:t|%74)(?:a|%61)(?:t|%74)(?:e|%65)"
+    r")=)[^&#]*",
+    re.IGNORECASE,
+)
 _REDACTED_LOGGERS = ("httpx", "langgraph_api.webhook", "langgraph_api.server", "asgi")
 _FILTER_MARKER = "_open_swe_webhook_token_redaction"
 

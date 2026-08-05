@@ -124,6 +124,10 @@ def test_httpx_url_is_redacted_through_logging_machinery(parameter: str) -> None
             "status_code=201&error_code=none&session_state=ready&postcode=12345&estate=open",
             "status_code=201&error_code=none&session_state=ready&postcode=12345&estate=open",
         ),
+        (
+            "status_%63ode=201&error_%63ode=none&session_st%61te=ready",
+            "status_%63ode=201&error_%63ode=none&session_st%61te=ready",
+        ),
     ],
 )
 def test_query_parameter_boundaries(query: str, expected: str) -> None:
@@ -133,6 +137,23 @@ def test_query_parameter_boundaries(query: str, expected: str) -> None:
         logging.getLogger("langgraph_api.server").info("GET /callback?%s", query)
 
     assert stream.getvalue() == f"GET /callback?{expected}\n"
+
+
+@pytest.mark.parametrize("parameter", ["token", "code", "state"])
+def test_percent_encoded_sensitive_parameter_names_are_redacted(parameter: str) -> None:
+    _install()
+
+    for index, character in enumerate(parameter):
+        for hex_format in ("02x", "02X"):
+            encoded_character = f"%{format(ord(character), hex_format)}"
+            encoded_parameter = f"{parameter[:index]}{encoded_character}{parameter[index + 1 :]}"
+            request_target = f"/dashboard/api/auth/callback?{encoded_parameter}=secret"
+            with _capture("langgraph_api.server", logging.Formatter("%(message)s")) as stream:
+                logging.getLogger("langgraph_api.server").info("GET %s", request_target)
+
+            assert stream.getvalue() == (
+                f"GET /dashboard/api/auth/callback?{encoded_parameter}=***\n"
+            )
 
 
 def test_nested_structured_sensitive_parameters_are_redacted() -> None:
