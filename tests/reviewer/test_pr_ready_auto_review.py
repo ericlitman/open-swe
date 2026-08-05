@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,6 +38,14 @@ def _pr_payload(
     }
 
 
+def _patch_current_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        webhook_common,
+        "fetch_github_pr_metadata",
+        AsyncMock(return_value=_pr_payload(action="opened", draft=False)["pull_request"]),
+    )
+
+
 def _patch_dispatch_deps(monkeypatch: pytest.MonkeyPatch, fake_client: MagicMock) -> AsyncMock:
     monkeypatch.setattr(
         webhook_common,
@@ -47,6 +56,7 @@ def _patch_dispatch_deps(monkeypatch: pytest.MonkeyPatch, fake_client: MagicMock
         webhook_common, "_ensure_thread_exists_for_metadata", AsyncMock(return_value=True)
     )
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", MagicMock())
+    _patch_current_pr(monkeypatch)
     set_metadata = AsyncMock()
     monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", set_metadata)
     monkeypatch.setattr(webhook_common, "get_client", lambda url: fake_client)
@@ -95,6 +105,7 @@ async def test_pr_ready_public_repo_uses_scoped_reviewer_token(
     )
     cache_token = MagicMock()
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", cache_token)
+    _patch_current_pr(monkeypatch)
     monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", AsyncMock())
     monkeypatch.setattr(webhook_common, "get_client", lambda url: fake_client)
     monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
@@ -122,6 +133,7 @@ async def test_pr_ready_private_repo_uses_scoped_reviewer_token(
         webhook_common, "_ensure_thread_exists_for_metadata", AsyncMock(return_value=True)
     )
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", MagicMock())
+    _patch_current_pr(monkeypatch)
     monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", AsyncMock())
     monkeypatch.setattr(webhook_common, "get_client", lambda url: fake_client)
     monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
@@ -135,6 +147,121 @@ async def test_pr_ready_private_repo_uses_scoped_reviewer_token(
     assert fake_client.runs.create.await_args is not None
     _, kwargs = fake_client.runs.create.await_args
     assert kwargs["config"]["configurable"]["repo_private"] is True
+
+
+@pytest.mark.asyncio
+async def test_first_review_refresh_partitions_pushes_around_watch_establishment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _pr_payload(action="opened", draft=False)
+    head_b = {**payload["pull_request"], "head": {"sha": "head-b", "ref": "feat-x"}}
+    head_c = {**payload["pull_request"], "head": {"sha": "head-c", "ref": "feat-x"}}
+    current_pr = head_b
+    metadata: dict[str, Any] | None = None
+    setup_started = asyncio.Event()
+    allow_watch = asyncio.Event()
+
+    async def ensure_thread(*_args: Any, **_kwargs: Any) -> bool:
+        setup_started.set()
+        await allow_watch.wait()
+        return True
+
+    async def get_metadata(*_args: Any, **_kwargs: Any) -> dict[str, Any] | None:
+        return metadata
+
+    async def set_metadata(_thread_id: str, **kwargs: Any) -> None:
+        nonlocal metadata
+        if metadata is None:
+            metadata = {"kind": "reviewer"}
+        metadata.update({key: value for key, value in kwargs.items() if value is not None})
+
+    async def fetch_pr(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return current_pr
+
+    fake_client = MagicMock()
+    fake_client.runs.create = AsyncMock(return_value={"run_id": "run"})
+    create_check = AsyncMock(side_effect=[101, 102])
+    monkeypatch.setattr(
+        webhook_common,
+        "get_github_app_installation_token_with_expiry",
+        AsyncMock(return_value=("token", None)),
+    )
+    monkeypatch.setattr(
+        webhook_common, "_is_repo_auto_review_enabled", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(webhook_common, "_ensure_thread_exists_for_metadata", ensure_thread)
+    monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", get_metadata)
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", set_metadata)
+    monkeypatch.setattr(webhook_common, "_fetch_open_pr_for_branch", fetch_pr)
+    monkeypatch.setattr(webhook_common, "fetch_github_pr_metadata", fetch_pr)
+    monkeypatch.setattr(webhook_common, "create_review_check_run", create_check)
+    monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", MagicMock())
+    monkeypatch.setattr(webhook_common, "fetch_pr_review_threads", AsyncMock(return_value=[]))
+    monkeypatch.setattr(webhook_common, "reconcile_findings_with_review_threads", AsyncMock())
+    monkeypatch.setattr(
+        webhook_common, "reviewer_assistant_for_dispatch", AsyncMock(return_value="reviewer")
+    )
+    monkeypatch.setattr(webhook_common, "get_client", lambda url=None: fake_client)
+
+    first_review = asyncio.create_task(github_webhooks.process_github_pr_ready(payload))
+    await setup_started.wait()
+    await github_webhooks.process_github_push_event(
+        {
+            "ref": "refs/heads/feat-x",
+            "after": "head-b",
+            "repository": payload["repository"],
+            "sender": payload["sender"],
+        }
+    )
+    create_check.assert_not_awaited()
+
+    allow_watch.set()
+    await first_review
+
+    assert create_check.await_args_list[0].kwargs["head_sha"] == "head-b"
+    first_run = fake_client.runs.create.await_args_list[0]
+    assert first_run.kwargs["config"]["configurable"]["head_sha"] == "head-b"
+    assert "head-b" in first_run.kwargs["input"]["messages"][0]["content"]
+    assert metadata is not None and metadata["head_sha"] == "head-b"
+
+    current_pr = head_c
+    await github_webhooks.process_github_push_event(
+        {
+            "ref": "refs/heads/feat-x",
+            "after": "head-c",
+            "repository": payload["repository"],
+            "sender": payload["sender"],
+        }
+    )
+
+    assert [call.kwargs["head_sha"] for call in create_check.await_args_list] == [
+        "head-b",
+        "head-c",
+    ]
+    second_run = fake_client.runs.create.await_args_list[1]
+    assert second_run.kwargs["config"]["configurable"]["head_sha"] == "head-c"
+    assert metadata["head_sha"] == "head-c"
+
+
+@pytest.mark.asyncio
+async def test_first_review_does_not_dispatch_stale_head_when_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_client = MagicMock()
+    fake_client.runs.create = AsyncMock()
+    set_metadata = _patch_dispatch_deps(monkeypatch, fake_client)
+    monkeypatch.setattr(webhook_common, "fetch_github_pr_metadata", AsyncMock(return_value=None))
+    create_check = AsyncMock()
+    monkeypatch.setattr(webhook_common, "create_review_check_run", create_check)
+
+    with caplog.at_level("WARNING"):
+        await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=False))
+
+    create_check.assert_not_awaited()
+    fake_client.runs.create.assert_not_awaited()
+    set_metadata.assert_awaited_once()
+    assert "lc/repo#7 head=headsha not dispatched: could not refresh PR metadata" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -159,10 +286,9 @@ async def test_pr_ready_for_review_skips_when_head_already_reviewed(
 ) -> None:
     fake_client = MagicMock()
     fake_client.runs.create = AsyncMock()
-    set_metadata = AsyncMock()
+    set_metadata = _patch_dispatch_deps(monkeypatch, fake_client)
     get_token = AsyncMock(return_value=("token", None))
     monkeypatch.setattr(webhook_common, "get_github_app_installation_token_with_expiry", get_token)
-    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", set_metadata)
     monkeypatch.setattr(
         webhook_common,
         "_get_thread_metadata_safe",
@@ -183,10 +309,10 @@ async def test_pr_ready_for_review_skips_when_head_already_reviewed(
     )
 
     fake_client.runs.create.assert_not_called()
-    get_token.assert_not_awaited()
-    set_metadata.assert_awaited_once()
-    assert set_metadata.await_args is not None
-    assert set_metadata.await_args.kwargs["watch"] is True
+    get_token.assert_awaited_once()
+    assert len(set_metadata.await_args_list) == 2
+    assert all(call.kwargs["watch"] is True for call in set_metadata.await_args_list)
+    assert set_metadata.await_args_list[-1].kwargs["head_sha"] == "headsha"
 
 
 @pytest.mark.asyncio

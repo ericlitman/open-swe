@@ -83,7 +83,9 @@ async def test_push_event_logs_when_no_open_pr_is_found(
 
 
 @pytest.mark.asyncio
-async def test_push_event_skips_when_thread_not_watching() -> None:
+async def test_push_event_skips_when_thread_not_watching(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     payload = _push_payload(ref="refs/heads/feat-x", after="newsha")
     pr = {
         "number": 7,
@@ -94,6 +96,7 @@ async def test_push_event_skips_when_thread_not_watching() -> None:
     }
     fake_client = MagicMock()
     fake_client.runs.create = AsyncMock()
+    create_check = AsyncMock()
 
     with (
         patch(
@@ -102,9 +105,9 @@ async def test_push_event_skips_when_thread_not_watching() -> None:
             return_value=True,
         ),
         patch(
-            "agent.webhooks.common.get_github_app_installation_token",
+            "agent.webhooks.common.get_github_app_installation_token_with_expiry",
             new_callable=AsyncMock,
-            return_value="t",
+            return_value=("t", None),
         ),
         patch(
             "agent.webhooks.common._fetch_open_pr_for_branch",
@@ -116,10 +119,72 @@ async def test_push_event_skips_when_thread_not_watching() -> None:
             new_callable=AsyncMock,
             return_value={"kind": "reviewer", "watch": False},
         ),
+        patch(
+            "agent.webhooks.common.create_review_check_run",
+            new=create_check,
+        ),
         patch("agent.webhooks.common.get_client", return_value=fake_client),
+        caplog.at_level(logging.INFO),
     ):
         await github_webhooks.process_github_push_event(payload)
     fake_client.runs.create.assert_not_called()
+    create_check.assert_not_awaited()
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata_result", "expected_reason"),
+    [
+        (RuntimeError("metadata unavailable"), "could not read reviewer thread metadata"),
+        ({"kind": "reviewer"}, "reviewer thread watch metadata is invalid"),
+        ({"kind": "unexpected", "watch": True}, "reviewer thread kind metadata is invalid"),
+    ],
+)
+async def test_push_event_warns_when_reviewer_metadata_is_anomalous(
+    metadata_result: dict[str, Any] | Exception,
+    expected_reason: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload = _push_payload(ref="refs/heads/feat-x", after="newsha")
+    pr = {
+        "number": 7,
+        "html_url": "https://github.com/lc/repo/pull/7",
+        "title": "T",
+        "head": {"sha": "newsha", "ref": "feat-x"},
+        "base": {"sha": "basesha", "ref": "main"},
+    }
+    get_metadata = AsyncMock()
+    if isinstance(metadata_result, Exception):
+        get_metadata.side_effect = metadata_result
+    else:
+        get_metadata.return_value = metadata_result
+    create_check = AsyncMock()
+
+    with (
+        patch(
+            "agent.webhooks.common._is_repo_auto_review_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "agent.webhooks.common.get_github_app_installation_token_with_expiry",
+            new_callable=AsyncMock,
+            return_value=("t", None),
+        ),
+        patch(
+            "agent.webhooks.common._fetch_open_pr_for_branch",
+            new_callable=AsyncMock,
+            return_value=pr,
+        ),
+        patch("agent.webhooks.common._get_thread_metadata_safe", new=get_metadata),
+        patch("agent.webhooks.common.create_review_check_run", new=create_check),
+        caplog.at_level(logging.WARNING),
+    ):
+        await github_webhooks.process_github_push_event(payload)
+
+    create_check.assert_not_awaited()
+    assert f"lc/repo#7 head=newsha dropped: {expected_reason}" in caplog.text
 
 
 @pytest.mark.asyncio

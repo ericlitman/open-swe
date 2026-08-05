@@ -1248,7 +1248,9 @@ async def _is_pr_diff_unchanged_since_last_review(
     return _normalized_diff_hash(previous_diff) == _normalized_diff_hash(current_diff)
 
 
-async def _get_thread_metadata_safe(thread_id: str) -> dict[str, Any] | None:
+async def _get_thread_metadata_safe(
+    thread_id: str, *, raise_on_error: bool = False
+) -> dict[str, Any] | None:
     """Fetch a thread's metadata; return ``None`` if the thread doesn't exist."""
     langgraph_client = get_client(url=LANGGRAPH_URL)
     try:
@@ -1256,6 +1258,8 @@ async def _get_thread_metadata_safe(thread_id: str) -> dict[str, Any] | None:
     except Exception as exc:  # noqa: BLE001
         if _is_not_found_error(exc):
             return None
+        if raise_on_error:
+            raise
         logger.warning("Failed to fetch reviewer thread metadata for %s", thread_id)
         return None
     metadata = thread.get("metadata") if isinstance(thread, dict) else None
