@@ -11,9 +11,10 @@ waived. No partial guard, lock, sequencing state, or handler-specific mitigation
 
 The exposure is real, but production evidence reported on the ticket found zero occurrences during
 roughly twenty-four hours of hostile dogfooding across five pull requests. The in-process windows
-are sub-second and bounded by awaited network calls, delayed or redelivered older push webhooks are
-rare, and a review retrigger is a verified recovery. That risk does not justify a new durable
-dispatch subsystem with broader correctness and operational failure modes.
+are sub-second and bounded by awaited network calls, and delayed or redelivered older push webhooks
+are rare. Stale-head races have a verified retrigger recovery; lifecycle races are recovered by
+clearing watch. That risk does not justify a new durable dispatch subsystem with broader
+correctness and operational failure modes.
 
 ## Residual failure modes
 
