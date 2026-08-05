@@ -167,7 +167,9 @@ async def test_pr_ready_private_repo_uses_scoped_reviewer_token(
 @pytest.mark.asyncio
 async def test_first_review_refresh_partitions_pushes_around_watch_establishment(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level("INFO")
     payload = _pr_payload(action="opened", draft=False)
     head_b = {**payload["pull_request"], "head": {"sha": "head-b", "ref": "feat-x"}}
     head_c = {**payload["pull_request"], "head": {"sha": "head-c", "ref": "feat-x"}}
@@ -264,6 +266,7 @@ async def test_first_review_refresh_partitions_pushes_around_watch_establishment
     push_run = fake_client.runs.create.await_args
     assert push_run.kwargs["config"]["configurable"]["head_sha"] == "head-c"
     assert metadata["head_sha"] == "head-c"
+    assert "head=head-b stood down: superseded by head=head-c" in caplog.text
 
 
 @pytest.mark.asyncio
