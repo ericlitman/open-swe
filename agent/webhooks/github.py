@@ -309,12 +309,18 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         "author": (pull_request.get("user") or {}).get("login", ""),
     }
     last_reviewed_sha = ""
+    metadata: dict[str, Any] | None = None
     if payload.get("action") == "ready_for_review":
         metadata = await common._get_thread_metadata_safe(thread_id)
         if metadata is not None and metadata.get("kind") == common.REVIEWER_THREAD_KIND:
             existing_last_reviewed_sha = metadata.get("last_reviewed_sha")
             if isinstance(existing_last_reviewed_sha, str) and existing_last_reviewed_sha:
                 last_reviewed_sha = existing_last_reviewed_sha
+    initial_check_run_id = (
+        metadata.get("review_check_run_id") if isinstance(metadata, dict) else None
+    )
+    if not isinstance(initial_check_run_id, int):
+        initial_check_run_id = None
 
     app_token, app_token_expires_at = await common._reviewer_token_for_repo(
         repo_config,
@@ -411,6 +417,45 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         )
         return
 
+    try:
+        dispatch_metadata = await common._get_thread_metadata_safe(thread_id, raise_on_error=True)
+    except Exception:
+        common.logger.warning(
+            "First review for %s/%s#%s head=%s not dispatched: could not confirm "
+            "reviewer thread metadata",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+            exc_info=True,
+        )
+        return
+    if (
+        dispatch_metadata is None
+        or dispatch_metadata.get("kind") != common.REVIEWER_THREAD_KIND
+        or dispatch_metadata.get("watch") is not True
+    ):
+        common.logger.info(
+            "First review for %s/%s#%s head=%s stood down: reviewer watch changed",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+        )
+        return
+    dispatch_head_sha = dispatch_metadata.get("head_sha")
+    dispatch_check_run_id = dispatch_metadata.get("review_check_run_id")
+    if dispatch_head_sha != head_sha or (dispatch_check_run_id != initial_check_run_id):
+        common.logger.info(
+            "First review for %s/%s#%s head=%s stood down: superseded by head=%s",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+            dispatch_head_sha,
+        )
+        return
+
     check_run_id = await common.create_review_check_run(
         owner=repo_config.get("owner", ""),
         repo=repo_config.get("name", ""),
@@ -421,21 +466,6 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
     if check_run_id is not None:
         await common.set_reviewer_thread_metadata(
             thread_id, extra={"review_check_run_id": check_run_id}
-        )
-
-    async def settle_created_check() -> None:
-        if check_run_id is None:
-            return
-        conclusion, title, summary = incomplete_review_check_result()
-        await settle_review_check_run(
-            thread_id=thread_id,
-            owner=repo_config["owner"],
-            repo=repo_config["name"],
-            token=app_token,
-            conclusion=conclusion,
-            title=title,
-            summary=summary,
-            expected_check_run_id=check_run_id,
         )
 
     is_re_review = bool(last_reviewed_sha)
@@ -468,52 +498,6 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         finding_reply=False,
         explicit_request=False,
     )
-
-    try:
-        dispatch_metadata = await common._get_thread_metadata_safe(thread_id, raise_on_error=True)
-    except Exception:
-        common.logger.warning(
-            "First review for %s/%s#%s head=%s not dispatched: could not confirm "
-            "reviewer thread metadata",
-            repo_config["owner"],
-            repo_config["name"],
-            pr_number,
-            head_sha,
-            exc_info=True,
-        )
-        await settle_created_check()
-        return
-    if (
-        dispatch_metadata is None
-        or dispatch_metadata.get("kind") != common.REVIEWER_THREAD_KIND
-        or dispatch_metadata.get("watch") is not True
-    ):
-        common.logger.info(
-            "First review for %s/%s#%s head=%s stood down: reviewer watch changed",
-            repo_config["owner"],
-            repo_config["name"],
-            pr_number,
-            head_sha,
-        )
-        await settle_created_check()
-        return
-    dispatch_head_sha = dispatch_metadata.get("head_sha")
-    dispatch_check_run_id = dispatch_metadata.get("review_check_run_id")
-    if dispatch_head_sha != head_sha or (
-        check_run_id is not None
-        and isinstance(dispatch_check_run_id, int)
-        and dispatch_check_run_id != check_run_id
-    ):
-        common.logger.info(
-            "First review for %s/%s#%s head=%s stood down: superseded by head=%s",
-            repo_config["owner"],
-            repo_config["name"],
-            pr_number,
-            head_sha,
-            dispatch_head_sha,
-        )
-        await settle_created_check()
-        return
 
     common.logger.info("Dispatching reviewer run for thread %s (source=%s)", thread_id, source)
     run = await common.dispatch_agent_run(
