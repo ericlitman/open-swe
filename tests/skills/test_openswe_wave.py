@@ -598,7 +598,7 @@ def test_recorded_auto_merge_armed_pr_preserves_quiet_zero_finding_behavior() ->
     assert wave.replay_events(events, "operator")["wake_count"] == 0
 
 
-def test_review_complete_counts_new_findings_and_armed_reviews_keep_findings_wake() -> None:
+def test_review_complete_counts_published_findings_and_armed_reviews_keep_findings_wake() -> None:
     previous = {
         "pr": {"state": "OPEN", "autoMergeRequest": None},
         "pr_number": 7,
@@ -609,6 +609,7 @@ def test_review_complete_counts_new_findings_and_armed_reviews_keep_findings_wak
     current = deepcopy(previous)
     current["unresolved_review_thread_ids"] = ["finding-1", "finding-2"]
     current["review_ids"] = ["review-1"]
+    current["review_finding_counts"] = {"review-1": 2}
 
     events = wave.snapshot_transition_events(previous, current)
 
@@ -635,6 +636,64 @@ def test_review_complete_counts_new_findings_and_armed_reviews_keep_findings_wak
     autofix_events = wave.snapshot_transition_events(previous, current)
 
     assert autofix_events[0]["summary"].endswith("; Open SWE Auto-fix: Auto-fix dispatch failed")
+
+
+def test_resolution_review_during_full_review_stays_quiet() -> None:
+    previous = {
+        "pr": {
+            "state": "OPEN",
+            "autoMergeRequest": None,
+            "statusCheckRollup": {
+                "contexts": {
+                    "nodes": [
+                        {
+                            "__typename": "CheckRun",
+                            "name": "Open SWE Review",
+                            "status": "IN_PROGRESS",
+                        }
+                    ]
+                }
+            },
+        },
+        "unresolved_review_thread_ids": ["finding-1"],
+        "review_ids": [],
+    }
+    current = deepcopy(previous)
+    current["unresolved_review_thread_ids"] = []
+
+    assert wave.snapshot_transition_events(previous, current) == []
+
+
+def test_review_complete_counts_finding_whose_thread_already_existed() -> None:
+    previous = {
+        "pr": {"state": "OPEN", "autoMergeRequest": None},
+        "unresolved_review_thread_ids": ["finding-1"],
+        "review_ids": [],
+    }
+    current = deepcopy(previous)
+    current["review_ids"] = ["review-1"]
+    current["review_finding_counts"] = {"review-1": 1}
+
+    events = wave.snapshot_transition_events(previous, current)
+
+    assert [event["kind"] for event in events] == ["review_complete"]
+    assert events[0]["summary"] == "Open SWE review complete: 1 finding"
+
+
+def test_zero_finding_full_review_still_completes_without_review_check() -> None:
+    previous = {
+        "pr": {"state": "OPEN", "autoMergeRequest": None},
+        "unresolved_review_thread_ids": [],
+        "review_ids": [],
+    }
+    current = deepcopy(previous)
+    current["review_ids"] = ["review-zero"]
+    current["review_finding_counts"] = {"review-zero": 0}
+
+    events = wave.snapshot_transition_events(previous, current)
+
+    assert [event["kind"] for event in events] == ["review_complete"]
+    assert events[0]["summary"] == "Open SWE review complete: 0 findings"
 
 
 def test_recorded_plan_link_progress_stays_quiet_until_plan_marker() -> None:
@@ -1514,7 +1573,7 @@ def test_live_snapshot_includes_latest_checkpoint_timestamp(
     assert snapshot["latest_checkpoint_at"] == "2026-07-29T11:35:35Z"
 
 
-def test_live_snapshot_tracks_only_submitted_open_swe_reviews(
+def test_live_snapshot_tracks_only_marked_submitted_open_swe_reviews(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -1540,18 +1599,47 @@ def test_live_snapshot_tracks_only_submitted_open_swe_reviews(
                 "nodes": [
                     {
                         "id": "complete",
+                        "body": "**Open SWE Review** found 2 potential issues.\n\n"
+                        "<!-- open-swe-reviewer pr=7 -->",
                         "submittedAt": "2026-07-24T12:00:00Z",
                         "author": {"login": wave.AGENT_BOT_LOGIN},
+                        "comments": {"totalCount": 2},
+                    },
+                    {
+                        "id": "zero",
+                        "body": "## Open SWE Review: No issues found\n\n"
+                        "<!-- open-swe-reviewer pr=7 -->",
+                        "submittedAt": "2026-07-24T12:01:00Z",
+                        "author": {"login": wave.AGENT_BOT_LOGIN},
+                        "comments": {"totalCount": 0},
+                    },
+                    {
+                        "id": "status",
+                        "body": "Reviewing\n\n<!-- open-swe-reviewer-status pr=7 -->",
+                        "submittedAt": "2026-07-24T12:02:00Z",
+                        "author": {"login": wave.AGENT_BOT_LOGIN},
+                        "comments": {"totalCount": 1},
+                    },
+                    {
+                        "id": "resolution",
+                        "body": "",
+                        "submittedAt": "2026-07-24T12:03:00Z",
+                        "author": {"login": wave.AGENT_BOT_LOGIN},
+                        "comments": {"totalCount": 1},
                     },
                     {
                         "id": "pending",
+                        "body": "<!-- open-swe-reviewer pr=7 -->",
                         "submittedAt": None,
                         "author": {"login": wave.AGENT_BOT_LOGIN},
+                        "comments": {"totalCount": 1},
                     },
                     {
                         "id": "human",
-                        "submittedAt": "2026-07-24T12:00:00Z",
+                        "body": "<!-- open-swe-reviewer pr=7 -->",
+                        "submittedAt": "2026-07-24T12:04:00Z",
                         "author": {"login": "human"},
+                        "comments": {"totalCount": 1},
                     },
                 ]
             },
@@ -1560,7 +1648,8 @@ def test_live_snapshot_tracks_only_submitted_open_swe_reviews(
 
     snapshot = wave.live_snapshot("issue", "thread", "owner/repo", None)
 
-    assert snapshot["review_ids"] == ["complete"]
+    assert snapshot["review_ids"] == ["complete", "zero"]
+    assert snapshot["review_finding_counts"] == {"complete": 2, "zero": 0}
 
 
 def test_terminal_state_ignores_absent_pr_without_latching() -> None:
