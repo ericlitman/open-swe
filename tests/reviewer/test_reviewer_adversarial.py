@@ -647,6 +647,11 @@ async def test_prepare_renders_definition_prompt(tmp_path: Path) -> None:
         assert updates["diff_text"] == diff
         assert updates["diff_line_set"] is not None
 
+        cleared_reply_updates = await prepare({"reviewer_event": ""})
+        assert "This is a first review" in cast(
+            str, cleared_reply_updates["rendered_system_prompt"]
+        )
+
         eval_updates = await prepare({"reviewer_eval": True})
         eval_prompt = cast(str, eval_updates["rendered_system_prompt"])
         assert REVIEWER_EVAL_PROMPT_SUFFIX in eval_prompt

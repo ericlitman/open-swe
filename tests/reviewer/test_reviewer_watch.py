@@ -343,6 +343,7 @@ async def test_push_event_triggers_re_review_run_when_watching() -> None:
     assert configurable["re_review"] is True
     assert configurable["last_reviewed_sha"] == "oldsha"
     assert configurable["head_sha"] == "newsha"
+    assert configurable["reviewer_event"] == ""
     selector.assert_awaited_once_with(
         re_review=True,
         finding_reply=False,
@@ -370,9 +371,10 @@ async def test_push_event_triggers_re_review_run_when_watching() -> None:
 
 
 @pytest.mark.asyncio
-async def test_autofix_reply_publish_does_not_suppress_new_head_full_review() -> None:
+async def test_finding_reply_then_push_full_review_advances_head_and_settles_check() -> None:
     from agent.tools.publish_review import _publish_review_async
 
+    checkpointed_config: dict[str, Any] = {"reviewer_event": "finding_reply"}
     shared_metadata: dict[str, Any] = {
         "kind": "reviewer",
         "watch": True,
@@ -430,8 +432,13 @@ async def test_autofix_reply_publish_does_not_suppress_new_head_full_review() ->
         "head": {"sha": "newsha", "ref": "feat-x"},
         "base": {"sha": "basesha", "ref": "main"},
     }
+
+    async def create_run(*args: Any, **kwargs: Any) -> dict[str, str]:
+        checkpointed_config.update(kwargs["config"]["configurable"])
+        return {"run_id": "run-2"}
+
     fake_client = MagicMock()
-    fake_client.runs.create = AsyncMock()
+    fake_client.runs.create = AsyncMock(side_effect=create_run)
 
     with (
         patch(
@@ -476,6 +483,48 @@ async def test_autofix_reply_publish_does_not_suppress_new_head_full_review() ->
     assert configurable["head_sha"] == "newsha"
     assert configurable["review_check_run_id"] == 99
     assert kwargs["config"]["metadata"]["review_check_run_id"] == 99
+    assert checkpointed_config["reviewer_event"] == ""
+
+    with (
+        patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),
+        patch("agent.tools.publish_review.list_findings_async", AsyncMock(return_value=[])),
+        patch(
+            "agent.tools.publish_review.resolve_review_head_sha",
+            AsyncMock(return_value="newsha"),
+        ),
+        patch(
+            "agent.tools.publish_review._open_swe_already_reviewed", AsyncMock(return_value=True)
+        ),
+        patch("agent.tools.publish_review.post_pull_request_review", AsyncMock()),
+        patch(
+            "agent.tools.publish_review._resolve_threads_for_resolved_findings",
+            AsyncMock(return_value=1),
+        ),
+        patch(
+            "agent.tools.publish_review.set_reviewer_thread_metadata",
+            AsyncMock(side_effect=update_metadata),
+        ),
+        patch("agent.tools.publish_review.clear_review_started_comment", AsyncMock()),
+        patch("agent.tools.publish_review._settle_or_defer_review_check", AsyncMock()) as settle,
+    ):
+        result = await _publish_review_async(
+            owner="lc",
+            repo="repo",
+            pr_number=7,
+            head_sha=checkpointed_config["head_sha"],
+            token="t",
+            severity_threshold="medium",
+            cap=15,
+            is_re_review=True,
+            is_finding_reply=checkpointed_config["reviewer_event"] == "finding_reply",
+            review_check_run_id=checkpointed_config["review_check_run_id"],
+        )
+
+    assert result["skipped_empty_re_review"] is True
+    assert shared_metadata["last_reviewed_sha"] == "newsha"
+    settle.assert_awaited_once()
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["review_check_run_id"] == 99
 
 
 @pytest.mark.asyncio
