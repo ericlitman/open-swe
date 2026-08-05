@@ -193,7 +193,10 @@ async def test_first_review_refresh_partitions_pushes_around_watch_establishment
         nonlocal metadata
         if metadata is None:
             metadata = {"kind": "reviewer"}
+        extra = kwargs.pop("extra", None)
         metadata.update({key: value for key, value in kwargs.items() if value is not None})
+        if isinstance(extra, dict):
+            metadata.update(extra)
 
     async def fetch_pr(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return current_pr
@@ -209,6 +212,7 @@ async def test_first_review_refresh_partitions_pushes_around_watch_establishment
     fake_client = MagicMock()
     fake_client.runs.create = AsyncMock(return_value={"run_id": "run"})
     create_check = AsyncMock(side_effect=[101, 102])
+    settle_check = AsyncMock(return_value=True)
     monkeypatch.setattr(
         webhook_common,
         "get_github_app_installation_token_with_expiry",
@@ -223,6 +227,7 @@ async def test_first_review_refresh_partitions_pushes_around_watch_establishment
     monkeypatch.setattr(webhook_common, "_fetch_open_pr_for_branch", fetch_pr)
     monkeypatch.setattr(webhook_common, "fetch_github_pr_metadata", fetch_pr)
     monkeypatch.setattr(webhook_common, "create_review_check_run", create_check)
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", settle_check)
     monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", MagicMock())
     monkeypatch.setattr(webhook_common, "fetch_pr_review_threads", AsyncMock(return_value=[]))
     monkeypatch.setattr(webhook_common, "reconcile_findings_with_review_threads", AsyncMock())
@@ -266,6 +271,9 @@ async def test_first_review_refresh_partitions_pushes_around_watch_establishment
     push_run = fake_client.runs.create.await_args
     assert push_run.kwargs["config"]["configurable"]["head_sha"] == "head-c"
     assert metadata["head_sha"] == "head-c"
+    settle_check.assert_awaited_once()
+    assert settle_check.await_args.kwargs["expected_check_run_id"] == 101
+    assert metadata["review_check_run_id"] == 102
     assert "head=head-b stood down: superseded by head=head-c" in caplog.text
 
 
@@ -294,6 +302,36 @@ async def test_first_review_does_not_dispatch_stale_head_when_refresh_fails(
     assert (
         "lc/repo#7 head=headsha could not refresh PR metadata; using webhook payload" in caplog.text
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata_result",
+    [RuntimeError("metadata unavailable"), {"kind": "reviewer", "watch": False}],
+)
+async def test_first_review_settles_check_when_predispatch_confirmation_stands_down(
+    metadata_result: dict[str, Any] | Exception,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = MagicMock()
+    fake_client.runs.create = AsyncMock()
+    _patch_dispatch_deps(monkeypatch, fake_client)
+    get_metadata = AsyncMock()
+    if isinstance(metadata_result, Exception):
+        get_metadata.side_effect = metadata_result
+    else:
+        get_metadata.return_value = metadata_result
+    monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", get_metadata)
+    monkeypatch.setattr(webhook_common, "create_review_check_run", AsyncMock(return_value=88))
+    settle_check = AsyncMock(return_value=True)
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", settle_check)
+
+    await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=False))
+
+    fake_client.runs.create.assert_not_awaited()
+    settle_check.assert_awaited_once()
+    assert settle_check.await_args is not None
+    assert settle_check.await_args.kwargs["expected_check_run_id"] == 88
 
 
 @pytest.mark.asyncio

@@ -423,6 +423,21 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
             thread_id, extra={"review_check_run_id": check_run_id}
         )
 
+    async def settle_created_check() -> None:
+        if check_run_id is None:
+            return
+        conclusion, title, summary = incomplete_review_check_result()
+        await settle_review_check_run(
+            thread_id=thread_id,
+            owner=repo_config["owner"],
+            repo=repo_config["name"],
+            token=app_token,
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+            expected_check_run_id=check_run_id,
+        )
+
     is_re_review = bool(last_reviewed_sha)
     if is_re_review:
         prompt = (
@@ -466,6 +481,7 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
             head_sha,
             exc_info=True,
         )
+        await settle_created_check()
         return
     if (
         dispatch_metadata is None
@@ -479,6 +495,7 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
             pr_number,
             head_sha,
         )
+        await settle_created_check()
         return
     dispatch_head_sha = dispatch_metadata.get("head_sha")
     dispatch_check_run_id = dispatch_metadata.get("review_check_run_id")
@@ -495,6 +512,7 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
             head_sha,
             dispatch_head_sha,
         )
+        await settle_created_check()
         return
 
     common.logger.info("Dispatching reviewer run for thread %s (source=%s)", thread_id, source)
