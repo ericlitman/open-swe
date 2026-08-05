@@ -296,7 +296,7 @@ query WaveReviews($owner: String!, $repo: String!, $number: Int!, $cursor: Strin
     pullRequest(number: $number) {
       headRefOid
       reviews(first: 100, after: $cursor) {
-        nodes { id submittedAt author { login } }
+        nodes { id body submittedAt author { login } comments { totalCount } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -1270,7 +1270,8 @@ def snapshot_transition_events(
     new_reviews = set(current.get("review_ids") or [])
     added_reviews = sorted(new_reviews - old_reviews)
     if added_reviews and not _auto_merge_armed(current):
-        count = len(added_threads)
+        finding_counts = current.get("review_finding_counts") or {}
+        count = sum(finding_counts.get(review_id, 0) for review_id in added_reviews)
         noun = "finding" if count == 1 else "findings"
         events.append(
             {
@@ -1351,13 +1352,20 @@ def live_snapshot(
         str(item.get("id")) for item in threads if item.get("id") and not item.get("isResolved")
     )
     reviews = (pr.get("reviews") or {}).get("nodes") or []
-    review_ids = sorted(
-        str(item.get("id"))
+    review_marker = f"<!-- open-swe-reviewer pr={discovered_number} -->"
+    completed_reviews = [
+        item
         for item in reviews
         if item.get("id")
         and item.get("submittedAt")
         and (item.get("author") or {}).get("login") == AGENT_BOT_LOGIN
-    )
+        and review_marker in str(item.get("body") or "")
+    ]
+    review_ids = sorted(str(item["id"]) for item in completed_reviews)
+    review_finding_counts = {
+        str(item["id"]): ((item.get("comments") or {}).get("totalCount") or 0)
+        for item in completed_reviews
+    }
     latest_status, latest_at, error_ids = _run_observations(langgraph)
     return {
         "linear": linear,
@@ -1366,6 +1374,7 @@ def live_snapshot(
         "pr_number": int(discovered_number) if str(discovered_number or "").isdigit() else None,
         "unresolved_review_thread_ids": unresolved_ids,
         "review_ids": review_ids,
+        "review_finding_counts": review_finding_counts,
         "latest_run_status": latest_status,
         "latest_run_at": latest_at,
         "latest_checkpoint_at": (langgraph.get("state") or {}).get("created_at"),
