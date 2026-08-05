@@ -1295,6 +1295,15 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
         async def create(self, **kwargs) -> None:
             captured["thread_create_kwargs"] = kwargs
 
+        async def get(self, _thread_id: str) -> dict[str, object]:
+            return {
+                "metadata": {
+                    "kind": "reviewer",
+                    "watch": True,
+                    "head_sha": "head-sha",
+                }
+            }
+
     class _FakeLangGraphClient:
         runs = _FakeRunsClient()
         threads = _FakeThreadsClient()

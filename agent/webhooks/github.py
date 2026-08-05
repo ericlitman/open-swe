@@ -342,42 +342,64 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
     )
     if current_pr is None:
         common.logger.warning(
-            "First review for %s/%s#%s head=%s not dispatched: could not refresh PR metadata",
+            "First review for %s/%s#%s head=%s could not refresh PR metadata; "
+            "using webhook payload",
             repo_config["owner"],
             repo_config["name"],
             pr_number,
             head_sha,
         )
-        return
-
-    pull_request = current_pr
-    pr_url = pull_request.get("html_url", "") or pull_request.get("url", "") or pr_url
-    branch_name = pull_request.get("head", {}).get("ref", "")
-    base_ref = pull_request.get("base", {}).get("ref", "")
-    base_sha = pull_request.get("base", {}).get("sha", "")
-    head_sha = pull_request.get("head", {}).get("sha", "")
-    pr_title = pull_request.get("title", "")
-    if not base_sha or not head_sha:
-        common.logger.warning(
-            "First review for %s/%s#%s head=%s not dispatched: refreshed PR metadata "
-            "is missing base/head SHA",
-            repo_config["owner"],
-            repo_config["name"],
-            pr_number,
-            head_sha or "<missing>",
+    else:
+        pull_request = current_pr
+        if pull_request.get("state") == "closed":
+            await common.set_reviewer_thread_metadata(thread_id, watch=False)
+            common.logger.info(
+                "Skipping first review for %s/%s#%s: PR closed during startup",
+                repo_config["owner"],
+                repo_config["name"],
+                pr_number,
+            )
+            return
+        if pull_request.get("draft") and not await common._draft_review_enabled_for_author(
+            (pull_request.get("user") or {}).get("login", "")
+        ):
+            await common.set_reviewer_thread_metadata(thread_id, watch=False)
+            common.logger.info(
+                "Skipping first review for %s/%s#%s: PR became an ineligible draft during startup",
+                repo_config["owner"],
+                repo_config["name"],
+                pr_number,
+            )
+            return
+        pr_url = pull_request.get("html_url", "") or pull_request.get("url", "") or pr_url
+        branch_name = pull_request.get("head", {}).get("ref", "")
+        base_ref = pull_request.get("base", {}).get("ref", "")
+        base_sha = pull_request.get("base", {}).get("sha", "")
+        head_sha = pull_request.get("head", {}).get("sha", "")
+        pr_title = pull_request.get("title", "")
+        if not base_sha or not head_sha:
+            common.logger.warning(
+                "First review for %s/%s#%s head=%s not dispatched: refreshed PR metadata "
+                "is missing base/head SHA",
+                repo_config["owner"],
+                repo_config["name"],
+                pr_number,
+                head_sha or "<missing>",
+            )
+            return
+        pr_meta = {
+            "owner": repo_config["owner"],
+            "name": repo_config["name"],
+            "number": pr_number,
+            "url": pr_url,
+            "title": pr_title,
+            "head_ref": branch_name,
+            "base_ref": base_ref,
+            "author": (pull_request.get("user") or {}).get("login", ""),
+        }
+        await common.set_reviewer_thread_metadata(
+            thread_id, pr=pr_meta, watch=True, head_sha=head_sha
         )
-        return
-    pr_meta = {
-        "owner": repo_config["owner"],
-        "name": repo_config["name"],
-        "number": pr_number,
-        "url": pr_url,
-        "title": pr_title,
-        "head_ref": branch_name,
-        "base_ref": base_ref,
-        "author": (pull_request.get("user") or {}).get("login", ""),
-    }
-    await common.set_reviewer_thread_metadata(thread_id, pr=pr_meta, watch=True, head_sha=head_sha)
 
     if payload.get("action") == "ready_for_review" and last_reviewed_sha == head_sha:
         common.logger.info(
@@ -431,6 +453,49 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         finding_reply=False,
         explicit_request=False,
     )
+
+    try:
+        dispatch_metadata = await common._get_thread_metadata_safe(thread_id, raise_on_error=True)
+    except Exception:
+        common.logger.warning(
+            "First review for %s/%s#%s head=%s not dispatched: could not confirm "
+            "reviewer thread metadata",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+            exc_info=True,
+        )
+        return
+    if (
+        dispatch_metadata is None
+        or dispatch_metadata.get("kind") != common.REVIEWER_THREAD_KIND
+        or dispatch_metadata.get("watch") is not True
+    ):
+        common.logger.info(
+            "First review for %s/%s#%s head=%s stood down: reviewer watch changed",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+        )
+        return
+    dispatch_head_sha = dispatch_metadata.get("head_sha")
+    dispatch_check_run_id = dispatch_metadata.get("review_check_run_id")
+    if dispatch_head_sha != head_sha or (
+        check_run_id is not None
+        and isinstance(dispatch_check_run_id, int)
+        and dispatch_check_run_id != check_run_id
+    ):
+        common.logger.info(
+            "First review for %s/%s#%s head=%s stood down: superseded by head=%s",
+            repo_config["owner"],
+            repo_config["name"],
+            pr_number,
+            head_sha,
+            dispatch_head_sha,
+        )
+        return
 
     common.logger.info("Dispatching reviewer run for thread %s (source=%s)", thread_id, source)
     run = await common.dispatch_agent_run(
