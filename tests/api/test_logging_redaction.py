@@ -84,7 +84,8 @@ def test_every_dispatchable_graph_is_covered_by_graphs_package() -> None:
         )
 
 
-def test_httpx_url_is_redacted_through_logging_machinery() -> None:
+@pytest.mark.parametrize("parameter", ["token", "code", "state"])
+def test_httpx_url_is_redacted_through_logging_machinery(parameter: str) -> None:
     token_value = "'LEAK outbound value\""
     _install()
 
@@ -92,7 +93,7 @@ def test_httpx_url_is_redacted_through_logging_machinery() -> None:
         logging.getLogger("httpx").info(
             'HTTP Request: %s %s "%s %d %s"',
             "POST",
-            httpx.URL(f"https://example.test/webhooks/run-complete?token={token_value}"),
+            httpx.URL(f"https://example.test/webhooks/run-complete?{parameter}={token_value}"),
             "HTTP/1.1",
             200,
             "OK",
@@ -100,11 +101,82 @@ def test_httpx_url_is_redacted_through_logging_machinery() -> None:
 
     output = stream.getvalue()
     assert "LEAK" not in output
-    assert "token=***" in output
+    assert f"{parameter}=***" in output
     assert (
-        'HTTP Request: POST https://example.test/webhooks/run-complete?token=*** "HTTP/1.1 200 OK"'
-        in output
+        f"HTTP Request: POST https://example.test/webhooks/run-complete?{parameter}=*** "
+        '"HTTP/1.1 200 OK"' in output
     )
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("code=first&state=second", "code=***&state=***"),
+        ("state=second&code=first", "state=***&code=***"),
+        ("code=first&code=second&state=third", "code=***&code=***&state=***"),
+        ("code=hello%26world&safe=ok", "code=***&safe=ok"),
+        ("token=&code=&state=", "token=***&code=***&state=***"),
+        (
+            "safe=1&ToKeN=token-value&CoDe=code-value&STATE=state-value&other=2",
+            "safe=1&ToKeN=***&CoDe=***&STATE=***&other=2",
+        ),
+        (
+            "status_code=201&error_code=none&session_state=ready&postcode=12345&estate=open",
+            "status_code=201&error_code=none&session_state=ready&postcode=12345&estate=open",
+        ),
+        (
+            "status_%63ode=201&error_%63ode=none&session_st%61te=ready",
+            "status_%63ode=201&error_%63ode=none&session_st%61te=ready",
+        ),
+    ],
+)
+def test_query_parameter_boundaries(query: str, expected: str) -> None:
+    _install()
+
+    with _capture("langgraph_api.server", logging.Formatter("%(message)s")) as stream:
+        logging.getLogger("langgraph_api.server").info("GET /callback?%s", query)
+
+    assert stream.getvalue() == f"GET /callback?{expected}\n"
+
+
+@pytest.mark.parametrize("parameter", ["token", "code", "state"])
+def test_percent_encoded_sensitive_parameter_names_are_redacted(parameter: str) -> None:
+    _install()
+
+    for index, character in enumerate(parameter):
+        for hex_format in ("02x", "02X"):
+            encoded_character = f"%{format(ord(character), hex_format)}"
+            encoded_parameter = f"{parameter[:index]}{encoded_character}{parameter[index + 1 :]}"
+            request_target = f"/dashboard/api/auth/callback?{encoded_parameter}=secret"
+            with _capture("langgraph_api.server", logging.Formatter("%(message)s")) as stream:
+                logging.getLogger("langgraph_api.server").info("GET %s", request_target)
+
+            assert stream.getvalue() == (
+                f"GET /dashboard/api/auth/callback?{encoded_parameter}=***\n"
+            )
+
+
+def test_nested_structured_sensitive_parameters_are_redacted() -> None:
+    _install()
+    payload = {
+        "request": {
+            "query_string": "safe=1&code=code-value&state=state-value",
+            "attempts": ["token=token-value", ("session_state=ready",)],
+        },
+        "status": 302,
+    }
+
+    with _capture("langgraph_api.server", logging.Formatter("%(message)s")) as stream:
+        logging.getLogger("langgraph_api.server").info(payload)
+
+    output = stream.getvalue()
+    assert "code-value" not in output
+    assert "state-value" not in output
+    assert "token-value" not in output
+    assert "safe=1&code=***&state=***" in output
+    assert "token=***" in output
+    assert "session_state=ready" in output
+    assert "302" in output
 
 
 def test_encoded_webhook_secret_is_fully_redacted() -> None:
@@ -148,7 +220,10 @@ def test_webhook_structlog_success_and_failure_fields_are_redacted() -> None:
     assert "run-2" in output
 
 
-def test_asgi_access_log_query_string_is_redacted_and_fields_are_preserved() -> None:
+@pytest.mark.parametrize("parameter", ["token", "code", "state"])
+def test_asgi_access_log_query_string_is_redacted_and_fields_are_preserved(
+    parameter: str,
+) -> None:
     token_value = "'LEAK inbound value\""
     _install()
     logger = structlog.stdlib.get_logger("asgi")
@@ -160,12 +235,12 @@ def test_asgi_access_log_query_string_is_redacted_and_fields_are_preserved() -> 
             path="/webhooks/run-complete",
             status=401,
             route="/webhooks/run-complete",
-            query_string=f"token={token_value}",
+            query_string=f"{parameter}={token_value}",
         )
 
     output = stream.getvalue()
     assert "LEAK" not in output
-    assert "token=***" in output
+    assert f"{parameter}=***" in output
     assert output.count("POST") == 2
     assert output.count("/webhooks/run-complete") == 3
     assert output.count("401") == 2
