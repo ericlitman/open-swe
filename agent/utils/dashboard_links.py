@@ -3,9 +3,11 @@
 import os
 from urllib.parse import quote
 
-# openswe.vercel.app is upstream's hosted demo, not our deployment — it must never
-# appear as a link base here; agents reading this code have copied it into real links.
-_DEFAULT_DASHBOARD_BASE_URL = "https://studio2.tail062eee.ts.net"
+# No baked-in fallback: with DASHBOARD_BASE_URL unset the helpers return None and
+# links are omitted. The old default (upstream's openswe.vercel.app demo) leaked into
+# real links via agents reading this code, and any hardcoded host is wrong for every
+# deployment but one.
+_DEFAULT_DASHBOARD_BASE_URL = ""
 
 
 def _dashboard_base_url() -> str:
