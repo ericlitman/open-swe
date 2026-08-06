@@ -141,7 +141,7 @@ def test_workflow_approval_response_serializes_review_fields() -> None:
             "diff_stats": {"files": 1, "additions": 2, "deletions": 3},
             "diff_preview": "diff --git ...",
             "diff_preview_truncated": True,
-            "approval_url": "https://openswe.vercel.app/agents/thread?workflowApproval=abc",
+            "approval_url": "https://studio2.tail062eee.ts.net/agents/thread?workflowApproval=abc",
             "requested_at": "2026-06-30T00:00:00+00:00",
         }
     )

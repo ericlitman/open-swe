@@ -3,7 +3,9 @@
 import os
 from urllib.parse import quote
 
-_DEFAULT_DASHBOARD_BASE_URL = "https://openswe.vercel.app"
+# openswe.vercel.app is upstream's hosted demo, not our deployment — it must never
+# appear as a link base here; agents reading this code have copied it into real links.
+_DEFAULT_DASHBOARD_BASE_URL = "https://studio2.tail062eee.ts.net"
 
 
 def _dashboard_base_url() -> str:
