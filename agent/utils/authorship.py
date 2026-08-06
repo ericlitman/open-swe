@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .dashboard_links import DEFAULT_DASHBOARD_BASE_URL, dashboard_base_url
+from .dashboard_links import _DEFAULT_DASHBOARD_BASE_URL, _dashboard_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def build_pr_attribution_footer(thread_url: str | None = None) -> str:
     regardless of import order.
     """
     url = thread_url.strip() if isinstance(thread_url, str) and thread_url.strip() else ""
-    return f"{PR_ATTRIBUTION_TEXT}({url or dashboard_base_url() or DEFAULT_DASHBOARD_BASE_URL})"
+    return f"{PR_ATTRIBUTION_TEXT}({url or _dashboard_base_url() or _DEFAULT_DASHBOARD_BASE_URL})"
 
 
 @dataclass(frozen=True)

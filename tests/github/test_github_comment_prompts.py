@@ -19,6 +19,7 @@ from agent.utils.authorship import (
     build_pr_attribution_footer,
     resolve_triggering_user_identity,
 )
+from agent.utils.dashboard_links import _DEFAULT_DASHBOARD_BASE_URL
 from agent.webhooks import github as github_webhooks
 
 _BOT_TRAILER = f"Co-authored-by: {OPEN_SWE_BOT_NAME} <{OPEN_SWE_BOT_EMAIL}>"
@@ -326,7 +327,7 @@ def test_construct_system_prompt_includes_coauthor_trailer_when_identity_present
     assert "git config user.name octocat" in prompt
     assert "git config user.email 1234+octocat@users.noreply.github.com" in prompt
     assert _BOT_TRAILER in prompt
-    assert "Made by [Open SWE](https://openswe.vercel.app)" in prompt
+    assert f"Made by [Open SWE]({_DEFAULT_DASHBOARD_BASE_URL})" in prompt
 
 
 def test_construct_system_prompt_includes_github_login_in_pr_footer(monkeypatch) -> None:
@@ -347,7 +348,7 @@ def test_construct_system_prompt_includes_github_login_in_pr_footer(monkeypatch)
     assert "git config user.name 'Mona Lisa'" in prompt
     assert "git config user.email 1234+octocat@users.noreply.github.com" in prompt
     assert _BOT_TRAILER in prompt
-    assert "Made by [Open SWE](https://openswe.vercel.app)" in prompt
+    assert f"Made by [Open SWE]({_DEFAULT_DASHBOARD_BASE_URL})" in prompt
     assert "replace that existing footer with this line" in prompt
     assert "`_Opened collaboratively by Mona Lisa and open-swe._`" in prompt
 
@@ -366,7 +367,7 @@ def test_construct_system_prompt_footer_links_thread_when_provided() -> None:
     )
 
     assert "Made by [Open SWE](https://openswe.vercel.app/agents/abc-123)" in prompt
-    assert "Made by [Open SWE](https://openswe.vercel.app)" not in prompt
+    assert f"Made by [Open SWE]({_DEFAULT_DASHBOARD_BASE_URL})" not in prompt
 
 
 def test_construct_system_prompt_shell_escapes_user_name() -> None:
@@ -402,7 +403,7 @@ def test_add_pr_collaboration_note_replaces_legacy_footer(monkeypatch) -> None:
     body = "## Description\nDone.\n\n_Opened collaboratively by Mona Lisa and open-swe._"
 
     assert add_pr_collaboration_note(body, identity) == (
-        "## Description\nDone.\n\nMade by [Open SWE](https://openswe.vercel.app)"
+        f"## Description\nDone.\n\nMade by [Open SWE]({_DEFAULT_DASHBOARD_BASE_URL})"
     )
 
 
@@ -423,10 +424,14 @@ def test_pr_attribution_footer_default_resolves_dashboard_base_url(monkeypatch) 
     )
 
 
-def test_pr_attribution_footer_falls_back_to_upstream_url_when_env_blank(monkeypatch) -> None:
+def test_pr_attribution_footer_blank_env_behaves_like_unset(monkeypatch) -> None:
+    monkeypatch.delenv("DASHBOARD_BASE_URL", raising=False)
+    unset_footer = build_pr_attribution_footer()
+
     monkeypatch.setenv("DASHBOARD_BASE_URL", "   ")
 
-    assert build_pr_attribution_footer() == "Made by [Open SWE](https://openswe.vercel.app)"
+    assert build_pr_attribution_footer() == unset_footer
+    assert unset_footer == f"Made by [Open SWE]({_DEFAULT_DASHBOARD_BASE_URL})"
 
 
 def test_add_pr_collaboration_note_skips_when_footer_present_with_other_link() -> None:
