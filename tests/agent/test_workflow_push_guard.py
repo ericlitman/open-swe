@@ -141,7 +141,7 @@ def test_workflow_approval_response_serializes_review_fields() -> None:
             "diff_stats": {"files": 1, "additions": 2, "deletions": 3},
             "diff_preview": "diff --git ...",
             "diff_preview_truncated": True,
-            "approval_url": "https://openswe.vercel.app/agents/thread?workflowApproval=abc",
+            "approval_url": "https://studio2.tail062eee.ts.net/agents/thread?workflowApproval=abc",
             "requested_at": "2026-06-30T00:00:00+00:00",
         }
     )
@@ -185,6 +185,7 @@ def test_workflow_change_for_push_rejects_non_current_refspec() -> None:
 async def test_unapproved_workflow_push_blocks_and_posts_slack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://example.com")
     guard.SANDBOX_BACKENDS["thread-1"] = SandboxBackendProxy(
         cast(SandboxBackendProtocol, _Backend()), thread_id="thread-1"
     )

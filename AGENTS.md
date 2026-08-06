@@ -130,6 +130,7 @@ Source handlers derive deterministic thread ids so a Linear issue, Slack thread,
 - New FastAPI routes: define an `APIRouter` in the owning `agent/api/`, `agent/webhooks/`, or `agent/dashboard/` module and compose it in `agent/api/app.py` when it is not already included by a parent router.
 - New graphs: add the implementation, an `agent/graphs/` re-export shim, and the `langgraph.json` entrypoint.
 - Minimal-to-no code comments — only when the *why* is not obvious from the code.
+- The dashboard lives at `https://studio2.tail062eee.ts.net` (configured via `DASHBOARD_BASE_URL`). `openswe.vercel.app` is upstream's hosted demo, not ours — never navigate to it, link to it, or use it as a URL base anywhere.
 
 <!-- OPENWIKI:START -->
 
