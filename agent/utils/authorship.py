@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from .dashboard_links import DEFAULT_DASHBOARD_BASE_URL, dashboard_base_url
+
 logger = logging.getLogger(__name__)
 
 OPEN_SWE_BOT_NAME = "open-swe[bot]"
@@ -17,14 +19,17 @@ OPEN_SWE_BOT_NAME = "open-swe[bot]"
 OPEN_SWE_BOT_EMAIL = "open-swe@users.noreply.github.com"
 
 PR_ATTRIBUTION_TEXT = "Made by [Open SWE]"
-PR_ATTRIBUTION_DEFAULT_URL = "https://openswe.vercel.app"
-PR_ATTRIBUTION_FOOTER = f"{PR_ATTRIBUTION_TEXT}({PR_ATTRIBUTION_DEFAULT_URL})"
 
 
 def build_pr_attribution_footer(thread_url: str | None = None) -> str:
-    """Build the Open SWE PR footer, linking the run's thread when available."""
+    """Build the Open SWE PR footer, linking the run's thread when available.
+
+    Without a thread URL the footer links this deployment's dashboard
+    (``DASHBOARD_BASE_URL``), resolved per call so the env var is honored
+    regardless of import order.
+    """
     url = thread_url.strip() if isinstance(thread_url, str) and thread_url.strip() else ""
-    return f"{PR_ATTRIBUTION_TEXT}({url or PR_ATTRIBUTION_DEFAULT_URL})"
+    return f"{PR_ATTRIBUTION_TEXT}({url or dashboard_base_url() or DEFAULT_DASHBOARD_BASE_URL})"
 
 
 @dataclass(frozen=True)
