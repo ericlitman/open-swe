@@ -225,6 +225,16 @@ ALLOWED_GITHUB_REPOS="some-user/their-repo,another-org/specific-repo"
 
 A GitHub or Linear webhook is accepted if the resolved repo's org is in `ALLOWED_GITHUB_ORGS` **or** the `owner/repo` is in `ALLOWED_GITHUB_REPOS`. If both are empty, all repos are allowed. Slack mentions are not rejected from regex-inferred repository text; repository access is bounded by the GitHub App installation permissions.
 
+### Identifying your own bot (`GITHUB_BOT_LOGINS`)
+
+Open SWE must recognize events it caused itself. It knows the logins `open-swe[bot]` and `openswe-dev[bot]`; if you created your app under any other name, add the login it comments as:
+
+```bash
+GITHUB_BOT_LOGINS="my-open-swe[bot]"   # comma-separated for multiple apps
+```
+
+Use the exact `name[bot]` login shown as the author on a comment your app posted — not the display name. Leaving this unset when your slug differs makes the reviewer read its own replies on review findings as user replies: it answers itself, and each answer starts a new reviewer run that interrupts the one still holding the PR's `Open SWE Review` check.
+
 `ALLOWED_GITHUB_ORGS` also gates **dashboard login**: when set, only GitHub accounts that are active members of one of the listed organizations can complete the OAuth login and receive a session. Membership is verified server-side with the GitHub App installation token (so private memberships are visible and no extra OAuth scope is required), and the check fails closed on any API error. When `ALLOWED_GITHUB_ORGS` is empty, dashboard login is open to any GitHub account (the prior behavior).
 
 > **Required GitHub App permission**: the membership check calls `GET /orgs/{org}/memberships/{username}`, which requires the GitHub App's **Organization → Members: Read-only** permission (see step 3a). If you set `ALLOWED_GITHUB_ORGS` without granting that permission, the call returns 403, the check fails closed, and **every** dashboard login is rejected. After changing an installed app's permissions, GitHub requires you to **approve the new permission** on each installation before it takes effect.
@@ -434,6 +444,12 @@ GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
 "
 GITHUB_APP_INSTALLATION_ID=""          # Fallback from step 3c when no target repo is known
 # GITHUB_APP_TARGET_REPO="owner/repo"     # Optional per-invocation context for local shims
+# Required unless your app's slug is literally `open-swe` or `openswe-dev`.
+# Set it to the login your app comments as — the `name[bot]` form shown as the
+# author on a comment it posted. Open SWE recognises its own review replies by
+# this login; if it is missing, the reviewer treats its own replies as user
+# replies, re-triggers itself, and interrupts the review holding the PR check.
+# GITHUB_BOT_LOGINS="my-open-swe[bot]"    # Comma-separated for multiple apps
 
 # === GitHub Webhook (required) ===
 GITHUB_WEBHOOK_SECRET=""               # The secret you generated in step 3a

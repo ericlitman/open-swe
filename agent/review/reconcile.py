@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..utils.github_org_membership import is_internal_bot_author
 from .findings import (
     Finding,
     FindingInteraction,
@@ -16,7 +17,8 @@ ReviewThreadMatch = tuple[ReviewThread, int | None]
 
 
 def _is_open_swe_bot_comment(comment: ReviewThread) -> bool:
-    return comment.get("author") in {"open-swe", "open-swe[bot]"}
+    author = comment.get("author")
+    return is_internal_bot_author(author if isinstance(author, str) else None)
 
 
 def _int_list(value: Any) -> list[int]:
@@ -52,7 +54,7 @@ def _human_replies_after_bot_comment(
         if not seen_bot_comment:
             continue
         author = comment.get("author")
-        if author in {"open-swe", "open-swe[bot]"}:
+        if is_internal_bot_author(author if isinstance(author, str) else None):
             continue
         replies.append(comment)
     return replies

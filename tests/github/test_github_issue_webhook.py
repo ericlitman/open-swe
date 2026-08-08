@@ -638,17 +638,17 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
 
 def test_finding_reply_ignores_pending_result_from_superseded_check(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    metadata_writes: list[dict[str, object]] = []
 
     async def fake_settle_review_check_run(**kwargs: object) -> bool:
         captured.update(kwargs)
         return True
 
+    async def fake_set_metadata(_thread_id: str, **kwargs: object) -> None:
+        metadata_writes.append(kwargs)
+
     monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
-    monkeypatch.setattr(
-        github_webhooks,
-        "incomplete_review_check_result",
-        lambda: ("failure", "Review did not complete", "incomplete"),
-    )
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", fake_set_metadata)
 
     asyncio.run(
         github_webhooks._settle_review_check_before_finding_reply(
@@ -668,9 +668,146 @@ def test_finding_reply_ignores_pending_result_from_superseded_check(monkeypatch)
         )
     )
 
+    # The pending result belongs to check 41, so it cannot speak for 42. With
+    # no verdict to publish, check 42 is handed to the successor rather than
+    # concluded, and stays in progress meanwhile.
+    assert captured == {}
+    assert metadata_writes == [{"extra": {"review_check_superseded": {"review_check_run_id": 42}}}]
+
+
+def test_finding_reply_hands_off_rather_than_concluding_under_blocking(monkeypatch) -> None:
+    """A preempted review must neither fail the check nor free the gate.
+
+    Concluding here with any non-failure result would let a blocking check
+    pass while no review is running — permanently, if the successor never
+    publishes. Leaving it in progress keeps the gate closed for the handoff.
+    """
+    captured: dict[str, object] = {}
+    metadata_writes: list[dict[str, object]] = []
+
+    async def fake_settle_review_check_run(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    async def fake_set_metadata(_thread_id: str, **kwargs: object) -> None:
+        metadata_writes.append(kwargs)
+
+    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true")
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", fake_set_metadata)
+
+    asyncio.run(
+        github_webhooks._settle_review_check_before_finding_reply(
+            thread_id="thread-1",
+            metadata={"review_check_run_id": 42},
+            owner="langchain-ai",
+            repo="open-swe",
+            token="token",
+        )
+    )
+
+    assert captured == {}
+    assert metadata_writes == [{"extra": {"review_check_superseded": {"review_check_run_id": 42}}}]
+
+
+def test_handoff_returns_the_check_so_the_run_can_carry_it(monkeypatch) -> None:
+    """The successor run must record the inherited check in its own metadata.
+
+    The after-agent hook only fires when the graph exits normally. A run killed
+    by a timeout or a hard error is recovered by the completion handler, which
+    reads the check id from immutable run metadata — without it, the check we
+    deliberately left in progress would be stranded and block the PR.
+    """
+
+    async def fake_set_metadata(_thread_id: str, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", fake_set_metadata)
+
+    inherited = asyncio.run(
+        github_webhooks._settle_review_check_before_finding_reply(
+            thread_id="thread-1",
+            metadata={"review_check_run_id": 42},
+            owner="langchain-ai",
+            repo="open-swe",
+            token="token",
+        )
+    )
+
+    assert inherited == 42
+    assert github_webhooks._review_run_metadata(inherited)["review_check_run_id"] == 42
+
+
+def test_finding_reply_publishes_a_verdict_the_preempted_review_staged(monkeypatch) -> None:
+    """A staged result is a real conclusion and must still be published."""
+    captured: dict[str, object] = {}
+
+    async def fake_settle_review_check_run(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    async def fake_set_metadata(_thread_id: str, **_kwargs: object) -> None:
+        raise AssertionError("a published verdict needs no handoff marker")
+
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", fake_set_metadata)
+
+    asyncio.run(
+        github_webhooks._settle_review_check_before_finding_reply(
+            thread_id="thread-1",
+            metadata={
+                "review_check_run_id": 42,
+                "review_check_pending_result": {
+                    "review_check_run_id": 42,
+                    "conclusion": "success",
+                    "title": "No issues found",
+                    "summary": "clean",
+                },
+            },
+            owner="langchain-ai",
+            repo="open-swe",
+            token="token",
+        )
+    )
+
     assert captured["expected_check_run_id"] == 42
-    assert captured["conclusion"] == "failure"
-    assert captured["title"] == "Review did not complete"
+    assert captured["conclusion"] == "success"
+
+
+def test_finding_reply_ignores_replies_authored_by_our_own_bot(monkeypatch) -> None:
+    """The reviewer answering its own finding thread must not re-trigger it.
+
+    Regression test for the self-sustaining loop: this deployment posts as
+    ``openswebot[bot]``, which the old hard-coded ``open-swe[bot]`` check
+    missed, so every reply the reviewer wrote came back as a "human" reply and
+    dispatched a run that interrupted the review still holding the check.
+    """
+    dispatched: list[object] = []
+
+    async def fail_if_called(*_args: object, **_kwargs: object) -> object:
+        dispatched.append(_args)
+        raise AssertionError("self-authored reply must not reach dispatch")
+
+    monkeypatch.setenv("GITHUB_BOT_LOGINS", "openswebot[bot]")
+    monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fail_if_called)
+
+    for login in ("openswebot[bot]", "OpenSWEBot[bot]", "open-swe[bot]"):
+        asyncio.run(
+            github_webhooks.process_github_review_finding_reply(
+                {
+                    "comment": {"id": 222, "in_reply_to_id": 111, "body": "Addressed."},
+                    "pull_request": {
+                        "number": 24,
+                        "base": {"sha": "base-sha"},
+                        "head": {"sha": "head-sha", "ref": "feature"},
+                    },
+                    "repository": {"owner": {"login": "mobilyze-llc"}, "name": "mastra-pilot"},
+                    "sender": {"login": login, "id": 1},
+                }
+            )
+        )
+
+    assert dispatched == []
 
 
 def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(monkeypatch) -> None:

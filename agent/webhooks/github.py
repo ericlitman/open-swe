@@ -11,8 +11,9 @@ from typing import Any, cast, get_args
 from ..dashboard.autofix_state import set_pr_autofix_disabled
 from ..review.findings import FindingInteraction, ReviewerPRMeta, ReviewerSlackThread
 from ..review.publish import settle_review_check_run
-from ..utils.github_checks import CheckConclusion, incomplete_review_check_result
+from ..utils.github_checks import CheckConclusion
 from ..utils.github_comments import GitHubAuthError
+from ..utils.github_org_membership import is_internal_bot_login
 from ..utils.slack import GitHubPrRef
 from . import common
 
@@ -32,44 +33,62 @@ async def _settle_review_check_before_finding_reply(
     owner: str,
     repo: str,
     token: str,
-) -> None:
-    """Settle the full-review check before a finding reply interrupts its owner."""
+) -> int | None:
+    """Resolve the full-review check before a finding reply interrupts its owner.
+
+    Returns the check handed to the successor, so the dispatch can record it on
+    the run itself — the after-agent hook only fires when the graph exits
+    normally, and a run killed by a timeout or a hard error needs the
+    completion handler to find the check and close it.
+
+    A verdict the owner already staged (``pending``) is published, since that
+    review did reach a conclusion. Otherwise the check is deliberately *not*
+    concluded: it is handed to the run we are about to dispatch, which reports
+    the real result once it publishes.
+
+    Concluding here instead — with any non-failure result — would leave the
+    head momentarily unguarded, and permanently so if the successor never
+    publishes, letting a blocking check pass without a completed review.
+    Leaving it in progress keeps the gate closed for the whole handoff, and
+    the after-agent hook still settles it if the successor dies.
+    """
     if not isinstance(metadata, dict):
-        return
+        return None
     check_run_id = metadata.get("review_check_run_id")
     if not isinstance(check_run_id, int):
-        return
+        return None
     deferred = metadata.get("review_check_deferred_result")
     if isinstance(deferred, dict) and deferred.get("review_check_run_id") == check_run_id:
-        return
+        return None
     pending = metadata.get("review_check_pending_result")
     if (
         isinstance(pending, dict)
         and pending.get("review_check_run_id") == check_run_id
         and pending.get("conclusion") in get_args(CheckConclusion)
     ):
-        conclusion = cast(CheckConclusion, pending["conclusion"])
-        title = str(pending.get("title") or "Review completed")
-        summary = str(pending.get("summary") or "")
-    else:
-        conclusion, title, summary = incomplete_review_check_result()
-    try:
-        await settle_review_check_run(
-            thread_id=thread_id,
-            owner=owner,
-            repo=repo,
-            token=token,
-            conclusion=conclusion,
-            title=title,
-            summary=summary,
-            expected_check_run_id=check_run_id,
-        )
-    except Exception:
-        common.logger.warning(
-            "Could not settle review check before finding reply dispatch for %s",
-            thread_id,
-            exc_info=True,
-        )
+        try:
+            await settle_review_check_run(
+                thread_id=thread_id,
+                owner=owner,
+                repo=repo,
+                token=token,
+                conclusion=cast(CheckConclusion, pending["conclusion"]),
+                title=str(pending.get("title") or "Review completed"),
+                summary=str(pending.get("summary") or ""),
+                expected_check_run_id=check_run_id,
+            )
+        except Exception:
+            common.logger.warning(
+                "Could not settle review check before finding reply dispatch for %s",
+                thread_id,
+                exc_info=True,
+            )
+        return None
+    await common.set_reviewer_thread_metadata(
+        thread_id,
+        extra={"review_check_superseded": {"review_check_run_id": check_run_id}},
+    )
+    return check_run_id
 
 
 def build_github_issue_prompt(
@@ -1058,7 +1077,11 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
 
     sender = payload.get("sender", {})
     sender_login = sender.get("login") if isinstance(sender, dict) else None
-    if sender_login == "open-swe[bot]":
+    # Must match every identity we post as, not just the canonical name: a
+    # reply we authored that is not recognised as ours is recorded as a human
+    # reply and dispatched as a new reviewer run, which interrupts the review
+    # that is still publishing — and that run replies again.
+    if is_internal_bot_login(sender_login):
         return
 
     repo = payload.get("repository", {})
@@ -1150,7 +1173,7 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         }
     )
     latest_metadata = await common._get_thread_metadata_safe(thread_id)
-    await _settle_review_check_before_finding_reply(
+    inherited_check_run_id = await _settle_review_check_before_finding_reply(
         thread_id=thread_id,
         metadata=latest_metadata,
         owner=repo_config["owner"],
@@ -1175,7 +1198,7 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         configurable,
         source="github_review_reply",
         assistant_id=assistant_id,
-        metadata=common._AGENT_VERSION_METADATA,
+        metadata=_review_run_metadata(inherited_check_run_id),
         client=langgraph_client,
     )
     await common._store_current_reviewer_run_id(thread_id, run)
