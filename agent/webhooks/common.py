@@ -320,10 +320,16 @@ def _parse_repo_aliases(raw: str) -> dict[str, dict[str, str]]:
     aliases: dict[str, dict[str, str]] = {}
     for pair in raw.split(","):
         old, sep, new = pair.strip().partition("=")
-        old_owner, _, old_name = old.strip().lower().partition("/")
-        new_owner, _, new_name = new.strip().partition("/")
-        if sep and old_owner and old_name and new_owner and new_name:
-            aliases[f"{old_owner}/{old_name}"] = {"owner": new_owner, "name": new_name}
+        old_parts = old.strip().lower().split("/")
+        new_parts = new.strip().split("/")
+        if (
+            sep
+            and len(old_parts) == 2
+            and len(new_parts) == 2
+            and all(old_parts)
+            and all(new_parts)
+        ):
+            aliases["/".join(old_parts)] = {"owner": new_parts[0], "name": new_parts[1]}
     return aliases
 
 

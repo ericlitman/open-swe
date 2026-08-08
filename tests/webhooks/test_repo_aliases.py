@@ -6,7 +6,8 @@ from agent.webhooks import common
 def test_parse_repo_aliases_parses_pairs_and_skips_malformed() -> None:
     aliases = common._parse_repo_aliases(
         "ericlitman/mastra-pilot=mobilyze-llc/mastra-pilot, bad-entry,"
-        " old/name=new/name, missing-equals/x"
+        " old/name=new/name, missing-equals/x,"
+        " extra/segments=new/name/extra, deep/old/path=new/name"
     )
     assert aliases == {
         "ericlitman/mastra-pilot": {"owner": "mobilyze-llc", "name": "mastra-pilot"},
