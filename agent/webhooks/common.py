@@ -178,6 +178,7 @@ __all__ = [
     "_upsert_slack_thread_repo_metadata",
     "append_finding_interaction",
     "build_pr_prompt",
+    "canonicalize_repo_config",
     "classify_comment_mention",
     "complete_review_check_run",
     "create_review_check_run",
@@ -313,6 +314,35 @@ ALLOWED_GITHUB_REPOS: frozenset[str] = frozenset(
     for repo in os.environ.get("ALLOWED_GITHUB_REPOS", "").split(",")
     if repo.strip()
 )
+
+
+def _parse_repo_aliases(raw: str) -> dict[str, dict[str, str]]:
+    aliases: dict[str, dict[str, str]] = {}
+    for pair in raw.split(","):
+        old, sep, new = pair.strip().partition("=")
+        old_owner, _, old_name = old.strip().lower().partition("/")
+        new_owner, _, new_name = new.strip().partition("/")
+        if sep and old_owner and old_name and new_owner and new_name:
+            aliases[f"{old_owner}/{old_name}"] = {"owner": new_owner, "name": new_name}
+    return aliases
+
+
+# Comma-separated `old-owner/name=new-owner/name` pairs covering repository
+# transfers/renames, so directives and persisted metadata that predate a move
+# keep resolving without every caller remembering the new path.
+GITHUB_REPO_ALIASES: dict[str, dict[str, str]] = _parse_repo_aliases(
+    os.environ.get("GITHUB_REPO_ALIASES", "")
+)
+
+
+def canonicalize_repo_config(repo_config: dict[str, str]) -> dict[str, str]:
+    """Map a renamed or transferred repo to its current owner/name."""
+    key = f"{repo_config.get('owner', '').lower()}/{repo_config.get('name', '').lower()}"
+    alias = GITHUB_REPO_ALIASES.get(key)
+    if not alias:
+        return repo_config
+    logger.info("Canonicalizing repo %s -> %s/%s", key, alias["owner"], alias["name"])
+    return {**repo_config, "owner": alias["owner"], "name": alias["name"]}
 
 
 _GITHUB_BOT_MESSAGE_PREFIXES = (

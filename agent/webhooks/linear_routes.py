@@ -114,6 +114,8 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         )
         return {"status": "ignored", "reason": "No repository directive or thread metadata"}
 
+    repo_config = common.canonicalize_repo_config(repo_config)
+
     if not common._is_repo_allowed(repo_config):
         common.logger.warning(
             "Rejecting Linear webhook: repo '%s/%s' not in allowlist",
