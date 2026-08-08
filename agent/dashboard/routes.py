@@ -379,7 +379,23 @@ async def auth_login(
 
 
 @router.get("/auth/callback")
-async def auth_callback(request: Request, code: str, state: str) -> RedirectResponse:
+async def auth_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    setup_action: str | None = None,
+) -> RedirectResponse:
+    if state is None:
+        # GitHub App install/update flows redirect here (this route doubles as
+        # the app's Setup URL) with only ?code&installation_id&setup_action.
+        # The installation is already complete on GitHub's side and there is
+        # no OAuth state to verify, so route the operator to the dashboard
+        # instead of failing validation.
+        if setup_action:
+            return RedirectResponse(_frontend_base_url(), status_code=302)
+        raise HTTPException(400, "missing oauth state — please retry login")
+    if code is None:
+        raise HTTPException(400, "missing oauth code — please retry login")
     state_payload = decode_state(state)
     state_nonce_hash = state_payload.get("nonce_hash")
     cookie_nonce = request.cookies.get(STATE_COOKIE_NAME)
