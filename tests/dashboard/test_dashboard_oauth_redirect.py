@@ -174,3 +174,44 @@ def test_auth_callback_cross_origin_redirect(monkeypatch) -> None:
         assert callback_response.status_code == 302
         assert callback_response.headers["location"] == f"http://localhost:3000{target}"
         assert not callback_response.headers["location"].startswith("http://localhost:2024")
+
+
+def test_auth_callback_redirects_app_setup_flow_without_state(monkeypatch) -> None:
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://dashboard.example")
+    monkeypatch.setenv("DASHBOARD_API_BASE_URL", "http://testserver")
+    monkeypatch.setenv("DASHBOARD_JWT_SECRET", "test-secret")
+
+    app = FastAPI()
+    app.include_router(routes.router)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/dashboard/api/auth/callback",
+            params={
+                "code": "install-code",
+                "installation_id": "152079641",
+                "setup_action": "install",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://dashboard.example"
+    assert not response.cookies.get(COOKIE_NAME)
+
+
+def test_auth_callback_missing_state_without_setup_action_is_client_error(monkeypatch) -> None:
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://dashboard.example")
+    monkeypatch.setenv("DASHBOARD_JWT_SECRET", "test-secret")
+
+    app = FastAPI()
+    app.include_router(routes.router)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/dashboard/api/auth/callback",
+            params={"code": "oauth-code"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
