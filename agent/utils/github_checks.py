@@ -247,6 +247,23 @@ def incomplete_review_check_result() -> tuple[CheckConclusion, str, str]:
     )
 
 
+def superseded_review_check_result() -> tuple[CheckConclusion, str, str]:
+    """Conclusion for a review preempted by a run that takes over from it.
+
+    Never ``failure``, regardless of ``REVIEW_CHECK_BLOCKING``: a preemption is
+    not a review outcome, and reporting one as a failed review both misinforms
+    the author and pins a red check that no later run is asked to clear. The
+    superseding run re-concludes with the real result once it publishes; this
+    conclusion only exists so the check is never left hanging in progress.
+    """
+    return (
+        "neutral",
+        "Review superseded",
+        "This review was replaced by a newer Open SWE run on the same pull "
+        "request. The superseding run reports the review result.",
+    )
+
+
 def review_check_conclusion(surfaced_count: int) -> tuple[CheckConclusion, str, str]:
     """Map a publish result to (conclusion, title, summary)."""
     if surfaced_count > 0:

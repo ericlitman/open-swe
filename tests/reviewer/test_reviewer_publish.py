@@ -1150,6 +1150,71 @@ async def test_finding_reply_publish_preserves_review_without_advancing_reviewed
 
 
 @pytest.mark.asyncio
+async def test_finding_reply_publish_reconcludes_check_it_superseded() -> None:
+    """A run that preempted a review owns the outcome the preempted run owed.
+
+    The preempted check was settled as superseded and its id cleared, so this
+    run must report on the head SHA instead of editing the completed check —
+    otherwise the head is left with no full-review check at all.
+    """
+    from agent.tools.publish_review import _publish_review_async
+
+    finding = _f(id="f_new", file="b.py", start_line=2, end_line=2, first_seen_sha="newsha")
+    set_metadata = AsyncMock()
+    settle = AsyncMock()
+
+    with (
+        patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),
+        patch("agent.tools.publish_review.list_findings_async", AsyncMock(return_value=[finding])),
+        patch(
+            "agent.tools.publish_review.resolve_review_head_sha",
+            AsyncMock(return_value="newsha"),
+        ),
+        patch(
+            "agent.tools.publish_review.get_thread_metadata",
+            AsyncMock(return_value={"review_check_superseded": {"review_check_run_id": 42}}),
+        ),
+        patch(
+            "agent.tools.publish_review.post_pull_request_review",
+            AsyncMock(return_value={"id": 4242}),
+        ),
+        patch("agent.tools.publish_review.fetch_review_comments", AsyncMock(return_value=[])),
+        patch(
+            "agent.tools.publish_review._resolve_threads_for_resolved_findings",
+            AsyncMock(return_value=0),
+        ),
+        patch("agent.tools.publish_review.set_reviewer_thread_metadata", set_metadata),
+        patch("agent.tools.publish_review._settle_or_defer_review_check", settle),
+        patch("agent.tools.publish_review.clear_review_started_comment", AsyncMock()),
+    ):
+        result = await _publish_review_async(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="oldsha",
+            token="t",
+            severity_threshold="medium",
+            cap=15,
+            is_re_review=True,
+            is_finding_reply=True,
+            review_check_run_id=42,
+            langgraph_run_id="run-x",
+        )
+
+    assert result["success"] is True
+    settle.assert_awaited_once()
+    assert settle.await_args.kwargs["review_check_run_id"] is None
+    assert settle.await_args.kwargs["head_sha"] == "newsha"
+    # The marker is consumed so a later reply does not create a second check.
+    assert any(
+        call.kwargs.get("extra", {}).get("review_check_superseded", "missing") is None
+        for call in set_metadata.await_args_list
+    )
+    # A finding reply still never claims to have reviewed this head.
+    assert all("last_reviewed_sha" not in call.kwargs for call in set_metadata.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_publish_review_uses_resolved_head_sha_for_commit_and_last_reviewed() -> None:
     """A push that landed mid-run updates the live head in thread metadata.
     publish_review must anchor the GitHub review to that head and advance

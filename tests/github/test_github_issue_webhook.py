@@ -638,17 +638,17 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
 
 def test_finding_reply_ignores_pending_result_from_superseded_check(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    metadata_writes: list[dict[str, object]] = []
 
     async def fake_settle_review_check_run(**kwargs: object) -> bool:
         captured.update(kwargs)
         return True
 
+    async def fake_set_metadata(_thread_id: str, **kwargs: object) -> None:
+        metadata_writes.append(kwargs)
+
     monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
-    monkeypatch.setattr(
-        github_webhooks,
-        "incomplete_review_check_result",
-        lambda: ("failure", "Review did not complete", "incomplete"),
-    )
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", fake_set_metadata)
 
     asyncio.run(
         github_webhooks._settle_review_check_before_finding_reply(
@@ -668,9 +668,77 @@ def test_finding_reply_ignores_pending_result_from_superseded_check(monkeypatch)
         )
     )
 
+    # The pending result belongs to check 41, so it cannot speak for 42: the
+    # preempted check settles as superseded rather than inheriting a verdict.
     assert captured["expected_check_run_id"] == 42
-    assert captured["conclusion"] == "failure"
-    assert captured["title"] == "Review did not complete"
+    assert captured["conclusion"] == "neutral"
+    assert captured["title"] == "Review superseded"
+    assert metadata_writes == [{"extra": {"review_check_superseded": {"review_check_run_id": 42}}}]
+
+
+def test_finding_reply_never_settles_failure_under_blocking(monkeypatch) -> None:
+    """A preemption is not a review failure, even when blocking is enabled."""
+    captured: dict[str, object] = {}
+
+    async def fake_settle_review_check_run(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    async def fake_set_metadata(_thread_id: str, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true")
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", fake_set_metadata)
+
+    asyncio.run(
+        github_webhooks._settle_review_check_before_finding_reply(
+            thread_id="thread-1",
+            metadata={"review_check_run_id": 42},
+            owner="langchain-ai",
+            repo="open-swe",
+            token="token",
+        )
+    )
+
+    assert captured["conclusion"] == "neutral"
+    assert captured["title"] == "Review superseded"
+
+
+def test_finding_reply_ignores_replies_authored_by_our_own_bot(monkeypatch) -> None:
+    """The reviewer answering its own finding thread must not re-trigger it.
+
+    Regression test for the self-sustaining loop: this deployment posts as
+    ``openswebot[bot]``, which the old hard-coded ``open-swe[bot]`` check
+    missed, so every reply the reviewer wrote came back as a "human" reply and
+    dispatched a run that interrupted the review still holding the check.
+    """
+    dispatched: list[object] = []
+
+    async def fail_if_called(*_args: object, **_kwargs: object) -> object:
+        dispatched.append(_args)
+        raise AssertionError("self-authored reply must not reach dispatch")
+
+    monkeypatch.setenv("GITHUB_BOT_LOGINS", "openswebot[bot]")
+    monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fail_if_called)
+
+    for login in ("openswebot[bot]", "OpenSWEBot[bot]", "open-swe[bot]"):
+        asyncio.run(
+            github_webhooks.process_github_review_finding_reply(
+                {
+                    "comment": {"id": 222, "in_reply_to_id": 111, "body": "Addressed."},
+                    "pull_request": {
+                        "number": 24,
+                        "base": {"sha": "base-sha"},
+                        "head": {"sha": "head-sha", "ref": "feature"},
+                    },
+                    "repository": {"owner": {"login": "mobilyze-llc"}, "name": "mastra-pilot"},
+                    "sender": {"login": login, "id": 1},
+                }
+            )
+        )
+
+    assert dispatched == []
 
 
 def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(monkeypatch) -> None:

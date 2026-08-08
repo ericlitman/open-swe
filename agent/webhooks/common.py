@@ -74,7 +74,7 @@ from ..utils.github_comments import (
     sanitize_github_comment_body,  # noqa: F401
     verify_github_signature,
 )
-from ..utils.github_org_membership import INTERNAL_BOT_LOGINS, is_user_active_org_member
+from ..utils.github_org_membership import is_internal_bot_login, is_user_active_org_member
 from ..utils.github_token import (
     cache_github_token_for_thread,
     invalidate_cached_github_token,
@@ -579,7 +579,7 @@ async def _is_sender_allowed_for_public_repo(payload: dict[str, Any]) -> bool:
 
     sender = payload.get("sender") or {}
     sender_login = sender.get("login", "") or ""
-    if sender_login in INTERNAL_BOT_LOGINS:
+    if is_internal_bot_login(sender_login):
         return True
 
     if not sender_login:

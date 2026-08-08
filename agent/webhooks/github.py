@@ -11,8 +11,9 @@ from typing import Any, cast, get_args
 from ..dashboard.autofix_state import set_pr_autofix_disabled
 from ..review.findings import FindingInteraction, ReviewerPRMeta, ReviewerSlackThread
 from ..review.publish import settle_review_check_run
-from ..utils.github_checks import CheckConclusion, incomplete_review_check_result
+from ..utils.github_checks import CheckConclusion, superseded_review_check_result
 from ..utils.github_comments import GitHubAuthError
+from ..utils.github_org_membership import is_internal_bot_login
 from ..utils.slack import GitHubPrRef
 from . import common
 
@@ -33,7 +34,13 @@ async def _settle_review_check_before_finding_reply(
     repo: str,
     token: str,
 ) -> None:
-    """Settle the full-review check before a finding reply interrupts its owner."""
+    """Settle the full-review check before a finding reply interrupts its owner.
+
+    The interrupted review never reached a verdict, so it must not leave one
+    behind. A real result already staged by the owner (``pending``) is still
+    honoured; otherwise the check settles as superseded and the marker below
+    asks the run we are about to dispatch to re-conclude on the head SHA.
+    """
     if not isinstance(metadata, dict):
         return
     check_run_id = metadata.get("review_check_run_id")
@@ -51,10 +58,12 @@ async def _settle_review_check_before_finding_reply(
         conclusion = cast(CheckConclusion, pending["conclusion"])
         title = str(pending.get("title") or "Review completed")
         summary = str(pending.get("summary") or "")
+        superseded = False
     else:
-        conclusion, title, summary = incomplete_review_check_result()
+        conclusion, title, summary = superseded_review_check_result()
+        superseded = True
     try:
-        await settle_review_check_run(
+        settled = await settle_review_check_run(
             thread_id=thread_id,
             owner=owner,
             repo=repo,
@@ -69,6 +78,19 @@ async def _settle_review_check_before_finding_reply(
             "Could not settle review check before finding reply dispatch for %s",
             thread_id,
             exc_info=True,
+        )
+        return
+    # Only hand off a check we actually closed. A failed PATCH leaves the id
+    # and a pending result in place for the existing retry paths, and marking
+    # it superseded too would have the successor open a second check beside
+    # the one still hanging in progress.
+    if superseded and settled:
+        # settle_review_check_run clears review_check_run_id, so the successor
+        # has nothing to update: without this marker a finding-reply run would
+        # publish its review and leave the head with no full-review check.
+        await common.set_reviewer_thread_metadata(
+            thread_id,
+            extra={"review_check_superseded": {"review_check_run_id": check_run_id}},
         )
 
 
@@ -1058,7 +1080,11 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
 
     sender = payload.get("sender", {})
     sender_login = sender.get("login") if isinstance(sender, dict) else None
-    if sender_login == "open-swe[bot]":
+    # Must match every identity we post as, not just the canonical name: a
+    # reply we authored that is not recognised as ours is recorded as a human
+    # reply and dispatched as a new reviewer run, which interrupts the review
+    # that is still publishing — and that run replies again.
+    if is_internal_bot_login(sender_login):
         return
 
     repo = payload.get("repository", {})

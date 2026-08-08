@@ -29,6 +29,7 @@ from .utils.github_checks import (
     fetch_review_check_run_status,
     incomplete_review_check_result,
     review_check_conclusion,
+    superseded_review_check_result,
 )
 from .utils.github_comments import post_github_comment
 from .utils.linear import comment_on_linear_issue
@@ -184,6 +185,15 @@ async def _settle_failed_reviewer_check(
             conclusion = pending["conclusion"]
             title = str(pending.get("title") or "Review completed")
             summary = str(pending.get("summary") or "")
+        elif (
+            isinstance(current_reviewer_run_id, str)
+            and current_reviewer_run_id
+            and current_reviewer_run_id != completed_run_id
+        ):
+            # A newer reviewer run already owns this thread, so this run was
+            # preempted rather than broken. Reporting a failed review here
+            # blames the author for our own scheduling.
+            conclusion, title, summary = superseded_review_check_result()
         else:
             conclusion, title, summary = incomplete_review_check_result()
         await settle_review_check_run(

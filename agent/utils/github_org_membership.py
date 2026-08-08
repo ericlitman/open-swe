@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 
@@ -10,7 +11,42 @@ from .github_app import get_github_app_installation_token
 
 logger = logging.getLogger(__name__)
 
-INTERNAL_BOT_LOGINS: frozenset[str] = frozenset({"open-swe[bot]", "openswe-dev[bot]"})
+_DEFAULT_INTERNAL_BOT_LOGINS = frozenset({"open-swe[bot]", "openswe-dev[bot]"})
+
+
+def _parse_bot_logins(raw: str) -> frozenset[str]:
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def _configured_bot_logins() -> frozenset[str]:
+    """Return every login we post as, defaults plus ``GITHUB_BOT_LOGINS``.
+
+    Every deployment runs under its own GitHub App, so the bot login is a
+    deployment fact rather than a constant — this install posts as
+    ``openswebot[bot]``, which matched none of the hard-coded names. A login
+    missing here makes the bot's own events look like a third party's: the
+    reviewer answers its own finding replies, each answer re-triggers the
+    reviewer, and the resulting run interrupts the review still holding the
+    check. Read from the env on each call so the value is never baked in.
+    """
+    return _DEFAULT_INTERNAL_BOT_LOGINS | _parse_bot_logins(os.environ.get("GITHUB_BOT_LOGINS", ""))
+
+
+INTERNAL_BOT_LOGINS: frozenset[str] = _configured_bot_logins()
+
+
+def is_internal_bot_login(login: str | None) -> bool:
+    """Return whether ``login`` is one of our own bot identities.
+
+    Matches case-insensitively and accepts both the bare app slug and its
+    ``[bot]`` suffixed form, because GitHub reports the slug in some payloads
+    (GraphQL authors) and the suffixed login in others (REST senders).
+    """
+    if not isinstance(login, str) or not login:
+        return False
+    candidate = login.strip().lower()
+    known = _configured_bot_logins()
+    return candidate in known or f"{candidate}[bot]" in known
 
 
 async def is_user_active_org_member(username: str, org: str) -> bool:
