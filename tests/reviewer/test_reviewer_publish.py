@@ -1150,19 +1150,10 @@ async def test_finding_reply_publish_preserves_review_without_advancing_reviewed
 
 
 @pytest.mark.asyncio
-async def test_finding_reply_publish_reconcludes_check_it_superseded() -> None:
-    """A run that preempted a review owns the outcome the preempted run owed.
-
-    The preempted check was settled as superseded and its id cleared, so this
-    run must report on the head SHA instead of editing the completed check —
-    otherwise the head is left with no full-review check at all.
-    """
+async def _publish_finding_reply_with_inherited_check(metadata: dict, settle: AsyncMock) -> dict:
     from agent.tools.publish_review import _publish_review_async
 
     finding = _f(id="f_new", file="b.py", start_line=2, end_line=2, first_seen_sha="newsha")
-    set_metadata = AsyncMock()
-    settle = AsyncMock()
-
     with (
         patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),
         patch("agent.tools.publish_review.list_findings_async", AsyncMock(return_value=[finding])),
@@ -1170,10 +1161,7 @@ async def test_finding_reply_publish_reconcludes_check_it_superseded() -> None:
             "agent.tools.publish_review.resolve_review_head_sha",
             AsyncMock(return_value="newsha"),
         ),
-        patch(
-            "agent.tools.publish_review.get_thread_metadata",
-            AsyncMock(return_value={"review_check_superseded": {"review_check_run_id": 42}}),
-        ),
+        patch("agent.tools.publish_review.get_thread_metadata", AsyncMock(return_value=metadata)),
         patch(
             "agent.tools.publish_review.post_pull_request_review",
             AsyncMock(return_value={"id": 4242}),
@@ -1183,15 +1171,15 @@ async def test_finding_reply_publish_reconcludes_check_it_superseded() -> None:
             "agent.tools.publish_review._resolve_threads_for_resolved_findings",
             AsyncMock(return_value=0),
         ),
-        patch("agent.tools.publish_review.set_reviewer_thread_metadata", set_metadata),
+        patch("agent.tools.publish_review.set_reviewer_thread_metadata", AsyncMock()),
         patch("agent.tools.publish_review._settle_or_defer_review_check", settle),
         patch("agent.tools.publish_review.clear_review_started_comment", AsyncMock()),
     ):
-        result = await _publish_review_async(
+        return await _publish_review_async(
             owner="o",
             repo="r",
             pr_number=7,
-            head_sha="oldsha",
+            head_sha="newsha",
             token="t",
             severity_threshold="medium",
             cap=15,
@@ -1201,17 +1189,64 @@ async def test_finding_reply_publish_reconcludes_check_it_superseded() -> None:
             langgraph_run_id="run-x",
         )
 
+
+@pytest.mark.asyncio
+async def test_finding_reply_concludes_inherited_check_when_head_was_reviewed() -> None:
+    """The run that froze the gate closes it, on the check it inherited."""
+    settle = AsyncMock()
+    result = await _publish_finding_reply_with_inherited_check(
+        {
+            "review_check_run_id": 42,
+            "review_check_superseded": {"review_check_run_id": 42},
+            "last_reviewed_sha": "newsha",
+        },
+        settle,
+    )
+
     assert result["success"] is True
     settle.assert_awaited_once()
-    assert settle.await_args.kwargs["review_check_run_id"] is None
-    assert settle.await_args.kwargs["head_sha"] == "newsha"
-    # The marker is consumed so a later reply does not create a second check.
-    assert any(
-        call.kwargs.get("extra", {}).get("review_check_superseded", "missing") is None
-        for call in set_metadata.await_args_list
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["review_check_run_id"] == 42
+    assert settle.await_args.kwargs["conclusion"] in {"success", "failure"}
+
+
+@pytest.mark.asyncio
+async def test_finding_reply_will_not_pass_a_check_for_an_unreviewed_head() -> None:
+    """A reply reassesses one thread; it never read this head's diff.
+
+    Concluding "no issues" here would pass a blocking check on a head no
+    review ever finished, so the honest incomplete result is used instead.
+    """
+    settle = AsyncMock()
+    await _publish_finding_reply_with_inherited_check(
+        {
+            "review_check_run_id": 42,
+            "review_check_superseded": {"review_check_run_id": 42},
+            "last_reviewed_sha": "oldsha",
+        },
+        settle,
     )
-    # A finding reply still never claims to have reviewed this head.
-    assert all("last_reviewed_sha" not in call.kwargs for call in set_metadata.await_args_list)
+
+    settle.assert_awaited_once()
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["review_check_run_id"] == 42
+    assert settle.await_args.kwargs["title"] == "Review did not complete"
+
+
+@pytest.mark.asyncio
+async def test_finding_reply_ignores_a_marker_for_a_replaced_check() -> None:
+    """A newer review opened its own check; that one is not ours to conclude."""
+    settle = AsyncMock()
+    await _publish_finding_reply_with_inherited_check(
+        {
+            "review_check_run_id": 99,
+            "review_check_superseded": {"review_check_run_id": 42},
+            "last_reviewed_sha": "newsha",
+        },
+        settle,
+    )
+
+    settle.assert_not_awaited()
 
 
 @pytest.mark.asyncio

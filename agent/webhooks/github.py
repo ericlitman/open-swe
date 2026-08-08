@@ -11,7 +11,7 @@ from typing import Any, cast, get_args
 from ..dashboard.autofix_state import set_pr_autofix_disabled
 from ..review.findings import FindingInteraction, ReviewerPRMeta, ReviewerSlackThread
 from ..review.publish import settle_review_check_run
-from ..utils.github_checks import CheckConclusion, superseded_review_check_result
+from ..utils.github_checks import CheckConclusion
 from ..utils.github_comments import GitHubAuthError
 from ..utils.github_org_membership import is_internal_bot_login
 from ..utils.slack import GitHubPrRef
@@ -34,12 +34,18 @@ async def _settle_review_check_before_finding_reply(
     repo: str,
     token: str,
 ) -> None:
-    """Settle the full-review check before a finding reply interrupts its owner.
+    """Resolve the full-review check before a finding reply interrupts its owner.
 
-    The interrupted review never reached a verdict, so it must not leave one
-    behind. A real result already staged by the owner (``pending``) is still
-    honoured; otherwise the check settles as superseded and the marker below
-    asks the run we are about to dispatch to re-conclude on the head SHA.
+    A verdict the owner already staged (``pending``) is published, since that
+    review did reach a conclusion. Otherwise the check is deliberately *not*
+    concluded: it is handed to the run we are about to dispatch, which reports
+    the real result once it publishes.
+
+    Concluding here instead — with any non-failure result — would leave the
+    head momentarily unguarded, and permanently so if the successor never
+    publishes, letting a blocking check pass without a completed review.
+    Leaving it in progress keeps the gate closed for the whole handoff, and
+    the after-agent hook still settles it if the successor dies.
     """
     if not isinstance(metadata, dict):
         return
@@ -55,43 +61,28 @@ async def _settle_review_check_before_finding_reply(
         and pending.get("review_check_run_id") == check_run_id
         and pending.get("conclusion") in get_args(CheckConclusion)
     ):
-        conclusion = cast(CheckConclusion, pending["conclusion"])
-        title = str(pending.get("title") or "Review completed")
-        summary = str(pending.get("summary") or "")
-        superseded = False
-    else:
-        conclusion, title, summary = superseded_review_check_result()
-        superseded = True
-    try:
-        settled = await settle_review_check_run(
-            thread_id=thread_id,
-            owner=owner,
-            repo=repo,
-            token=token,
-            conclusion=conclusion,
-            title=title,
-            summary=summary,
-            expected_check_run_id=check_run_id,
-        )
-    except Exception:
-        common.logger.warning(
-            "Could not settle review check before finding reply dispatch for %s",
-            thread_id,
-            exc_info=True,
-        )
+        try:
+            await settle_review_check_run(
+                thread_id=thread_id,
+                owner=owner,
+                repo=repo,
+                token=token,
+                conclusion=cast(CheckConclusion, pending["conclusion"]),
+                title=str(pending.get("title") or "Review completed"),
+                summary=str(pending.get("summary") or ""),
+                expected_check_run_id=check_run_id,
+            )
+        except Exception:
+            common.logger.warning(
+                "Could not settle review check before finding reply dispatch for %s",
+                thread_id,
+                exc_info=True,
+            )
         return
-    # Only hand off a check we actually closed. A failed PATCH leaves the id
-    # and a pending result in place for the existing retry paths, and marking
-    # it superseded too would have the successor open a second check beside
-    # the one still hanging in progress.
-    if superseded and settled:
-        # settle_review_check_run clears review_check_run_id, so the successor
-        # has nothing to update: without this marker a finding-reply run would
-        # publish its review and leave the head with no full-review check.
-        await common.set_reviewer_thread_metadata(
-            thread_id,
-            extra={"review_check_superseded": {"review_check_run_id": check_run_id}},
-        )
+    await common.set_reviewer_thread_metadata(
+        thread_id,
+        extra={"review_check_superseded": {"review_check_run_id": check_run_id}},
+    )
 
 
 def build_github_issue_prompt(

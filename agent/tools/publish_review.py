@@ -66,6 +66,7 @@ from ..utils.dashboard_links import dashboard_review_url, dashboard_thread_url
 from ..utils.github_checks import (
     CheckConclusion,
     fetch_pull_request_head_sha,
+    incomplete_review_check_result,
     post_autofix_status_check,
     review_check_blocking_enabled,
     review_check_conclusion,
@@ -330,20 +331,41 @@ async def _implementation_run_state(
     return "inactive", thread_id, normalized_run_id, normalized_status
 
 
-async def _claim_superseded_review_check(thread_id: str) -> bool:
-    """Return whether this run must re-conclude a check it preempted.
+async def _inherited_review_check(thread_id: str, head_sha: str) -> tuple[int | None, bool]:
+    """Return the inherited check id and whether this head has a finished review.
+
+    A finding reply reassesses one thread; it does not read the diff. If the
+    review it preempted never completed for this head, the reply must not
+    answer for it — reporting "no issues" there would pass a blocking check on
+    a head nobody reviewed. In that case the check settles as incomplete, which
+    is the honest state and keeps a blocking gate closed.
+    """
+    check_run_id = await _inherited_review_check_id(thread_id)
+    if check_run_id is None:
+        return None, False
+    metadata = await get_thread_metadata(thread_id)
+    return check_run_id, metadata.get("last_reviewed_sha") == head_sha
+
+
+async def _inherited_review_check_id(thread_id: str) -> int | None:
+    """Return the still-open check this run inherited by preempting its owner.
 
     A finding-reply run normally leaves the full-review check alone. When it
-    displaced a review that owned one, though, that check was settled as
-    superseded and its id cleared, so this run is the only remaining party that
-    can report a real result on the head. The marker is consumed on read so a
-    later run in the same thread does not re-create a check nobody preempted.
+    displaced a review holding one, that check was left in progress for this
+    run to conclude, so it is the only party that can close the gate it froze.
+
+    Nothing is written here: the marker is matched against the check the thread
+    currently tracks, so it stops applying as soon as that check is settled
+    (the id is cleared) or replaced by a newer review (the ids diverge). A
+    marker consumed up-front would instead be lost if the settle then failed,
+    stranding the check in progress with no retry able to recognise it.
     """
     metadata = await get_thread_metadata(thread_id)
-    if not isinstance(metadata.get("review_check_superseded"), dict):
-        return False
-    await set_reviewer_thread_metadata(thread_id, extra={"review_check_superseded": None})
-    return True
+    marker = metadata.get("review_check_superseded")
+    tracked = metadata.get("review_check_run_id")
+    if not isinstance(marker, dict) or not isinstance(tracked, int):
+        return None
+    return tracked if marker.get("review_check_run_id") == tracked else None
 
 
 async def _settle_or_defer_review_check(
@@ -610,10 +632,19 @@ async def _publish_review_async(
         if not is_finding_reply:
             await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
         await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
-        inherited_check = is_finding_reply and await _claim_superseded_review_check(thread_id)
-        if not is_finding_reply or inherited_check:
-            check_finding_count = await _review_check_finding_count(thread_id, 0)
-            conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
+        inherited_id, inherited_head_reviewed = (
+            await _inherited_review_check(thread_id, head_sha)
+            if is_finding_reply
+            else (None, False)
+        )
+        if not is_finding_reply or inherited_id is not None:
+            if inherited_id is not None and not inherited_head_reviewed:
+                conclusion, check_title, check_summary = incomplete_review_check_result()
+            else:
+                check_finding_count = await _review_check_finding_count(thread_id, 0)
+                conclusion, check_title, check_summary = review_check_conclusion(
+                    check_finding_count
+                )
             await _settle_or_defer_review_check(
                 thread_id=thread_id,
                 owner=owner,
@@ -625,9 +656,9 @@ async def _publish_review_async(
                 title=check_title,
                 summary=check_summary,
                 head_sha=head_sha,
-                # The preempted check is already completed; targeting it again
-                # would edit history instead of reporting on the head.
-                review_check_run_id=None if inherited_check else review_check_run_id,
+                review_check_run_id=(
+                    inherited_id if inherited_id is not None else review_check_run_id
+                ),
             )
         return {
             "success": True,
@@ -806,10 +837,15 @@ async def _publish_review_async(
     if not is_finding_reply:
         await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
     await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
-    inherited_check = is_finding_reply and await _claim_superseded_review_check(thread_id)
-    if not is_finding_reply or inherited_check:
-        check_finding_count = await _review_check_finding_count(thread_id, len(inline_comments))
-        conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
+    inherited_id, inherited_head_reviewed = (
+        await _inherited_review_check(thread_id, head_sha) if is_finding_reply else (None, False)
+    )
+    if not is_finding_reply or inherited_id is not None:
+        if inherited_id is not None and not inherited_head_reviewed:
+            conclusion, check_title, check_summary = incomplete_review_check_result()
+        else:
+            check_finding_count = await _review_check_finding_count(thread_id, len(inline_comments))
+            conclusion, check_title, check_summary = review_check_conclusion(check_finding_count)
         await _settle_or_defer_review_check(
             thread_id=thread_id,
             owner=owner,
@@ -821,9 +857,7 @@ async def _publish_review_async(
             title=check_title,
             summary=check_summary,
             head_sha=head_sha,
-            # The preempted check is already completed; targeting it again
-            # would edit history instead of reporting on the head.
-            review_check_run_id=None if inherited_check else review_check_run_id,
+            review_check_run_id=(inherited_id if inherited_id is not None else review_check_run_id),
         )
     if review_id is not None and eligible_with_payload:
         await _maybe_dispatch_review_autofix(

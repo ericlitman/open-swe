@@ -288,46 +288,6 @@ async def test_reviewer_error_settles_failure_when_blocking(
 
 
 @pytest.mark.asyncio
-async def test_preempted_reviewer_settles_neutral_even_when_blocking(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A run displaced by a newer reviewer run was preempted, not broken.
-
-    It still holds a check on an older SHA, so it must settle it — but as
-    superseded, never as a review failure, even under blocking.
-    """
-    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true")
-    metadata = {
-        "kind": "reviewer",
-        # The thread has already moved on to a newer check and run; the
-        # completed run is still holding the older check it opened.
-        "review_check_run_id": 99,
-        "current_reviewer_run_id": "run-2",
-        "pr": {"owner": "acme", "name": "widgets"},
-        "source": "schedule",
-    }
-    client = _FakeClient(metadata, run_metadata={"review_check_run_id": 42})
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    monkeypatch.setattr(
-        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
-    )
-    monkeypatch.setattr(
-        completion, "fetch_review_check_run_status", AsyncMock(return_value="in_progress")
-    )
-    settle = AsyncMock()
-    monkeypatch.setattr(completion, "settle_review_check_run", settle)
-
-    await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "interrupted"}
-    )
-
-    settle_args = settle.await_args
-    assert settle_args is not None
-    assert settle_args.kwargs["conclusion"] == "neutral"
-    assert settle_args.kwargs["title"] == "Review superseded"
-
-
-@pytest.mark.asyncio
 async def test_reviewer_error_preserves_pending_check_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

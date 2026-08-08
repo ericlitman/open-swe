@@ -38,8 +38,7 @@ async def settle_review_check_on_exit(
     configurable = config.get("configurable", {})
     if not isinstance(configurable, dict):
         return None
-    if configurable.get("reviewer_event") == "finding_reply":
-        return None
+    is_finding_reply = configurable.get("reviewer_event") == "finding_reply"
     thread_id = configurable.get("thread_id")
     repo_config = configurable.get("repo")
     if not isinstance(thread_id, str) or not thread_id or not isinstance(repo_config, dict):
@@ -53,6 +52,19 @@ async def settle_review_check_on_exit(
         metadata = await get_thread_metadata(thread_id)
         current_check_run_id = metadata.get("review_check_run_id")
         configured_check_run_id = configurable.get("review_check_run_id")
+        # A finding reply owns no check of its own, so it normally has nothing
+        # to settle. The exception is a check handed to it by the review it
+        # preempted: that one was deliberately left in progress for this run,
+        # and if the run ends without publishing, only this hook can close it.
+        if is_finding_reply:
+            marker = metadata.get("review_check_superseded")
+            if (
+                not isinstance(marker, dict)
+                or not isinstance(current_check_run_id, int)
+                or marker.get("review_check_run_id") != current_check_run_id
+            ):
+                return None
+            configured_check_run_id = current_check_run_id
         if isinstance(configured_check_run_id, int):
             check_run_id = configured_check_run_id
         elif isinstance(current_check_run_id, int):

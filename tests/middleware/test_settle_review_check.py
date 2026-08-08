@@ -156,7 +156,8 @@ async def test_settle_review_check_on_exit_skips_finding_reply() -> None:
         patch(
             "agent.middleware.settle_review_check.get_thread_metadata",
             new_callable=AsyncMock,
-        ) as get_metadata,
+            return_value={"review_check_run_id": 42},
+        ),
         patch(
             "agent.middleware.settle_review_check.settle_review_check_run",
             new_callable=AsyncMock,
@@ -164,9 +165,53 @@ async def test_settle_review_check_on_exit_skips_finding_reply() -> None:
     ):
         result = await settle_review_check_on_exit.aafter_agent(state, MagicMock())
 
+    # A finding reply owns no check of its own: check 42 belongs to whichever
+    # review is running, and this hook must not conclude it.
     assert result is None
-    get_metadata.assert_not_awaited()
     settle.assert_not_awaited()
+
+
+async def test_settle_review_check_on_exit_settles_check_handed_to_finding_reply() -> None:
+    """A finding reply that preempted a review must close the check it froze.
+
+    The handoff deliberately leaves that check in progress; if this run ends
+    without publishing, nothing else is left to conclude it.
+    """
+    state: AgentState = {"messages": []}
+    with (
+        patch(
+            "agent.middleware.settle_review_check.get_config",
+            return_value={
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "repo": {"owner": "acme", "name": "widgets"},
+                    "reviewer_event": "finding_reply",
+                }
+            },
+        ),
+        patch(
+            "agent.middleware.settle_review_check.get_thread_metadata",
+            new_callable=AsyncMock,
+            return_value={
+                "review_check_run_id": 42,
+                "review_check_superseded": {"review_check_run_id": 42},
+            },
+        ),
+        patch(
+            "agent.middleware.settle_review_check.get_github_token",
+            return_value="token",
+        ),
+        patch(
+            "agent.middleware.settle_review_check.settle_review_check_run",
+            new_callable=AsyncMock,
+        ) as settle,
+    ):
+        await settle_review_check_on_exit.aafter_agent(state, MagicMock())
+
+    settle.assert_awaited_once()
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["expected_check_run_id"] == 42
+    assert settle.await_args.kwargs["title"] == "Review did not complete"
 
 
 @pytest.mark.asyncio

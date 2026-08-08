@@ -36,15 +36,31 @@ INTERNAL_BOT_LOGINS: frozenset[str] = _configured_bot_logins()
 
 
 def is_internal_bot_login(login: str | None) -> bool:
-    """Return whether ``login`` is one of our own bot identities.
+    """Return whether a REST ``sender.login`` is one of our own bot identities.
 
-    Matches case-insensitively and accepts both the bare app slug and its
-    ``[bot]`` suffixed form, because GitHub reports the slug in some payloads
-    (GraphQL authors) and the suffixed login in others (REST senders).
+    Deliberately exact (case-insensitive only): REST payloads always carry the
+    suffixed ``name[bot]`` login for Apps and the bare login for users, and
+    GitHub lets both exist independently — ``open-swe`` is a User account while
+    ``open-swe[bot]`` is our App. Accepting the bare slug here would hand that
+    unrelated human every exemption this predicate grants, including the
+    ``PUBLIC_REPO_ORG_GATE`` bypass. Use :func:`is_internal_bot_author` for
+    GraphQL authors, which report the slug instead.
     """
     if not isinstance(login, str) or not login:
         return False
-    candidate = login.strip().lower()
+    return login.strip().lower() in _configured_bot_logins()
+
+
+def is_internal_bot_author(author: str | None) -> bool:
+    """Return whether a GraphQL comment ``author`` login is one of ours.
+
+    GraphQL reports an App's bare slug (``open-swe``) where REST reports the
+    suffixed login, so both spellings must match here. This decides only
+    whether a comment is our own, never whether a sender is authorized.
+    """
+    if not isinstance(author, str) or not author:
+        return False
+    candidate = author.strip().lower()
     known = _configured_bot_logins()
     return candidate in known or f"{candidate}[bot]" in known
 
