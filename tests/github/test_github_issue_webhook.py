@@ -710,6 +710,34 @@ def test_finding_reply_hands_off_rather_than_concluding_under_blocking(monkeypat
     assert metadata_writes == [{"extra": {"review_check_superseded": {"review_check_run_id": 42}}}]
 
 
+def test_handoff_returns_the_check_so_the_run_can_carry_it(monkeypatch) -> None:
+    """The successor run must record the inherited check in its own metadata.
+
+    The after-agent hook only fires when the graph exits normally. A run killed
+    by a timeout or a hard error is recovered by the completion handler, which
+    reads the check id from immutable run metadata — without it, the check we
+    deliberately left in progress would be stranded and block the PR.
+    """
+
+    async def fake_set_metadata(_thread_id: str, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", fake_set_metadata)
+
+    inherited = asyncio.run(
+        github_webhooks._settle_review_check_before_finding_reply(
+            thread_id="thread-1",
+            metadata={"review_check_run_id": 42},
+            owner="langchain-ai",
+            repo="open-swe",
+            token="token",
+        )
+    )
+
+    assert inherited == 42
+    assert github_webhooks._review_run_metadata(inherited)["review_check_run_id"] == 42
+
+
 def test_finding_reply_publishes_a_verdict_the_preempted_review_staged(monkeypatch) -> None:
     """A staged result is a real conclusion and must still be published."""
     captured: dict[str, object] = {}

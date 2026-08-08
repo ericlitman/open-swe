@@ -331,7 +331,9 @@ async def _implementation_run_state(
     return "inactive", thread_id, normalized_run_id, normalized_status
 
 
-async def _inherited_review_check(thread_id: str, head_sha: str) -> tuple[int | None, bool]:
+async def _inherited_review_check(
+    thread_id: str, head_sha: str, run_id: str | None
+) -> tuple[int | None, bool]:
     """Return the inherited check id and whether this head has a finished review.
 
     A finding reply reassesses one thread; it does not read the diff. If the
@@ -340,14 +342,14 @@ async def _inherited_review_check(thread_id: str, head_sha: str) -> tuple[int | 
     a head nobody reviewed. In that case the check settles as incomplete, which
     is the honest state and keeps a blocking gate closed.
     """
-    check_run_id = await _inherited_review_check_id(thread_id)
+    check_run_id = await _inherited_review_check_id(thread_id, run_id)
     if check_run_id is None:
         return None, False
     metadata = await get_thread_metadata(thread_id)
     return check_run_id, metadata.get("last_reviewed_sha") == head_sha
 
 
-async def _inherited_review_check_id(thread_id: str) -> int | None:
+async def _inherited_review_check_id(thread_id: str, run_id: str | None) -> int | None:
     """Return the still-open check this run inherited by preempting its owner.
 
     A finding-reply run normally leaves the full-review check alone. When it
@@ -365,7 +367,15 @@ async def _inherited_review_check_id(thread_id: str) -> int | None:
     tracked = metadata.get("review_check_run_id")
     if not isinstance(marker, dict) or not isinstance(tracked, int):
         return None
-    return tracked if marker.get("review_check_run_id") == tracked else None
+    if marker.get("review_check_run_id") != tracked:
+        return None
+    # A second reply arriving mid-run rewrites the marker and interrupts us.
+    # Only the thread's current run may conclude the check, or this run would
+    # settle it on the way out and leave its own successor nothing to report.
+    current_run_id = metadata.get("current_reviewer_run_id")
+    if isinstance(run_id, str) and isinstance(current_run_id, str) and current_run_id != run_id:
+        return None
+    return tracked
 
 
 async def _settle_or_defer_review_check(
@@ -633,7 +643,7 @@ async def _publish_review_async(
             await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
         await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
         inherited_id, inherited_head_reviewed = (
-            await _inherited_review_check(thread_id, head_sha)
+            await _inherited_review_check(thread_id, head_sha, langgraph_run_id)
             if is_finding_reply
             else (None, False)
         )
@@ -838,7 +848,9 @@ async def _publish_review_async(
         await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
     await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
     inherited_id, inherited_head_reviewed = (
-        await _inherited_review_check(thread_id, head_sha) if is_finding_reply else (None, False)
+        await _inherited_review_check(thread_id, head_sha, langgraph_run_id)
+        if is_finding_reply
+        else (None, False)
     )
     if not is_finding_reply or inherited_id is not None:
         if inherited_id is not None and not inherited_head_reviewed:

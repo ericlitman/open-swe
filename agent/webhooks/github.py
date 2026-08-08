@@ -33,8 +33,13 @@ async def _settle_review_check_before_finding_reply(
     owner: str,
     repo: str,
     token: str,
-) -> None:
+) -> int | None:
     """Resolve the full-review check before a finding reply interrupts its owner.
+
+    Returns the check handed to the successor, so the dispatch can record it on
+    the run itself — the after-agent hook only fires when the graph exits
+    normally, and a run killed by a timeout or a hard error needs the
+    completion handler to find the check and close it.
 
     A verdict the owner already staged (``pending``) is published, since that
     review did reach a conclusion. Otherwise the check is deliberately *not*
@@ -48,13 +53,13 @@ async def _settle_review_check_before_finding_reply(
     the after-agent hook still settles it if the successor dies.
     """
     if not isinstance(metadata, dict):
-        return
+        return None
     check_run_id = metadata.get("review_check_run_id")
     if not isinstance(check_run_id, int):
-        return
+        return None
     deferred = metadata.get("review_check_deferred_result")
     if isinstance(deferred, dict) and deferred.get("review_check_run_id") == check_run_id:
-        return
+        return None
     pending = metadata.get("review_check_pending_result")
     if (
         isinstance(pending, dict)
@@ -78,11 +83,12 @@ async def _settle_review_check_before_finding_reply(
                 thread_id,
                 exc_info=True,
             )
-        return
+        return None
     await common.set_reviewer_thread_metadata(
         thread_id,
         extra={"review_check_superseded": {"review_check_run_id": check_run_id}},
     )
+    return check_run_id
 
 
 def build_github_issue_prompt(
@@ -1167,7 +1173,7 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         }
     )
     latest_metadata = await common._get_thread_metadata_safe(thread_id)
-    await _settle_review_check_before_finding_reply(
+    inherited_check_run_id = await _settle_review_check_before_finding_reply(
         thread_id=thread_id,
         metadata=latest_metadata,
         owner=repo_config["owner"],
@@ -1192,7 +1198,7 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         configurable,
         source="github_review_reply",
         assistant_id=assistant_id,
-        metadata=common._AGENT_VERSION_METADATA,
+        metadata=_review_run_metadata(inherited_check_run_id),
         client=langgraph_client,
     )
     await common._store_current_reviewer_run_id(thread_id, run)

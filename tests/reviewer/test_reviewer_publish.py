@@ -1250,6 +1250,28 @@ async def test_finding_reply_ignores_a_marker_for_a_replaced_check() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finding_reply_that_was_itself_superseded_does_not_settle() -> None:
+    """A second reply took the handoff; this run must not close it on the way out.
+
+    Two replies in quick succession leave both runs seeing the same marker.
+    Settling here would clear the check before the run that actually owns the
+    handoff publishes, and that successor would then find nothing to report on.
+    """
+    settle = AsyncMock()
+    await _publish_finding_reply_with_inherited_check(
+        {
+            "review_check_run_id": 42,
+            "review_check_superseded": {"review_check_run_id": 42},
+            "last_reviewed_sha": "newsha",
+            "current_reviewer_run_id": "run-newer",
+        },
+        settle,
+    )
+
+    settle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_publish_review_uses_resolved_head_sha_for_commit_and_last_reviewed() -> None:
     """A push that landed mid-run updates the live head in thread metadata.
     publish_review must anchor the GitHub review to that head and advance
