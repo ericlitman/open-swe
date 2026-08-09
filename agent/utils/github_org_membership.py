@@ -68,10 +68,10 @@ def is_internal_bot_author(author: str | None) -> bool:
 async def is_user_active_org_member(username: str, org: str) -> bool:
     """Return True if ``username`` is an *active* member of ``org``.
 
-    Uses the GitHub App installation token so that private organization
-    memberships are visible (the same approach as the reference
-    ``tag-external-contributions.yml`` workflow). On any API error, returns
-    ``False`` — fail-closed for security.
+    Resolves a minimally scoped GitHub App installation token for the specific
+    organization so that private memberships are visible (the same approach as
+    the reference ``tag-external-contributions.yml`` workflow). On any API
+    error, returns ``False`` — fail-closed for security.
 
     Requires the GitHub App to have the ``Organization -> Members: Read-only``
     permission; the ``GET /orgs/{org}/memberships/{username}`` endpoint returns
@@ -80,7 +80,7 @@ async def is_user_active_org_member(username: str, org: str) -> bool:
     if not username or not org:
         return False
 
-    token = await get_github_app_installation_token()
+    token = await get_github_app_installation_token(target_org=org, permissions={"members": "read"})
     if not token:
         logger.warning(
             "GitHub App token unavailable; cannot verify org membership for %s", username

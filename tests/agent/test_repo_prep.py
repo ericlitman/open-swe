@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 from typing import cast
 
-from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
+import pytest
+from deepagents.backends.protocol import ExecuteResponse, LsResult, SandboxBackendProtocol
 
 from agent.utils.repo_prep import (
     materialize_trusted_skills,
@@ -17,14 +19,19 @@ class _FakeSandboxBackend:
         *,
         exit_code: int = 0,
         raise_exc: bool = False,
+        ls_error: str | None = None,
+        raise_ls_exc: bool = False,
         output: str = "",
         outputs: list[str] | None = None,
     ) -> None:
         self._exit_code = exit_code
         self._raise = raise_exc
+        self._ls_error = ls_error
+        self._raise_ls = raise_ls_exc
         self._output = output
         self._outputs = outputs
         self.commands: list[str] = []
+        self.ls_paths: list[str] = []
 
     @property
     def id(self) -> str:
@@ -39,6 +46,12 @@ class _FakeSandboxBackend:
         if self._outputs is not None:
             output = self._outputs[len(self.commands) - 1]
         return ExecuteResponse(output=output, exit_code=self._exit_code, truncated=False)
+
+    def ls(self, path: str) -> LsResult:
+        if self._raise_ls:
+            raise RuntimeError("sandbox ls unavailable")
+        self.ls_paths.append(path)
+        return LsResult(error=self._ls_error, entries=[] if self._ls_error is None else None)
 
 
 async def test_prepare_review_repo_clones_and_checks_out_head() -> None:
@@ -126,6 +139,51 @@ async def test_prepare_review_repo_returns_false_on_exception() -> None:
         head_sha="abc",
     )
     assert ok is False
+
+
+async def test_prepare_review_repo_returns_true_when_file_tools_see_checkout() -> None:
+    backend = _FakeSandboxBackend(ls_error=None)
+    ok = await prepare_review_repo(
+        cast(SandboxBackendProtocol, backend),
+        work_dir="/work",
+        repo_owner="acme",
+        repo_name="widget",
+        head_sha="abc",
+    )
+    assert ok is True
+    assert backend.ls_paths == ["/work/widget"]
+
+
+async def test_prepare_review_repo_returns_false_when_file_tools_cannot_see_checkout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = _FakeSandboxBackend(ls_error="Path '/x': path_not_found")
+    caplog.set_level(logging.WARNING, logger="agent.utils.repo_prep")
+
+    ok = await prepare_review_repo(
+        cast(SandboxBackendProtocol, backend),
+        work_dir="/work",
+        repo_owner="acme",
+        repo_name="widget",
+        head_sha="abc",
+    )
+
+    assert ok is False
+    assert "/work/widget" in caplog.text
+    assert "_FakeSandboxBackend" in caplog.text
+    assert "Path '/x': path_not_found" in caplog.text
+
+
+async def test_prepare_review_repo_returns_true_when_file_tool_check_raises() -> None:
+    backend = _FakeSandboxBackend(raise_ls_exc=True)
+    ok = await prepare_review_repo(
+        cast(SandboxBackendProtocol, backend),
+        work_dir="/work",
+        repo_owner="acme",
+        repo_name="widget",
+        head_sha="abc",
+    )
+    assert ok is True
 
 
 async def test_materialize_trusted_skills_extracts_from_trusted_ref() -> None:

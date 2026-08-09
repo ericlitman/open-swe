@@ -186,10 +186,12 @@ def _reviewer_subagent(
     return subagent
 
 
-_REPO_READY_NOTE = """The repo is already cloned and checked out at the PR head in
-`{working_dir}` — `cd` there and grep for full file context."""
+_REPO_READY_NOTE = r"""The repo is already cloned and checked out at the PR head in
+`{working_dir}` — `cd` there and grep for full file context. Use `git grep -E 'a|b'`
+or repeated `-e` flags for symbol sweeps because BRE `\|` alternation is a GNU extension
+that macOS treats as a literal pipe; exit code 1 means no matches, while >= 2 means an error."""
 
-_REPO_NOT_READY_NOTE = """Repo prep FAILED: the checkout in `{working_dir}` may be missing or — worse —
+_REPO_NOT_READY_NOTE = r"""Repo prep FAILED: the checkout in `{working_dir}` may be missing or — worse —
 present but stale (at an old commit). Do NOT trust local files until you have
 re-prepped the tree yourself. Run:
 
@@ -203,7 +205,9 @@ and verify `git rev-parse HEAD` matches the PR head before reading local
 files. If you cannot get the tree onto the PR head, rely exclusively on the
 diff and `gh api` file contents (`GH_TOKEN=dummy gh api
 repos/{repo_owner}/{repo_name}/contents/<path>?ref=<head_sha>`) — never on
-the local checkout."""
+the local checkout. Use `git grep -E 'a|b'` or repeated `-e` flags for symbol sweeps
+because BRE `\|` alternation is a GNU extension that macOS treats as a literal pipe;
+exit code 1 means no matches, while >= 2 means an error."""
 
 
 def _repo_checkout_note(

@@ -388,7 +388,7 @@ def test_gate_allows_internal_bot_sender(monkeypatch) -> None:
 async def test_is_user_active_org_member_returns_false_when_no_token(monkeypatch) -> None:
     from agent.utils import github_org_membership
 
-    async def fake_token() -> None:
+    async def fake_token(**_kwargs: object) -> None:
         return None
 
     monkeypatch.setattr(github_org_membership, "get_github_app_installation_token", fake_token)
@@ -422,7 +422,7 @@ class _FakeResponse:
 def _patch_membership_http(monkeypatch, response: _FakeResponse) -> None:
     from agent.utils import github_org_membership
 
-    async def fake_token() -> str:
+    async def fake_token(**_kwargs: object) -> str:
         return "x"
 
     monkeypatch.setattr(github_org_membership, "get_github_app_installation_token", fake_token)
@@ -431,6 +431,30 @@ def _patch_membership_http(monkeypatch, response: _FakeResponse) -> None:
         return _FakeAsyncClient(response)
 
     monkeypatch.setattr(github_org_membership.httpx, "AsyncClient", factory)
+
+
+@pytest.mark.asyncio
+async def test_is_user_active_org_member_requests_org_scoped_members_token(monkeypatch) -> None:
+    from agent.utils import github_org_membership
+
+    captured: dict[str, object] = {}
+
+    async def fake_token(**kwargs: object) -> str:
+        captured.update(kwargs)
+        return "x"
+
+    monkeypatch.setattr(github_org_membership, "get_github_app_installation_token", fake_token)
+
+    def factory(*_args, **_kwargs) -> _FakeAsyncClient:
+        return _FakeAsyncClient(_FakeResponse(200, {"state": "active"}))
+
+    monkeypatch.setattr(github_org_membership.httpx, "AsyncClient", factory)
+
+    assert await github_org_membership.is_user_active_org_member("alice", "langchain-ai") is True
+    assert captured == {
+        "target_org": "langchain-ai",
+        "permissions": {"members": "read"},
+    }
 
 
 @pytest.mark.asyncio

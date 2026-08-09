@@ -106,16 +106,10 @@ def _normalize_target_repo(target_repo: str | None) -> str | None:
     return f"{parts[0]}/{parts[1]}"
 
 
-async def _resolve_installation_id(target_repo: str | None) -> str:
-    """Resolve the installation covering a target repo or use the pinned fallback."""
-    normalized = _normalize_target_repo(target_repo)
-    if normalized is None:
-        if not GITHUB_APP_INSTALLATION_ID:
-            raise ValueError("GITHUB_APP_INSTALLATION_ID is required without repository context")
-        return GITHUB_APP_INSTALLATION_ID
-
-    key = normalized.lower()
-    cached = _INSTALLATION_CACHE.get(key)
+async def _resolve_installation_for_path(
+    *, path: str, cache_key: str, target_description: str
+) -> str:
+    cached = _INSTALLATION_CACHE.get(cache_key)
     now = _monotonic()
     if cached is not None and cached[1] > now:
         return cached[0]
@@ -123,7 +117,7 @@ async def _resolve_installation_id(target_repo: str | None) -> str:
     app_jwt = _generate_app_jwt()
     async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
         response = await client.get(
-            f"https://api.github.com/repos/{normalized}/installation",
+            f"https://api.github.com/{path}/installation",
             headers={
                 "Authorization": f"Bearer {app_jwt}",
                 "Accept": "application/vnd.github+json",
@@ -133,10 +127,57 @@ async def _resolve_installation_id(target_repo: str | None) -> str:
         response.raise_for_status()
         installation_id = response.json().get("id")
         if not isinstance(installation_id, int | str) or not str(installation_id):
-            raise ValueError(f"GitHub returned no installation for {normalized}")
+            raise ValueError(f"GitHub returned no installation for {target_description}")
         resolved = str(installation_id)
-        _INSTALLATION_CACHE[key] = (resolved, now + _INSTALLATION_CACHE_TTL_SECONDS)
+        _INSTALLATION_CACHE[cache_key] = (resolved, now + _INSTALLATION_CACHE_TTL_SECONDS)
         return resolved
+
+
+async def _resolve_repo_installation_id(target_repo: str) -> str:
+    normalized = _normalize_target_repo(target_repo)
+    if normalized is None:
+        raise ValueError("GitHub App target repository is required")
+    return await _resolve_installation_for_path(
+        path=f"repos/{normalized}",
+        cache_key=normalized.lower(),
+        target_description=normalized,
+    )
+
+
+async def _resolve_org_installation_id(target_org: str) -> str:
+    org = target_org.strip()
+    return await _resolve_installation_for_path(
+        path=f"orgs/{org}",
+        cache_key=f"org:{org.lower()}",
+        target_description=f"org {org}",
+    )
+
+
+async def _resolve_installation_id(target_repo: str | None, target_org: str | None = None) -> str:
+    """Resolve an explicit installation context or use the ambient fallback."""
+    if target_repo is not None:
+        return await _resolve_repo_installation_id(target_repo)
+
+    if target_org is not None and target_org.strip():
+        org = target_org.strip()
+        # Resolve the checked org before ambient repo context to avoid minting from another org.
+        try:
+            return await _resolve_org_installation_id(org)
+        except Exception:
+            logger.warning(
+                "Failed to resolve installation for org %s; falling back to ambient "
+                "installation context (GITHUB_APP_TARGET_REPO env / static installation id)",
+                org,
+            )
+
+    normalized = _normalize_target_repo(None)
+    if normalized is not None:
+        return await _resolve_repo_installation_id(normalized)
+
+    if not GITHUB_APP_INSTALLATION_ID:
+        raise ValueError("GITHUB_APP_INSTALLATION_ID is required without repository context")
+    logger.info("Using static fallback GitHub App installation id %s", GITHUB_APP_INSTALLATION_ID)
+    return GITHUB_APP_INSTALLATION_ID
 
 
 def _generate_app_jwt() -> str:
@@ -154,6 +195,7 @@ def _generate_app_jwt() -> str:
 async def get_github_app_installation_token(
     *,
     target_repo: str | None = None,
+    target_org: str | None = None,
     repository_ids: Sequence[int] | None = None,
     repositories: Sequence[str] | None = None,
     permissions: PermissionMap | None = None,
@@ -162,6 +204,7 @@ async def get_github_app_installation_token(
     """Exchange the GitHub App JWT for an installation access token."""
     token, _ = await get_github_app_installation_token_with_expiry(
         target_repo=target_repo,
+        target_org=target_org,
         repository_ids=repository_ids,
         repositories=repositories,
         permissions=permissions,
@@ -173,6 +216,7 @@ async def get_github_app_installation_token(
 async def get_github_app_installation_token_with_expiry(
     *,
     target_repo: str | None = None,
+    target_org: str | None = None,
     repository_ids: Sequence[int] | None = None,
     repositories: Sequence[str] | None = None,
     permissions: PermissionMap | None = None,
@@ -193,7 +237,7 @@ async def get_github_app_installation_token_with_expiry(
         body["permissions"] = dict(permission_key)
 
     try:
-        installation_id = await _resolve_installation_id(target_repo)
+        installation_id = await _resolve_installation_id(target_repo, target_org)
         key = _scope_key(installation_id, repository_ids, repositories, permissions)
         now = datetime.now(UTC)
         cached = _cached_token(key, now=now)

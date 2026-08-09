@@ -110,7 +110,7 @@ After creating the app:
 
 > **Note**: The installation page may prompt you to authenticate with LangSmith. If you haven't set up LangSmith yet (step 4), that's fine — you can still grab the Installation ID from the URL and complete the OAuth setup later.
 
-The app may be installed on multiple organizations or personal accounts. When Open SWE knows the target repository, it asks GitHub which installation covers that `owner/repo`; `GITHUB_APP_INSTALLATION_ID` remains the fallback for operations without repository context. Local-provider credential shims can set `GITHUB_APP_TARGET_REPO=owner/repo` for each invocation. Repository selection precedence is: explicit library argument, `GITHUB_APP_TARGET_REPO`, then the pinned installation ID.
+The app may be installed on multiple organizations or personal accounts. When Open SWE knows the target repository, it asks GitHub which installation covers that `owner/repo`; organization-membership checks similarly resolve the checked org's own installation through `GET /orgs/{org}/installation`. `GITHUB_APP_INSTALLATION_ID` is the fallback only when a call has neither repository nor organization context. Local-provider credential shims can set `GITHUB_APP_TARGET_REPO=owner/repo` for each invocation. Repository selection precedence is: explicit library argument, `GITHUB_APP_TARGET_REPO`, then the pinned installation ID.
 
 ## 4. Set up LangSmith
 

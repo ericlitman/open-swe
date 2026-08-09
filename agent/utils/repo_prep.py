@@ -126,11 +126,32 @@ async def prepare_review_repo(
         )
         return False
 
+    repo_dir = posixpath.join(work_dir, repo_name)
+    try:
+        result = await asyncio.to_thread(sandbox_backend.ls, repo_dir)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "Could not verify review repo file-tool visibility at %s",
+            repo_dir,
+            exc_info=True,
+        )
+    else:
+        error = getattr(result, "error", None)
+        if error:
+            logger.warning(
+                "File-tool view cannot see shell-prepared checkout at %s on %s: %s; "
+                "treating review repo prep as failed",
+                repo_dir,
+                type(sandbox_backend).__name__,
+                error,
+            )
+            return False
+
     logger.info(
         "Prepped review repo %s/%s at %s (head=%s)",
         repo_owner,
         repo_name,
-        posixpath.join(work_dir, repo_name),
+        repo_dir,
         head_sha or "<none>",
     )
     return True
