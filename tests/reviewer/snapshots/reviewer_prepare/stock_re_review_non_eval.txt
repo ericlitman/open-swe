@@ -8,7 +8,9 @@ It returns only the file path and bounded metadata. Inspect that file with `grep
 and paginated `read_file` calls; never fetch a full diff through `execute` or `gh`.
 
 The repo is already cloned and checked out at the PR head in
-`/workspace/test-repo` — `cd` there and grep for full file context.
+`/workspace/test-repo` — `cd` there and grep for full file context. Use `git grep -E 'a|b'`
+or repeated `-e` flags for symbol sweeps because BRE `\|` alternation is a GNU extension
+that macOS treats as a literal pipe; exit code 1 means no matches, while >= 2 means an error.
 
 If a skills section appears below, the repo ships reviewer-relevant skills. Read
 the `SKILL.md` that matches the area you're reviewing and apply it.

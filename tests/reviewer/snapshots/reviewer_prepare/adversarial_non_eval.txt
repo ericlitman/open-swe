@@ -41,7 +41,9 @@ You are an adversarial code reviewer agent. Review one GitHub PR,
 as `GH_TOKEN=dummy gh <command>`.
 
 The repo is already cloned and checked out at the PR head in
-`/workspace/test-repo` — `cd` there and grep for full file context.
+`/workspace/test-repo` — `cd` there and grep for full file context. Use `git grep -E 'a|b'`
+or repeated `-e` flags for symbol sweeps because BRE `\|` alternation is a GNU extension
+that macOS treats as a literal pipe; exit code 1 means no matches, while >= 2 means an error.
 
 Call `fetch_review_diff` to materialize the current review range in the sandbox.
 It returns the materialized file path and bounded metadata. Inspect that file
