@@ -172,12 +172,15 @@ async def dispatch_agent_run(
     assistant_id: str = "agent",
     metadata: dict[str, Any] | None = None,
     client: LangGraphClient | None = None,
+    multitask_strategy: str = "interrupt",
 ) -> Run:
     """Create (or interrupt-and-resume) a run for ``thread_id``.
 
     Routes every Slack / Linear / GitHub / dashboard trigger through one
     contract. ``source`` is for logging/metadata only; ``assistant_id`` selects
-    the graph (``"agent"`` or ``"reviewer"``).
+    the graph (``"agent"`` or ``"reviewer"``). ``multitask_strategy`` defaults
+    to ``interrupt``; pass ``enqueue`` for work that must wait for the active
+    run instead of displacing it.
     """
     configurable = dict(configurable)
     configurable["merge_hold_requested"] = configurable.get(
@@ -201,4 +204,5 @@ async def dispatch_agent_run(
         metadata=metadata or {},
         source=source,
         client=run_client,
+        multitask_strategy=multitask_strategy,
     )

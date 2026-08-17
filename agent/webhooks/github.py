@@ -26,6 +26,30 @@ def _review_run_metadata(check_run_id: int | None) -> dict[str, Any]:
     return metadata
 
 
+def _full_review_in_flight_for_head(metadata: dict[str, Any] | None, head_sha: str) -> bool:
+    """Return whether a full review of ``head_sha`` has been dispatched and not published.
+
+    The synchronize/opened dispatch records ``head_sha`` on the reviewer thread
+    before starting the review, and ``publish_review`` advances
+    ``last_reviewed_sha`` to the head only when that review publishes. Between
+    those two writes the head is under review. This is judged from the thread's
+    own state, not from the review check-run: the check is best-effort (it is
+    ``None`` when the App lacks Checks permission or the API fails) and must
+    not decide whether a review is preemptable.
+
+    A finding reply must not interrupt that review: the reply run only
+    reassesses one thread and cannot honestly conclude a check for a head
+    nobody reviewed, so the handed-over check would settle as incomplete and
+    the head would stay unreviewed until the next push (MASTRA-159). Instead
+    the reply is dispatched with ``multitask_strategy="enqueue"`` so it runs
+    after the review — late replies are answered, never dropped, and if the
+    review already ended the enqueued run simply starts at once.
+    """
+    if not isinstance(metadata, dict) or not head_sha:
+        return False
+    return metadata.get("head_sha") == head_sha and metadata.get("last_reviewed_sha") != head_sha
+
+
 async def _settle_review_check_before_finding_reply(
     *,
     thread_id: str,
@@ -1173,13 +1197,24 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         }
     )
     latest_metadata = await common._get_thread_metadata_safe(thread_id)
-    inherited_check_run_id = await _settle_review_check_before_finding_reply(
-        thread_id=thread_id,
-        metadata=latest_metadata,
-        owner=repo_config["owner"],
-        repo=repo_config["name"],
-        token=app_token,
-    )
+    review_in_flight = _full_review_in_flight_for_head(latest_metadata, head_sha)
+    if review_in_flight:
+        # Do not hand the review's check to this run: the review keeps it and
+        # settles it itself; the reply runs afterwards and inherits nothing.
+        inherited_check_run_id = None
+        common.logger.info(
+            "Enqueueing finding reply for %s behind the in-flight full review of head %s",
+            thread_id,
+            head_sha[:12],
+        )
+    else:
+        inherited_check_run_id = await _settle_review_check_before_finding_reply(
+            thread_id=thread_id,
+            metadata=latest_metadata,
+            owner=repo_config["owner"],
+            repo=repo_config["name"],
+            token=app_token,
+        )
     assistant_id = await common.reviewer_assistant_for_dispatch(
         re_review=bool(configurable.get("re_review")),
         finding_reply=configurable.get("reviewer_event") == "finding_reply",
@@ -1200,8 +1235,15 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         assistant_id=assistant_id,
         metadata=_review_run_metadata(inherited_check_run_id),
         client=langgraph_client,
+        multitask_strategy="enqueue" if review_in_flight else "interrupt",
     )
-    await common._store_current_reviewer_run_id(thread_id, run)
+    # An enqueued reply must not become the thread's "current" run: the full
+    # review still owns the check, and the completion handler settles a dying
+    # review's check only while that review is current. The queued run owns
+    # no check and inherits nothing, so it has nothing to lose by not being
+    # recorded here.
+    if not review_in_flight:
+        await common._store_current_reviewer_run_id(thread_id, run)
 
 
 async def process_github_issue(payload: dict[str, Any], event_type: str) -> None:

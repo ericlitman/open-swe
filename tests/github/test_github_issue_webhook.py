@@ -636,6 +636,143 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     }
 
 
+def _finding_reply_payload(head_sha: str) -> dict[str, object]:
+    return {
+        "comment": {
+            "id": 222,
+            "in_reply_to_id": 111,
+            "body": "Fixed in abc1234",
+            "created_at": "2026-05-27T00:00:00Z",
+        },
+        "pull_request": {
+            "number": 1244,
+            "html_url": "https://github.com/langchain-ai/open-swe/pull/1244",
+            "base": {"sha": "base-sha"},
+            "head": {"sha": head_sha, "ref": "feature-branch"},
+        },
+        "repository": {"owner": {"login": "langchain-ai"}, "name": "open-swe"},
+        "sender": {"login": "octocat", "id": 123},
+    }
+
+
+@pytest.mark.parametrize(
+    ("thread_head", "reply_head", "expect_enqueue"),
+    [
+        ("head-sha", "head-sha", True),  # full review of this head in flight → enqueue behind it
+        (
+            "older-sha",
+            "head-sha",
+            False,
+        ),  # review in flight for a different head → interrupt as before
+    ],
+)
+def test_finding_reply_does_not_preempt_in_flight_review_of_same_head(
+    monkeypatch, thread_head: str, reply_head: str, expect_enqueue: bool
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_get_thread_metadata_safe(_thread_id: str) -> dict[str, object]:
+        # An open check with no staged or deferred verdict; head_sha was written
+        # by the full-review dispatch and last_reviewed_sha has not caught up,
+        # so the recorded head is still under review.
+        return {
+            "kind": webhook_common.REVIEWER_THREAD_KIND,
+            "review_check_run_id": 42,
+            "review_check_pending_result": None,
+            "review_check_deferred_result": None,
+            "head_sha": thread_head,
+            "last_reviewed_sha": "even-older-sha",
+        }
+
+    async def fake_get_token_with_expiry(**_kwargs: object) -> tuple[str, str]:
+        return "app-token", "2026-01-01T00:00:00Z"
+
+    async def fake_fetch_threads(**_kwargs: object) -> list[dict[str, object]]:
+        return []
+
+    async def fake_reconcile(_thread_id: str, _threads: list[dict[str, object]]) -> None:
+        return None
+
+    async def fake_list_findings(_thread_id: str) -> list[dict[str, object]]:
+        return [{"id": "f_1", "github_review_comment_id": 111}]
+
+    async def fake_append_interaction(
+        _thread_id: str, finding_id: str, interaction: dict[str, object]
+    ) -> dict[str, object]:
+        captured["interaction"] = (finding_id, interaction)
+        return {}
+
+    async def fake_store_current_run_id(_thread_id: str, _run: object) -> None:
+        captured["stored_current_run"] = True
+
+    metadata_writes: list[dict[str, object]] = []
+
+    async def fake_set_metadata(_thread_id: str, **kwargs: object) -> None:
+        metadata_writes.append(kwargs)
+
+    async def fake_settle_review_check_run(**kwargs: object) -> bool:
+        captured["settled_check"] = kwargs
+        return True
+
+    async def fake_reviewer_assistant_for_dispatch(**_kwargs: object) -> str:
+        return "reviewer"
+
+    class _FakeRunsClient:
+        async def create(self, thread_id: str, graph: str, **kwargs) -> dict[str, str]:
+            captured["dispatched"] = (thread_id, graph)
+            captured["kwargs"] = kwargs
+            return {"run_id": "run-1"}
+
+    class _FakeLangGraphClient:
+        runs = _FakeRunsClient()
+
+    monkeypatch.setattr(dispatch, "COMPLETION_WEBHOOK_URL", None)
+    monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
+    monkeypatch.setattr(
+        webhook_common, "get_github_app_installation_token_with_expiry", fake_get_token_with_expiry
+    )
+    monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", lambda *a, **k: None)
+    monkeypatch.setattr(webhook_common, "fetch_pr_review_threads", fake_fetch_threads)
+    monkeypatch.setattr(webhook_common, "reconcile_findings_with_review_threads", fake_reconcile)
+    monkeypatch.setattr(webhook_common, "list_reviewer_findings", fake_list_findings)
+    monkeypatch.setattr(webhook_common, "append_finding_interaction", fake_append_interaction)
+    monkeypatch.setattr(webhook_common, "_store_current_reviewer_run_id", fake_store_current_run_id)
+    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", fake_set_metadata)
+    monkeypatch.setattr(github_webhooks, "settle_review_check_run", fake_settle_review_check_run)
+    monkeypatch.setattr(
+        webhook_common, "reviewer_assistant_for_dispatch", fake_reviewer_assistant_for_dispatch
+    )
+    monkeypatch.setattr(webhook_common, "get_client", lambda url: _FakeLangGraphClient())
+
+    asyncio.run(
+        github_webhooks.process_github_review_finding_reply(_finding_reply_payload(reply_head))
+    )
+
+    # The reply is always recorded on the finding and always dispatched.
+    assert captured["interaction"][0] == "f_1"
+    assert captured["dispatched"] == (
+        webhook_common.generate_reviewer_thread_id("langchain-ai", "open-swe", 1244),
+        "reviewer",
+    )
+    kwargs = cast(dict[str, object], captured["kwargs"])
+    run_metadata = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["metadata"])
+    superseded_writes = [w for w in metadata_writes if "review_check_superseded" in str(w)]
+    if expect_enqueue:
+        # Waits behind the running review; the review keeps its own check and
+        # stays the thread's current run so a dying review's check is settled.
+        assert kwargs["multitask_strategy"] == "enqueue"
+        assert "settled_check" not in captured
+        assert superseded_writes == []
+        assert "review_check_run_id" not in run_metadata
+        assert "stored_current_run" not in captured
+    else:
+        assert kwargs["multitask_strategy"] == "interrupt"
+        assert captured.get("stored_current_run") is True
+        # Preempts the review of another head: the check is handed over.
+        assert len(superseded_writes) == 1
+        assert run_metadata.get("review_check_run_id") == 42
+
+
 def test_finding_reply_ignores_pending_result_from_superseded_check(monkeypatch) -> None:
     captured: dict[str, object] = {}
     metadata_writes: list[dict[str, object]] = []
