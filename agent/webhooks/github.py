@@ -26,6 +26,33 @@ def _review_run_metadata(check_run_id: int | None) -> dict[str, Any]:
     return metadata
 
 
+def _full_review_in_flight_for_head(metadata: dict[str, Any] | None, head_sha: str) -> bool:
+    """Return whether a full review of ``head_sha`` still owns the review check.
+
+    True when the thread tracks an open check-run with no staged (``pending``)
+    or ``deferred`` verdict and its recorded ``head_sha`` is this head while
+    ``last_reviewed_sha`` is not — i.e. the synchronize/full review for this
+    head has started and not yet published.
+
+    A finding reply must not preempt that review: the reply run only
+    reassesses one thread and cannot honestly conclude a check for a head
+    nobody reviewed, so the handed-over check settles as incomplete and the
+    head is left unreviewed until someone pushes again (MASTRA-159). The
+    in-flight review re-assesses every thread when it publishes, and the reply
+    is already recorded on the finding, so skipping the dispatch loses nothing.
+    """
+    if not isinstance(metadata, dict) or not head_sha:
+        return False
+    check_run_id = metadata.get("review_check_run_id")
+    if not isinstance(check_run_id, int):
+        return False
+    for key in ("review_check_pending_result", "review_check_deferred_result"):
+        result = metadata.get(key)
+        if isinstance(result, dict) and result.get("review_check_run_id") == check_run_id:
+            return False
+    return metadata.get("head_sha") == head_sha and metadata.get("last_reviewed_sha") != head_sha
+
+
 async def _settle_review_check_before_finding_reply(
     *,
     thread_id: str,
@@ -1173,6 +1200,14 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         }
     )
     latest_metadata = await common._get_thread_metadata_safe(thread_id)
+    if _full_review_in_flight_for_head(latest_metadata, head_sha):
+        common.logger.info(
+            "Skipping finding reply dispatch for %s: a full review of head %s is in flight "
+            "and will reassess the thread when it publishes",
+            thread_id,
+            head_sha[:12],
+        )
+        return
     inherited_check_run_id = await _settle_review_check_before_finding_reply(
         thread_id=thread_id,
         metadata=latest_metadata,
