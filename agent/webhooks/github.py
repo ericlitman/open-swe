@@ -1237,7 +1237,13 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         client=langgraph_client,
         multitask_strategy="enqueue" if review_in_flight else "interrupt",
     )
-    await common._store_current_reviewer_run_id(thread_id, run)
+    # An enqueued reply must not become the thread's "current" run: the full
+    # review still owns the check, and the completion handler settles a dying
+    # review's check only while that review is current. The queued run owns
+    # no check and inherits nothing, so it has nothing to lose by not being
+    # recorded here.
+    if not review_in_flight:
+        await common._store_current_reviewer_run_id(thread_id, run)
 
 
 async def process_github_issue(payload: dict[str, Any], event_type: str) -> None:

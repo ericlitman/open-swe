@@ -703,7 +703,7 @@ def test_finding_reply_does_not_preempt_in_flight_review_of_same_head(
         return {}
 
     async def fake_store_current_run_id(_thread_id: str, _run: object) -> None:
-        return None
+        captured["stored_current_run"] = True
 
     metadata_writes: list[dict[str, object]] = []
 
@@ -758,13 +758,16 @@ def test_finding_reply_does_not_preempt_in_flight_review_of_same_head(
     run_metadata = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["metadata"])
     superseded_writes = [w for w in metadata_writes if "review_check_superseded" in str(w)]
     if expect_enqueue:
-        # Waits behind the running review; the review keeps its own check.
+        # Waits behind the running review; the review keeps its own check and
+        # stays the thread's current run so a dying review's check is settled.
         assert kwargs["multitask_strategy"] == "enqueue"
         assert "settled_check" not in captured
         assert superseded_writes == []
         assert "review_check_run_id" not in run_metadata
+        assert "stored_current_run" not in captured
     else:
         assert kwargs["multitask_strategy"] == "interrupt"
+        assert captured.get("stored_current_run") is True
         # Preempts the review of another head: the check is handed over.
         assert len(superseded_writes) == 1
         assert run_metadata.get("review_check_run_id") == 42
