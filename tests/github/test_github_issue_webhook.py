@@ -656,27 +656,32 @@ def _finding_reply_payload(head_sha: str) -> dict[str, object]:
 
 
 @pytest.mark.parametrize(
-    ("thread_head", "reply_head", "expect_dispatch"),
+    ("thread_head", "reply_head", "expect_enqueue"),
     [
-        ("head-sha", "head-sha", False),  # full review of this head in flight → skip
-        ("older-sha", "head-sha", True),  # review in flight for a different head → dispatch
+        ("head-sha", "head-sha", True),  # full review of this head in flight → enqueue behind it
+        (
+            "older-sha",
+            "head-sha",
+            False,
+        ),  # review in flight for a different head → interrupt as before
     ],
 )
 def test_finding_reply_does_not_preempt_in_flight_review_of_same_head(
-    monkeypatch, thread_head: str, reply_head: str, expect_dispatch: bool
+    monkeypatch, thread_head: str, reply_head: str, expect_enqueue: bool
 ) -> None:
     captured: dict[str, object] = {}
 
     async def fake_get_thread_metadata_safe(_thread_id: str) -> dict[str, object]:
-        # An open check with no staged or deferred verdict: the full review is
-        # still running for the thread's recorded head.
+        # An open check with no staged or deferred verdict; head_sha was written
+        # by the full-review dispatch and last_reviewed_sha has not caught up,
+        # so the recorded head is still under review.
         return {
             "kind": webhook_common.REVIEWER_THREAD_KIND,
             "review_check_run_id": 42,
             "review_check_pending_result": None,
             "review_check_deferred_result": None,
             "head_sha": thread_head,
-            "last_reviewed_sha": "older-sha" if thread_head == "head-sha" else "even-older-sha",
+            "last_reviewed_sha": "even-older-sha",
         }
 
     async def fake_get_token_with_expiry(**_kwargs: object) -> tuple[str, str]:
@@ -700,8 +705,10 @@ def test_finding_reply_does_not_preempt_in_flight_review_of_same_head(
     async def fake_store_current_run_id(_thread_id: str, _run: object) -> None:
         return None
 
+    metadata_writes: list[dict[str, object]] = []
+
     async def fake_set_metadata(_thread_id: str, **kwargs: object) -> None:
-        captured["metadata_writes"] = captured.get("metadata_writes", []) + [kwargs]  # type: ignore[operator]
+        metadata_writes.append(kwargs)
 
     async def fake_settle_review_check_run(**kwargs: object) -> bool:
         captured["settled_check"] = kwargs
@@ -713,6 +720,7 @@ def test_finding_reply_does_not_preempt_in_flight_review_of_same_head(
     class _FakeRunsClient:
         async def create(self, thread_id: str, graph: str, **kwargs) -> dict[str, str]:
             captured["dispatched"] = (thread_id, graph)
+            captured["kwargs"] = kwargs
             return {"run_id": "run-1"}
 
     class _FakeLangGraphClient:
@@ -740,15 +748,26 @@ def test_finding_reply_does_not_preempt_in_flight_review_of_same_head(
         github_webhooks.process_github_review_finding_reply(_finding_reply_payload(reply_head))
     )
 
-    # The reply is always recorded on the finding so the in-flight review sees it.
+    # The reply is always recorded on the finding and always dispatched.
     assert captured["interaction"][0] == "f_1"
-    assert ("dispatched" in captured) is expect_dispatch
-    if not expect_dispatch:
-        # Neither settled nor handed over: the running review keeps its check.
+    assert captured["dispatched"] == (
+        webhook_common.generate_reviewer_thread_id("langchain-ai", "open-swe", 1244),
+        "reviewer",
+    )
+    kwargs = cast(dict[str, object], captured["kwargs"])
+    run_metadata = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["metadata"])
+    superseded_writes = [w for w in metadata_writes if "review_check_superseded" in str(w)]
+    if expect_enqueue:
+        # Waits behind the running review; the review keeps its own check.
+        assert kwargs["multitask_strategy"] == "enqueue"
         assert "settled_check" not in captured
-        assert not any(
-            "review_check_superseded" in str(w) for w in captured.get("metadata_writes", [])
-        )  # type: ignore[union-attr]
+        assert superseded_writes == []
+        assert "review_check_run_id" not in run_metadata
+    else:
+        assert kwargs["multitask_strategy"] == "interrupt"
+        # Preempts the review of another head: the check is handed over.
+        assert len(superseded_writes) == 1
+        assert run_metadata.get("review_check_run_id") == 42
 
 
 def test_finding_reply_ignores_pending_result_from_superseded_check(monkeypatch) -> None:
