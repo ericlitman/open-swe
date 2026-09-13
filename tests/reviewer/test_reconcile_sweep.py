@@ -99,10 +99,16 @@ def _patch_reviewer_reconcile(
     *,
     live_pr: dict[str, Any] | Exception | None = None,
     enabled: bool = True,
+    draft_reviews: bool = False,
 ) -> AsyncMock:
     _patch(monkeypatch, _FakeClient(threads, _FakeRuns({})))
     monkeypatch.setattr(
         reconcile.webhook_common, "_is_repo_auto_review_enabled", AsyncMock(return_value=enabled)
+    )
+    monkeypatch.setattr(
+        reconcile.webhook_common,
+        "_draft_review_enabled_for_author",
+        AsyncMock(return_value=draft_reviews),
     )
     monkeypatch.setattr(
         reconcile.webhook_common,
@@ -163,7 +169,6 @@ async def test_reviewer_head_reconcile_ignores_old_head_claim(
 @pytest.mark.parametrize(
     "metadata",
     [
-        {"review_start": {"head_sha": "new-head", "status": "claimed"}},
         {
             "head_sha": "new-head",
             "review_check_run_id": 10,
@@ -207,6 +212,36 @@ async def test_reviewer_head_reconcile_skips_ineligible_pr(
 
     assert counts["skipped"] == 1
     dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reviewer_head_reconcile_hands_claimed_head_to_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _FakeThreads(
+        [[_reviewer_thread(review_start={"head_sha": "new-head", "status": "claimed"})]]
+    )
+    dispatch = _patch_reviewer_reconcile(monkeypatch, threads)
+
+    counts = await reconcile.reconcile_reviewer_heads()
+
+    assert counts["dispatched"] == 1
+    dispatch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reviewer_head_reconcile_reviews_opted_in_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _FakeThreads([[_reviewer_thread()]])
+    dispatch = _patch_reviewer_reconcile(
+        monkeypatch, threads, live_pr=_live_review_pr(draft=True), draft_reviews=True
+    )
+
+    counts = await reconcile.reconcile_reviewer_heads()
+
+    assert counts["dispatched"] == 1
+    dispatch.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -184,16 +184,17 @@ async def reconcile_reviewer_heads() -> dict[str, int]:
                 if not live_pr:
                     raise RuntimeError("Pull request unavailable")
                 head_sha = (live_pr.get("head") or {}).get("sha")
-                if live_pr.get("state") != "open" or live_pr.get("draft") is True:
+                if live_pr.get("state") != "open":
                     counts["skipped"] += 1
                     continue
+                if live_pr.get("draft") is True:
+                    author = (live_pr.get("user") or {}).get("login", "")
+                    if not await webhook_common._draft_review_enabled_for_author(author):
+                        counts["skipped"] += 1
+                        continue
                 if not isinstance(head_sha, str) or not head_sha:
                     raise RuntimeError("Pull request head unavailable")
                 if metadata.get("last_reviewed_sha") == head_sha:
-                    counts["skipped"] += 1
-                    continue
-                review_start = metadata.get("review_start")
-                if isinstance(review_start, dict) and review_start.get("head_sha") == head_sha:
                     counts["skipped"] += 1
                     continue
                 thread_id = thread.get("thread_id") or thread.get("id")
