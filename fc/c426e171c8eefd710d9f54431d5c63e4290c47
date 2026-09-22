@@ -1,0 +1,9 @@
+docs/CUSTOMIZATION.md
+  ai_agent 140,142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "fcc426e171c8eefd710d9f54431d5c63e4290c47",
+  "prompts": {}
+}
