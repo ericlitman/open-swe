@@ -13,7 +13,7 @@ from agent.dashboard.options import (
 )
 
 _FABLE_MODEL = "anthropic:claude-fable-5"
-_NON_DEFAULT_MODEL = "openai:gpt-5.6-sol"
+_NON_DEFAULT_MODEL = "openai:gpt-6-sol"
 _NON_DEFAULT_EFFORT = "high"
 _RETIRED_MODEL = "anthropic:claude-opus-4-1"
 

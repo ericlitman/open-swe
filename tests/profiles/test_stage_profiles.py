@@ -95,8 +95,8 @@ def test_deep_agent_tool_names_match_constructed_agent() -> None:
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
-        ("model: openai:gpt-5.6-sol\nBody.\n", "missing opening frontmatter delimiter"),
-        ("---\nmodel: openai:gpt-5.6-sol\n", "unterminated frontmatter block"),
+        ("model: openai:gpt-6-sol\nBody.\n", "missing opening frontmatter delimiter"),
+        ("---\nmodel: openai:gpt-6-sol\n", "unterminated frontmatter block"),
         ("---\nmodel: [\n---\nBody.\n", "invalid YAML"),
         ("---\n- model\n---\nBody.\n", "frontmatter must be a mapping"),
     ],
@@ -142,7 +142,7 @@ def test_profile_honors_model_effort_and_tool_restriction(tmp_path: Path) -> Non
         tmp_path,
         "review",
         "focused",
-        "model: openai:gpt-5.6-sol\nreasoning_effort: medium\ntools:\n  - read_file\n  - add_finding",
+        "model: openai:gpt-6-sol\nreasoning_effort: medium\ntools:\n  - read_file\n  - add_finding",
         "Review {repo_owner}/{repo_name}#{pr_number}.",
     )
 
@@ -150,7 +150,7 @@ def test_profile_honors_model_effort_and_tool_restriction(tmp_path: Path) -> Non
         "review", "focused", allowed_tools=REVIEW_STAGE_TOOL_NAMES, root=tmp_path
     )
 
-    assert profile.model == "openai:gpt-5.6-sol"
+    assert profile.model == "openai:gpt-6-sol"
     assert profile.reasoning_effort == "medium"
     assert profile.tools == ("read_file", "add_finding")
 

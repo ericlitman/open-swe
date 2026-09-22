@@ -27,7 +27,12 @@ from .oauth import (
     is_unrecoverable_refresh_error,
     refresh_user_access_token,
 )
-from .options import SUPPORTED_MODEL_IDS, model_supports_effort, provider_fallback_pair
+from .options import (
+    RETIRED_MODEL_SUCCESSORS,
+    SUPPORTED_MODEL_IDS,
+    model_supports_effort,
+    provider_fallback_pair,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,7 @@ class ProfileUpdate(BaseModel):
 
 
 def _normalize_stale_model_pair(model: str, effort: str | None) -> tuple[str, str | None]:
+    model = RETIRED_MODEL_SUCCESSORS.get(model, model)
     if model in SUPPORTED_MODEL_IDS or effort is None:
         return model, effort
     fallback = provider_fallback_pair(model, effort)

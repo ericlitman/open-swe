@@ -4,7 +4,7 @@ from typing import Any, Literal, TypedDict, Unpack, cast
 
 from langchain.chat_models import init_chat_model
 
-from ..dashboard.options import DEFAULT_MODEL_ID
+from ..dashboard.options import DEFAULT_MODEL_ID, RETIRED_MODEL_SUCCESSORS, bundled_model_profile
 from .gateway import gateway_env_default, gateway_overrides
 
 OPENAI_RESPONSES_WS_BASE_URL = "wss://api.openai.com/v1"
@@ -176,6 +176,14 @@ def make_model(model_id: str, *, use_gateway: bool | None = None, **kwargs: Unpa
         _configure_openai_responses_kwargs(model_kwargs)
         _coerce_openai_chat_completions_kwargs(model_kwargs)
 
+    profile = bundled_model_profile(model_id)
+    if (
+        model_id in RETIRED_MODEL_SUCCESSORS.values()
+        and profile
+        and not bundled_model_profile(model_id, inherit=False)
+    ):
+        model_kwargs["profile"] = dict(profile)
+
     max_tokens = model_kwargs.get("max_tokens")
     max_tokens_key = max_tokens if type(max_tokens) is int else None
     key = (
@@ -201,9 +209,9 @@ def fallback_model_id_for(primary_model_id: str) -> str | None:
     local, or self-hosted providers we don't want to silently route off-host).
     """
     if primary_model_id.startswith("anthropic:"):
-        return "openai:gpt-5.6-sol"
+        return "openai:gpt-6-sol"
     if primary_model_id.startswith("openai:"):
-        return "anthropic:claude-opus-4-8"
+        return "anthropic:claude-opus-5-5"
     return None
 
 

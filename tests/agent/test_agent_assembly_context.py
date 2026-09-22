@@ -95,7 +95,7 @@ async def _capture_create_deep_agent_kwargs(
         patch(
             "agent.server.get_team_default_model_pair",
             new_callable=AsyncMock,
-            return_value=(("openai:gpt-5.6-sol", "medium"), ("openai:gpt-5.6-sol", "low")),
+            return_value=(("openai:gpt-6-sol", "medium"), ("openai:gpt-6-sol", "low")),
         ),
         patch(
             "agent.server._cached_require_plan_approval",
@@ -140,8 +140,8 @@ async def test_agent_configures_sol_to_terra_max_fallback(
     calls = make_model.call_args_list
     assert [call.args[0] for call in calls] == [
         "openai:gpt-5.6-terra",
-        "openai:gpt-5.6-sol",
-        "openai:gpt-5.6-sol",
+        "openai:gpt-6-sol",
+        "openai:gpt-6-sol",
     ]
     assert calls[0].kwargs["reasoning"] == {"effort": "max", "summary": "auto"}
     assert all(not call.args[0].startswith("anthropic:") for call in calls)

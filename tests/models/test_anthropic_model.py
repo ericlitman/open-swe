@@ -32,7 +32,7 @@ def test_sonnet_46_fallback_uses_sonnet_5() -> None:
 
 def test_opus_fallback_stays_on_opus_family() -> None:
     assert provider_fallback_pair("anthropic:claude-opus-4-7", "xhigh") == (
-        "anthropic:claude-opus-4-8",
+        "anthropic:claude-opus-5-5",
         "xhigh",
     )
 

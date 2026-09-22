@@ -14,7 +14,7 @@ from agent.dashboard.team_settings import (
     get_team_review_tracing_project,
 )
 
-_AGENT_PAIR = ("anthropic:claude-opus-4-8", "high")
+_AGENT_PAIR = ("anthropic:claude-opus-5-5", "high")
 _CHAT_PAIR = ("google_genai:gemini-3.5-flash", "low")
 
 

@@ -17,8 +17,8 @@ from agent.dashboard.team_settings import (
     get_team_settings,
 )
 
-_VALID_ANTHROPIC = ("anthropic:claude-opus-4-8", "high")
-_VALID_OPENAI = ("openai:gpt-5.6-sol", "low")
+_VALID_ANTHROPIC = ("anthropic:claude-opus-5-5", "high")
+_VALID_OPENAI = ("openai:gpt-6-sol", "low")
 _STALE_ANTHROPIC = ("anthropic:claude-opus-4-1", "xhigh")
 
 

@@ -14,7 +14,7 @@ from agent.dashboard.options import model_supports_images
 _TEXT_ONLY_MODEL = "fireworks:accounts/fireworks/models/deepseek-v4-pro"
 _VISION_MODEL = "openai:gpt-5.5"
 _FABLE = "anthropic:claude-fable-5"
-_PAIR = ("openai:gpt-5.6-sol", "medium")
+_PAIR = ("openai:gpt-6-sol", "medium")
 
 
 def _image() -> thread_api.DashboardImageBody:
@@ -79,11 +79,11 @@ async def test_resolve_agent_model_choice_applies_request_before_profile(monkeyp
 
     model_id, effort = await thread_api._resolve_agent_model_choice(
         {"default_model": _TEXT_ONLY_MODEL, "reasoning_effort": "high"},
-        "anthropic:claude-opus-4-8",
+        "anthropic:claude-opus-5-5",
         "high",
     )
 
-    assert (model_id, effort) == ("anthropic:claude-opus-4-8", "high")
+    assert (model_id, effort) == ("anthropic:claude-opus-5-5", "high")
 
 
 async def test_resolve_agent_model_id_defaults_to_team_default(monkeypatch) -> None:
@@ -119,8 +119,8 @@ async def test_resolve_agent_model_id_applies_per_thread_override(monkeypatch) -
     monkeypatch.setattr("agent.dashboard.agent_overrides.get_team_default_model", fake_team_default)
     monkeypatch.setattr("agent.dashboard.agent_overrides.load_profile", lambda login: None)
 
-    model_id = await resolve_agent_model_id(None, per_thread_model_id="anthropic:claude-opus-4-8")
-    assert model_id == "anthropic:claude-opus-4-8"
+    model_id = await resolve_agent_model_id(None, per_thread_model_id="anthropic:claude-opus-5-5")
+    assert model_id == "anthropic:claude-opus-5-5"
 
 
 def _new_thread_client(created: dict[str, object]) -> object:
