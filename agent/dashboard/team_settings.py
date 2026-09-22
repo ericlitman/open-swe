@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from ..utils.gateway import resolve_gateway_enabled
 from .options import (
     FABLE_MODEL_IDS,
+    RETIRED_MODEL_SUCCESSORS,
     SUPPORTED_MODEL_IDS,
     default_model_pair,
     gate_fable_model,
@@ -190,15 +191,12 @@ def _validate_model_effort_pair(model: str | None, effort: str | None, role: str
         raise ValueError(f"effort {effort!r} not supported by {role} model {model!r}")
 
 
-_RETIRED_MODEL_REPLACEMENTS: dict[str, str] = {}
-
-
 def _normalize_stale_model_pair(
     model: str | None, effort: str | None
 ) -> tuple[str | None, str | None]:
     if model is None:
         return model, effort
-    return _RETIRED_MODEL_REPLACEMENTS.get(model, model), effort
+    return RETIRED_MODEL_SUCCESSORS.get(model, model), effort
 
 
 _MODEL_PAIR_FIELDS: tuple[tuple[str, str], ...] = (
@@ -610,6 +608,8 @@ def _resolve_pair_tier(
     effort: object,
 ) -> tuple[Literal["none", "provider", "product_default"], tuple[str, str]]:
     """Resolve a model pair and identify which fallback tier supplied it."""
+    if isinstance(model, str):
+        model = RETIRED_MODEL_SUCCESSORS.get(model, model)
     if _is_supported_pair(model, effort):
         assert isinstance(model, str) and isinstance(effort, str)
         return "none", (model, effort)

@@ -2,7 +2,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent.dashboard.agent_overrides import normalize_profile_overrides
+from agent.dashboard.agent_overrides import (
+    normalize_profile_overrides,
+    normalize_profile_subagent_overrides,
+)
 from agent.dashboard.options import (
     DEFAULT_MODEL_ID,
     FABLE_MODEL_IDS,
@@ -21,9 +24,10 @@ from agent.dashboard.team_settings import (
     get_team_default_model,
     normalize_team_settings_for_response,
 )
+from agent.utils.model import fallback_model_id_for
 
 STALE_ANTHROPIC = "anthropic:claude-opus-4-7"
-SUPPORTED_ANTHROPIC = "anthropic:claude-opus-4-8"
+SUPPORTED_ANTHROPIC = "anthropic:claude-opus-5-5"
 
 
 def test_provider_fallback_preserves_provider_and_effort() -> None:
@@ -45,13 +49,20 @@ def test_provider_fallback_resolves_openai_within_provider() -> None:
 
 def test_supported_openai_models_include_gpt_5_5_and_gpt_5_6() -> None:
     assert "openai:gpt-5.5" in SUPPORTED_MODEL_IDS
+    assert "openai:gpt-5.6-sol" not in SUPPORTED_MODEL_IDS
+    assert "anthropic:claude-opus-4-8" not in SUPPORTED_MODEL_IDS
     openai_options = [model for model in SUPPORTED_MODELS if model["id"].startswith("openai:")]
     assert [(model["id"], model["label"]) for model in openai_options] == [
         ("openai:gpt-5.5", "GPT-5.5"),
-        ("openai:gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("openai:gpt-6-sol", "GPT-6 Sol"),
         ("openai:gpt-5.6-terra", "GPT-5.6 Terra"),
         ("openai:gpt-5.6-luna", "GPT-5.6 Luna"),
     ]
+
+
+def test_cross_provider_fallbacks_use_current_models() -> None:
+    assert fallback_model_id_for("anthropic:claude-opus-5-5") == "openai:gpt-6-sol"
+    assert fallback_model_id_for("openai:gpt-6-sol") == "anthropic:claude-opus-5-5"
 
 
 def test_supported_models_do_not_hardcode_context_windows() -> None:
@@ -60,6 +71,9 @@ def test_supported_models_do_not_hardcode_context_windows() -> None:
 
 def test_model_profile_context_window_uses_langchain_profile() -> None:
     assert model_profile_context_window("openai:gpt-5.5") == 1_050_000
+    assert model_profile_context_window("openai:gpt-6-sol") == model_profile_context_window(
+        "openai:gpt-5.6-sol"
+    )
 
 
 def test_models_with_profile_context_windows_enriches_copies() -> None:
@@ -68,7 +82,7 @@ def test_models_with_profile_context_windows_enriches_copies() -> None:
     assert all("context_window" not in model for model in openai_models)
     assert {model["id"]: model.get("context_window") for model in enriched} == {
         "openai:gpt-5.5": 1_050_000,
-        "openai:gpt-5.6-sol": 1_050_000,
+        "openai:gpt-6-sol": 1_050_000,
         "openai:gpt-5.6-terra": 1_050_000,
         "openai:gpt-5.6-luna": 1_050_000,
     }
@@ -91,6 +105,60 @@ async def test_team_default_stale_anthropic_stays_on_provider() -> None:
         return_value=settings,
     ):
         assert await get_team_default_model("agent") == (SUPPORTED_ANTHROPIC, "xhigh")
+
+
+@pytest.mark.asyncio
+async def test_team_default_retired_models_keep_effort() -> None:
+    settings = {
+        "default_agent_model": "openai:gpt-5.6-sol",
+        "default_agent_reasoning_effort": "xhigh",
+        "default_reviewer_model": "anthropic:claude-opus-4-8",
+        "default_reviewer_reasoning_effort": "high",
+    }
+    with patch(
+        "agent.dashboard.team_settings.get_team_settings",
+        new_callable=AsyncMock,
+        return_value=settings,
+    ):
+        assert await get_team_default_model("agent") == ("openai:gpt-6-sol", "xhigh")
+        assert await get_team_default_model("reviewer") == (
+            "anthropic:claude-opus-5-5",
+            "high",
+        )
+
+
+@pytest.mark.parametrize(
+    ("retired", "successor", "effort"),
+    [
+        ("openai:gpt-5.6-sol", "openai:gpt-6-sol", "xhigh"),
+        ("anthropic:claude-opus-4-8", "anthropic:claude-opus-5-5", "high"),
+    ],
+)
+def test_raw_profile_retired_models_keep_effort(retired: str, successor: str, effort: str) -> None:
+    profile = {
+        "default_model": retired,
+        "reasoning_effort": effort,
+        "default_subagent_model": retired,
+        "subagent_reasoning_effort": effort,
+    }
+    assert normalize_profile_overrides(profile) == (successor, effort)
+    assert normalize_profile_subagent_overrides(profile) == (successor, effort)
+    updated = ProfileUpdate(
+        default_model=retired,
+        reasoning_effort=effort,
+        default_subagent_model=retired,
+        subagent_reasoning_effort=effort,
+    )
+    assert (updated.default_model, updated.reasoning_effort) == (successor, effort)
+    assert (updated.default_subagent_model, updated.subagent_reasoning_effort) == (
+        successor,
+        effort,
+    )
+    response = normalize_profile_for_response(profile)
+    assert (response["default_model"], response["reasoning_effort"]) == (
+        successor,
+        effort,
+    )
 
 
 @pytest.mark.asyncio
@@ -148,7 +216,7 @@ def test_profile_response_preserves_gpt_5_5_models() -> None:
 
 def test_team_settings_update_preserves_gpt_5_5_models() -> None:
     update = TeamSettingsUpdate(
-        default_agent_model="openai:gpt-5.6-sol",
+        default_agent_model="openai:gpt-6-sol",
         default_agent_reasoning_effort="medium",
         default_agent_subagent_model="openai:gpt-5.5",
         default_agent_subagent_reasoning_effort="medium",
@@ -225,20 +293,20 @@ def test_gate_fable_passthrough_when_enabled() -> None:
 
 def test_gate_fable_swaps_to_opus_when_disabled() -> None:
     assert gate_fable_model("anthropic:claude-fable-5", "high", fable_enabled=False) == (
-        "anthropic:claude-opus-4-8",
+        "anthropic:claude-opus-5-5",
         "high",
     )
 
 
 def test_gate_fable_leaves_non_fable_ids_alone() -> None:
-    assert gate_fable_model("openai:gpt-5.6-sol", "high", fable_enabled=False) == (
-        "openai:gpt-5.6-sol",
+    assert gate_fable_model("openai:gpt-6-sol", "high", fable_enabled=False) == (
+        "openai:gpt-6-sol",
         "high",
     )
 
 
 def test_fable_disabled_fallback_is_non_fable_anthropic() -> None:
     model, effort = fable_disabled_fallback("high")
-    assert model == "anthropic:claude-opus-4-8"
+    assert model == "anthropic:claude-opus-5-5"
     assert model not in FABLE_MODEL_IDS
     assert effort == "high"

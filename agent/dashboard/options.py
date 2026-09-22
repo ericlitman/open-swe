@@ -19,8 +19,8 @@ class ModelOption(TypedDict):
 
 SUPPORTED_MODELS: list[ModelOption] = [
     {
-        "id": "anthropic:claude-opus-4-8",
-        "label": "Opus 4.8",
+        "id": "anthropic:claude-opus-5-5",
+        "label": "Opus 5.5",
         "efforts": ["low", "medium", "high", "xhigh", "max"],
         "default_effort": "high",
         "supports_images": True,
@@ -47,8 +47,8 @@ SUPPORTED_MODELS: list[ModelOption] = [
         "supports_images": True,
     },
     {
-        "id": "openai:gpt-5.6-sol",
-        "label": "GPT-5.6 Sol",
+        "id": "openai:gpt-6-sol",
+        "label": "GPT-6 Sol",
         "efforts": ["none", "low", "medium", "high", "xhigh"],
         "default_effort": "xhigh",
         "supports_images": True,
@@ -99,6 +99,11 @@ SUPPORTED_MODELS: list[ModelOption] = [
 
 SUPPORTED_MODEL_IDS: frozenset[str] = frozenset(m["id"] for m in SUPPORTED_MODELS)
 
+RETIRED_MODEL_SUCCESSORS: dict[str, str] = {
+    "openai:gpt-5.6-sol": "openai:gpt-6-sol",
+    "anthropic:claude-opus-4-8": "anthropic:claude-opus-5-5",
+}
+
 FABLE_MODEL_IDS: frozenset[str] = frozenset(
     m["id"] for m in SUPPORTED_MODELS if m["id"].startswith("anthropic:claude-fable")
 )
@@ -132,14 +137,25 @@ def _profile_loader(provider: str) -> ProfileLoader | None:
 
 
 @lru_cache(maxsize=512)
-def model_profile_context_window(model_id: str) -> int | None:
+def bundled_model_profile(model_id: str, *, inherit: bool = True) -> Mapping[str, object]:
     provider, _, model_name = model_id.partition(":")
     if not provider or not model_name:
-        return None
+        return {}
     loader = _profile_loader(provider)
     if loader is None:
-        return None
+        return {}
     profile = loader(model_name)
+    if profile or not inherit:
+        return profile
+    for retired_id, successor_id in RETIRED_MODEL_SUCCESSORS.items():
+        if model_id == successor_id:
+            return loader(retired_id.partition(":")[2])
+    return profile
+
+
+@lru_cache(maxsize=512)
+def model_profile_context_window(model_id: str) -> int | None:
+    profile = bundled_model_profile(model_id)
     context_window = profile.get("max_input_tokens")
     if isinstance(context_window, int) and context_window > 0:
         return context_window

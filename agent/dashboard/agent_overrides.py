@@ -8,7 +8,12 @@ from typing import Any
 import httpx
 from langgraph_sdk import get_client
 
-from .options import SUPPORTED_MODEL_IDS, model_supports_effort, provider_fallback_pair
+from .options import (
+    RETIRED_MODEL_SUCCESSORS,
+    SUPPORTED_MODEL_IDS,
+    model_supports_effort,
+    provider_fallback_pair,
+)
 from .profiles import PROFILES_NAMESPACE
 from .team_settings import get_team_default_model
 from .user_mappings import cached_login_for_email, login_for_email
@@ -100,6 +105,8 @@ def _normalize_profile_model_pair(
 ) -> tuple[str | None, str | None]:
     model_id = profile.get(model_key)
     effort = profile.get(effort_key)
+    if isinstance(model_id, str):
+        model_id = RETIRED_MODEL_SUCCESSORS.get(model_id, model_id)
     if (
         isinstance(model_id, str)
         and model_id in SUPPORTED_MODEL_IDS

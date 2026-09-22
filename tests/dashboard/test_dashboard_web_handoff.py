@@ -280,7 +280,7 @@ async def test_dashboard_followup_on_busy_thread_queues_images(
     metadata = {
         "source": "dashboard",
         "github_login": "octocat",
-        "resolved_model": "openai:gpt-5.6-sol",
+        "resolved_model": "openai:gpt-6-sol",
     }
     client = _FakeClient(metadata)
     queued_messages: list[object] = []
@@ -344,7 +344,7 @@ async def test_dashboard_followup_on_busy_text_only_thread_rejects_images(
             thread_api.ThreadMessageBody(
                 content="continue in web",
                 images=[thread_api.DashboardImageBody(base64="aW1hZ2U=", mimeType="image/png")],
-                model_id="openai:gpt-5.6-sol",
+                model_id="openai:gpt-6-sol",
                 effort="medium",
             ),
         )

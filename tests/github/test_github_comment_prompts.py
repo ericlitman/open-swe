@@ -175,7 +175,7 @@ def test_harness_profile_replaces_deepagents_base_for_supported_providers() -> N
         assert profile.base_system_prompt == OPEN_SWE_SHARED_BASE
         assert HARNESS_EXCLUDED_TOOLS <= profile.excluded_tools
         assert HARNESS_EXCLUDED_MIDDLEWARE <= profile.excluded_middleware
-    resolved_profile = hp._get_harness_profile("openai:gpt-5.6-sol")
+    resolved_profile = hp._get_harness_profile("openai:gpt-6-sol")
     assert resolved_profile is not None
     assert "write_todos" in resolved_profile.excluded_tools
     assert HARNESS_EXCLUDED_MIDDLEWARE <= resolved_profile.excluded_middleware

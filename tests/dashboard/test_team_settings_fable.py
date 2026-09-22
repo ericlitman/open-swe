@@ -50,8 +50,8 @@ def test_update_defaults_fable_disabled() -> None:
 
 def test_update_accepts_non_fable_model_pair() -> None:
     update = TeamSettingsUpdate(
-        default_agent_model="openai:gpt-5.6-sol",
+        default_agent_model="openai:gpt-6-sol",
         default_agent_reasoning_effort="medium",
     )
-    assert update.default_agent_model == "openai:gpt-5.6-sol"
+    assert update.default_agent_model == "openai:gpt-6-sol"
     assert update.default_agent_reasoning_effort == "medium"
