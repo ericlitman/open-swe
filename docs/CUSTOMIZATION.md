@@ -137,14 +137,9 @@ See `deepagents.backends.LangSmithSandbox` and `agent/integrations/langsmith.py`
 
 ## 2. Model
 
-The model is configured in the `get_agent()` function in `agent/server.py`. By default it uses `openai:gpt-6-sol` with medium reasoning effort, but you can override the model with the `LLM_MODEL_ID` environment variable:
+`get_agent()` in `agent/server.py` resolves the model for each run. A valid per-thread override wins over the user's dashboard profile, and the profile wins over the team default set on the dashboard settings page. When none of them is set, the product default `openai:gpt-5.5` at medium reasoning effort is used (`DEFAULT_MODEL_ID` and `DEFAULT_MODEL_EFFORT` in `agent/dashboard/options.py`). The selectable models are listed in `SUPPORTED_MODELS` in the same file.
 
-```bash
-# Set the model via environment variable (uses provider:model format)
-LLM_MODEL_ID="anthropic:claude-sonnet-5"
-```
-
-If `LLM_MODEL_ID` is not set, the default model (`openai:gpt-6-sol`) is used.
+In local development, `LLM_MODEL_ID` names the model whose API key is checked at startup (`validate_local_dev_llm_config` in `agent/utils/model.py`). It does not select the model a run uses.
 
 Set `OPENAI_BASE_URL` to route direct OpenAI models through a Responses-compatible
 endpoint. Keep the `/v1` suffix. Supply `OPENAI_API_KEY` through the deployment's
