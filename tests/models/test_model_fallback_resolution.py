@@ -55,6 +55,7 @@ def test_supported_openai_models_include_gpt_5_5_and_gpt_5_6() -> None:
     assert [(model["id"], model["label"]) for model in openai_options] == [
         ("openai:gpt-5.5", "GPT-5.5"),
         ("openai:gpt-6-sol", "GPT-6 Sol"),
+        ("openai:gpt-6-astra", "GPT-6 Astra"),
         ("openai:gpt-5.6-sol", "GPT-5.6 Sol"),
         ("openai:gpt-5.6-terra", "GPT-5.6 Terra"),
         ("openai:gpt-5.6-luna", "GPT-5.6 Luna"),
@@ -84,6 +85,7 @@ def test_models_with_profile_context_windows_enriches_copies() -> None:
     assert {model["id"]: model.get("context_window") for model in enriched} == {
         "openai:gpt-5.5": 1_050_000,
         "openai:gpt-6-sol": 1_050_000,
+        "openai:gpt-6-astra": 1_050_000,
         "openai:gpt-5.6-sol": 1_050_000,
         "openai:gpt-5.6-terra": 1_050_000,
         "openai:gpt-5.6-luna": 1_050_000,

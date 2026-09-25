@@ -54,6 +54,13 @@ SUPPORTED_MODELS: list[ModelOption] = [
         "supports_images": True,
     },
     {
+        "id": "openai:gpt-6-astra",
+        "label": "GPT-6 Astra",
+        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+        "default_effort": "xhigh",
+        "supports_images": True,
+    },
+    {
         "id": "openai:gpt-5.6-sol",
         "label": "GPT-5.6 Sol",
         "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
@@ -113,6 +120,7 @@ RETIRED_MODEL_SUCCESSORS: dict[str, str] = {
 # Models without a bundled LangChain profile borrow their predecessor's profile.
 MODEL_PROFILE_PREDECESSORS: dict[str, str] = {
     "openai:gpt-6-sol": "openai:gpt-5.6-sol",
+    "openai:gpt-6-astra": "openai:gpt-5.6-sol",
     "anthropic:claude-opus-5-5": "anthropic:claude-opus-4-8",
 }
 
