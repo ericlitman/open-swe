@@ -49,7 +49,21 @@ SUPPORTED_MODELS: list[ModelOption] = [
     {
         "id": "openai:gpt-6-sol",
         "label": "GPT-6 Sol",
-        "efforts": ["none", "low", "medium", "high", "xhigh"],
+        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+        "default_effort": "xhigh",
+        "supports_images": True,
+    },
+    {
+        "id": "openai:gpt-6-astra",
+        "label": "GPT-6 Astra",
+        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+        "default_effort": "xhigh",
+        "supports_images": True,
+    },
+    {
+        "id": "openai:gpt-5.6-sol",
+        "label": "GPT-5.6 Sol",
+        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
         "default_effort": "xhigh",
         "supports_images": True,
     },
@@ -100,8 +114,14 @@ SUPPORTED_MODELS: list[ModelOption] = [
 SUPPORTED_MODEL_IDS: frozenset[str] = frozenset(m["id"] for m in SUPPORTED_MODELS)
 
 RETIRED_MODEL_SUCCESSORS: dict[str, str] = {
-    "openai:gpt-5.6-sol": "openai:gpt-6-sol",
     "anthropic:claude-opus-4-8": "anthropic:claude-opus-5-5",
+}
+
+# Models without a bundled LangChain profile borrow their predecessor's profile.
+MODEL_PROFILE_PREDECESSORS: dict[str, str] = {
+    "openai:gpt-6-sol": "openai:gpt-5.6-sol",
+    "openai:gpt-6-astra": "openai:gpt-5.6-sol",
+    "anthropic:claude-opus-5-5": "anthropic:claude-opus-4-8",
 }
 
 FABLE_MODEL_IDS: frozenset[str] = frozenset(
@@ -147,9 +167,9 @@ def bundled_model_profile(model_id: str, *, inherit: bool = True) -> Mapping[str
     profile = loader(model_name)
     if profile or not inherit:
         return profile
-    for retired_id, successor_id in RETIRED_MODEL_SUCCESSORS.items():
-        if model_id == successor_id:
-            return loader(retired_id.partition(":")[2])
+    predecessor_id = MODEL_PROFILE_PREDECESSORS.get(model_id)
+    if predecessor_id is not None:
+        return loader(predecessor_id.partition(":")[2])
     return profile
 
 

@@ -4,7 +4,7 @@ from typing import Any, Literal, TypedDict, Unpack, cast
 
 from langchain.chat_models import init_chat_model
 
-from ..dashboard.options import DEFAULT_MODEL_ID, RETIRED_MODEL_SUCCESSORS, bundled_model_profile
+from ..dashboard.options import DEFAULT_MODEL_ID, MODEL_PROFILE_PREDECESSORS, bundled_model_profile
 from .gateway import gateway_env_default, gateway_overrides
 
 OPENAI_RESPONSES_WS_BASE_URL = "wss://api.openai.com/v1"
@@ -178,7 +178,7 @@ def make_model(model_id: str, *, use_gateway: bool | None = None, **kwargs: Unpa
 
     profile = bundled_model_profile(model_id)
     if (
-        model_id in RETIRED_MODEL_SUCCESSORS.values()
+        model_id in MODEL_PROFILE_PREDECESSORS
         and profile
         and not bundled_model_profile(model_id, inherit=False)
     ):

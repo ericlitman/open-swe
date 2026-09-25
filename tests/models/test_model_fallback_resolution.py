@@ -49,12 +49,14 @@ def test_provider_fallback_resolves_openai_within_provider() -> None:
 
 def test_supported_openai_models_include_gpt_5_5_and_gpt_5_6() -> None:
     assert "openai:gpt-5.5" in SUPPORTED_MODEL_IDS
-    assert "openai:gpt-5.6-sol" not in SUPPORTED_MODEL_IDS
+    assert "openai:gpt-5.6-sol" in SUPPORTED_MODEL_IDS
     assert "anthropic:claude-opus-4-8" not in SUPPORTED_MODEL_IDS
     openai_options = [model for model in SUPPORTED_MODELS if model["id"].startswith("openai:")]
     assert [(model["id"], model["label"]) for model in openai_options] == [
         ("openai:gpt-5.5", "GPT-5.5"),
         ("openai:gpt-6-sol", "GPT-6 Sol"),
+        ("openai:gpt-6-astra", "GPT-6 Astra"),
+        ("openai:gpt-5.6-sol", "GPT-5.6 Sol"),
         ("openai:gpt-5.6-terra", "GPT-5.6 Terra"),
         ("openai:gpt-5.6-luna", "GPT-5.6 Luna"),
     ]
@@ -83,6 +85,8 @@ def test_models_with_profile_context_windows_enriches_copies() -> None:
     assert {model["id"]: model.get("context_window") for model in enriched} == {
         "openai:gpt-5.5": 1_050_000,
         "openai:gpt-6-sol": 1_050_000,
+        "openai:gpt-6-astra": 1_050_000,
+        "openai:gpt-5.6-sol": 1_050_000,
         "openai:gpt-5.6-terra": 1_050_000,
         "openai:gpt-5.6-luna": 1_050_000,
     }
@@ -108,7 +112,7 @@ async def test_team_default_stale_anthropic_stays_on_provider() -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_default_retired_models_keep_effort() -> None:
+async def test_team_default_models_keep_effort_and_migrate_retired_opus() -> None:
     settings = {
         "default_agent_model": "openai:gpt-5.6-sol",
         "default_agent_reasoning_effort": "xhigh",
@@ -120,7 +124,7 @@ async def test_team_default_retired_models_keep_effort() -> None:
         new_callable=AsyncMock,
         return_value=settings,
     ):
-        assert await get_team_default_model("agent") == ("openai:gpt-6-sol", "xhigh")
+        assert await get_team_default_model("agent") == ("openai:gpt-5.6-sol", "xhigh")
         assert await get_team_default_model("reviewer") == (
             "anthropic:claude-opus-5-5",
             "high",
@@ -130,7 +134,6 @@ async def test_team_default_retired_models_keep_effort() -> None:
 @pytest.mark.parametrize(
     ("retired", "successor", "effort"),
     [
-        ("openai:gpt-5.6-sol", "openai:gpt-6-sol", "xhigh"),
         ("anthropic:claude-opus-4-8", "anthropic:claude-opus-5-5", "high"),
     ],
 )
