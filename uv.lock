@@ -7,13 +7,6 @@ resolution-markers = [
     "python_full_version < '3.11.5'",
 ]
 
-[options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
-exclude-newer-span = "P7D"
-
-[options.exclude-newer-package]
-certifi = "2026-10-24T04:00:00Z"
-
 [manifest]
 overrides = [
     { name = "deepagents", specifier = "==0.7.0a7" },
