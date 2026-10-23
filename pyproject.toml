@@ -45,7 +45,8 @@ dev = [
 ]
 
 [tool.uv]
-exclude-newer = false
+exclude-newer = "7 days"
+exclude-newer-package = { certifi = false }
 # The langchain-{e2b,daytona,modal,runloop} sandbox integrations still declare a
 # conservative `deepagents<0.7.0` upper bound, but the 0.7.0 alpha keeps the
 # public API they rely on (SandboxBackendProtocol / BaseSandbox) backward

@@ -1,7 +1,7 @@
 {
   "$schema": "https://langgra.ph/schema.json",
   "python_version": "3.12",
-  "api_version": "0.11.1",
+  "api_version": "0.16.0",
   "graphs": {
     "agent": "agent.graphs.agent:traced_agent",
     "reviewer": "agent.graphs.reviewer:traced_reviewer_agent",
@@ -19,7 +19,10 @@
     "RUN tar -xzf /tmp/gh.tgz -C /tmp && install -m 755 /tmp/gh_2.62.0_linux_arm64/bin/gh /usr/local/bin/gh-real && rm -rf /tmp/gh.tgz /tmp/gh_2.62.0_linux_arm64",
     "COPY deploy/sandbox-shims/gh-app-token /usr/local/bin/gh-app-token",
     "COPY deploy/sandbox-shims/gh /usr/local/bin/gh",
-    "RUN chmod 755 /usr/local/bin/gh /usr/local/bin/gh-app-token && git config --system credential.helper '!/usr/local/bin/gh auth git-credential'"
+    "RUN chmod 755 /usr/local/bin/gh /usr/local/bin/gh-app-token && git config --system credential.helper '!/usr/local/bin/gh auth git-credential'",
+    "RUN sed -i -E '/^opentelemetry-(api|exporter-otlp-proto-common|exporter-otlp-proto-http|exporter-prometheus|proto|sdk|semantic-conventions)==/d' /api/constraints.txt",
+    "ADD pyproject.toml uv.lock /tmp/open-swe-lock/",
+    "RUN cd /tmp/open-swe-lock && uv export --frozen --no-emit-project -o /tmp/open-swe-requirements.txt && uv pip install --system --no-cache-dir --no-deps --require-hashes -r /tmp/open-swe-requirements.txt && rm -rf /tmp/open-swe-lock /tmp/open-swe-requirements.txt"
   ],
   "http": {
     "app": "agent.webapp:app"
